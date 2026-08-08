@@ -120,10 +120,24 @@ $ org-semantic search ~/notes "why do atoms get lost from the trap"
 0.736  Ricetta                 ← unrelated
 ```
 
-The model is recorded in the manifest and `search` reads it back — a query has to
-be embedded by the same model as the corpus, so it is not something you can
-choose per search. Asking to index with a different model rebuilds from scratch,
-since vectors from two models are not comparable.
+**Each model keeps its own index**, so you can build several and compare them
+without re-embedding for the one you already had:
+
+```console
+$ org-semantic models ~/notes
+name             dim  trained on      status
+bge-small-en     384  English         built default
+e5-small         384  100 languages   built
+…
+
+$ org-semantic search ~/notes "why do atoms get lost from the trap" --model e5-small
+```
+
+`search --model` selects between built indexes; it cannot impose a model on
+vectors built by another, because a query must be embedded by whatever embedded
+the corpus. With one index built it is used automatically; with several the
+default wins unless you name one. Naming a model you have not built is an error
+listing what you have.
 
 **Scores are only comparable within one model.** BGE spreads its cosines widely
 (0.37–0.74 above); E5 compresses everything into roughly 0.73–0.93. Only the
@@ -292,12 +306,18 @@ modified** — org-semantic only reads them.
 
 | path | 951-note vault | what it is |
 |---|---|---|
-| `.org-semantic/chunks.json` | 6.0 MB | every chunk: text, heading path, line, `:ID:`, tags, TODO |
-| `.org-semantic/vectors.f32` | 9.7 MB | one 384-float embedding per chunk, in the same order |
-| `.org-semantic/manifest.json` | 0.2 MB | what the semantic index has seen: per-note hash and `(mtime, size)` |
+| `.org-semantic/semantic/<model>/chunks.json` | 6.0 MB | every chunk: text, heading path, line, `:ID:`, tags, TODO |
+| `.org-semantic/semantic/<model>/vectors.f32` | 9.7 MB | one embedding per chunk, in the same order (384–1024 floats) |
+| `.org-semantic/semantic/<model>/manifest.json` | 0.2 MB | what that model's index has seen: per-note hash and `(mtime, size)` |
 | `.org-semantic/tantivy/` | 4.9 MB | the lexical index, including its own copy of each chunk |
 | `.org-semantic/lexical.json` | 0.2 MB | the same, for the lexical index |
 | | **21 MB** | |
+
+One directory per model, each complete in itself. The chunk table is duplicated
+rather than shared because a vector is paired to its chunk **by position**: a
+shared table would silently go stale for every model you did not index in that
+run, and a same-count-different-content mismatch is exactly what a length check
+cannot catch. 6 MB is a small price for being unable to get that wrong.
 
 **The two indexes are independent.** Each carries everything its own hits need
 and its own record of which notes it is behind on, so either can be built,

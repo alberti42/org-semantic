@@ -1551,6 +1551,28 @@ fn save_index(
     Ok(bytes.len())
 }
 
+/// Where one model's semantic index lives.
+///
+/// A directory per model, each holding a complete `chunks.json` +
+/// `vectors.f32` + `manifest.json`.  Self-contained rather than sharing one
+/// chunk table, because a vector is paired to a chunk **by position**: a shared
+/// table would silently go stale for every model not indexed in that run, and a
+/// same-count-different-content mismatch is exactly what a length check cannot
+/// catch.  The duplicated chunk table costs 6 MB against a 10–26 MB vector file,
+/// and buys the ability to keep several models built and compare them without
+/// re-embedding.
+fn semantic_dir(vault: &Path, m: &Model) -> PathBuf {
+    state_dir(vault).join("semantic").join(m.name)
+}
+
+/// Which models have a semantic index built for this vault.
+fn built_models(vault: &Path) -> Vec<&'static Model> {
+    MODELS
+        .iter()
+        .filter(|m| semantic_dir(vault, m).join("manifest.json").exists())
+        .collect()
+}
+
 fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
@@ -1767,7 +1789,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
     org_files(vault, &mut files)?;
     files.sort();
 
-    let dir = state_dir(vault);
+    let dir = semantic_dir(vault, m);
     let old = if full { None } else { load_index(&dir, m) };
 
     let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
@@ -1994,19 +2016,38 @@ fn describe_filters(f: &Filters) -> String {
     parts.join(" ")
 }
 
-fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
-    let dir = state_dir(vault);
-    // Which model to use is not a choice here: a query must be embedded by the
-    // same model as the corpus, so it is read from the manifest.
-    let manifest: Manifest = serde_json::from_slice(
-        &fs::read(dir.join("manifest.json"))
-            .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
-    )?;
-    let m = model_named(&manifest.model)?;
-    let chunks: Vec<Chunk> = serde_json::from_slice(
-        &fs::read(dir.join("chunks.json"))
-            .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
-    )?;
+/// Pick which model's index to search.
+///
+/// `--model` selects an index here rather than overriding one: the query must be
+/// embedded by whatever embedded the corpus, so it can only name an index that
+/// exists, never impose a model on vectors built by another.
+fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static Model> {
+    let built = built_models(vault);
+    let names = || built.iter().map(|m| m.name).collect::<Vec<_>>().join(", ");
+    match want {
+        Some(m) if built.iter().any(|b| b.name == m.name) => Ok(m),
+        Some(m) if built.is_empty() => {
+            Err(anyhow!("no semantic index; run `index --model {}`", m.name))
+        }
+        Some(m) => Err(anyhow!("no {} index; built: {}", m.name, names())),
+        None => match built.as_slice() {
+            [] => Err(anyhow!("no semantic index — run `index` first")),
+            [only] => Ok(only),
+            // Several to choose from: prefer the default, else make it explicit
+            // rather than picking for them.
+            many => many
+                .iter()
+                .find(|m| m.name == DEFAULT_MODEL)
+                .copied()
+                .ok_or_else(|| anyhow!("several indexes ({}); pass --model", names())),
+        },
+    }
+}
+
+fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>) -> Result<()> {
+    let m = choose_index(vault, want)?;
+    let dir = semantic_dir(vault, m);
+    let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
     let raw = fs::read(dir.join("vectors.f32"))?;
     let n = raw.len() / (m.dim * 4);
     if n != chunks.len() {
@@ -2374,12 +2415,17 @@ fn main() -> Result<()> {
             // not the same as a fused result list: `--lexical` returns purely
             // word-ranked hits, `search` alone purely meaning-ranked ones.
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
+            // Selects which index to search when several models are built.
+            let want = match args.iter().skip(4).position(|a| a == "--model") {
+                Some(i) => Some(model_named(args.get(i + 5).map(String::as_str).unwrap_or(""))?),
+                None => None,
+            };
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
                 let fold = args.iter().skip(4).any(|a| a == "--fold");
                 cmd_lexical(Path::new(vault), query, k, conjunction, fold)
             } else {
-                cmd_search(Path::new(vault), query, k)
+                cmd_search(Path::new(vault), query, k, want)
             }
         }
         Some("chunks") => {
@@ -2397,14 +2443,30 @@ fn main() -> Result<()> {
             cmd_chunks(Path::new(vault), needle, &lang)
         }
         Some("models") => {
-            println!("{:<14} {:>5}  {}", "name", "dim", "trained on");
+            // With a vault, say which of them are actually built for it.
+            let built = args.get(2).map(|v| {
+                built_models(Path::new(v)).iter().map(|m| m.name).collect::<Vec<_>>()
+            });
+            println!("{:<14} {:>5}  {:<14}  {}", "name", "dim", "trained on", "status");
             for m in MODELS {
-                let dflt = if m.name == DEFAULT_MODEL { "  (default)" } else { "" };
-                println!("{:<14} {:>5}  {}{dflt}", m.name, m.dim, m.about);
+                let status = match &built {
+                    Some(b) if b.contains(&m.name) => "built",
+                    Some(_) => "",
+                    None => "",
+                };
+                let dflt = if m.name == DEFAULT_MODEL { "default" } else { "" };
+                println!(
+                    "{:<14} {:>5}  {:<14}  {status} {dflt}",
+                    m.name, m.dim, m.about
+                );
+            }
+            if built.is_none() {
+                println!("\nPass a vault to see which are built for it.");
             }
             println!(
-                "\nA model is chosen at `index` time and recorded; `search` reads it back, \n\
-                 since a query must be embedded by the same model as the corpus."
+                "\nEach model keeps its own index under .org-semantic/semantic/<model>/, so\n\
+                 several can be built side by side and compared without re-embedding.\n\
+                 `search --model NAME` picks between them."
             );
             Ok(())
         }
@@ -2424,10 +2486,11 @@ fn main() -> Result<()> {
              \x20 org-semantic index   <vault> [--full|--rehash] [--model NAME]  semantic\n\
              \x20 org-semantic index   <vault> --lexical|--both [--full|--rehash]\n\
              \x20                             [--lang en-US[,de-DE,…] | auto] [--fold]\n\
-             \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
+             \x20 org-semantic search  <vault> <query> [k] [--model NAME]\n\
+             \x20 org-semantic search  <vault> <query> [k] --lexical [--any]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
-             \x20 org-semantic models                          embedding models available\n\
+             \x20 org-semantic models  [vault]                 embedding models\n\
              \x20 org-semantic bench   <vault> [n] [config]"
         )),
     }
@@ -2637,6 +2700,12 @@ mod tests {
 
     // ------------------------------------------------- index round-trip / prune
 
+    /// The default model's index directory, which is where the semantic tests
+    /// seed and assert.
+    fn sem(v: &Path) -> PathBuf {
+        semantic_dir(v, model_named(DEFAULT_MODEL).unwrap())
+    }
+
     fn scratch(name: &str) -> PathBuf {
         // No tempfile dependency: a per-test directory under the system temp,
         // removed first so a previous failed run cannot leak into this one.
@@ -2682,7 +2751,7 @@ mod tests {
             .collect();
         let m = model_named(DEFAULT_MODEL).unwrap();
         let vectors = vec![0.0f32; chunks.len() * m.dim];
-        save_index(&state_dir(dir), m, &chunks, &vectors, files, stamps).unwrap();
+        save_index(&semantic_dir(dir, m), m, &chunks, &vectors, files, stamps).unwrap();
     }
 
     /// Regression: a run whose only change is a deleted note produced nothing to
@@ -2698,7 +2767,7 @@ mod tests {
         fs::remove_file(v.join(&b)).unwrap();
         cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
 
-        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
+        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
         assert_eq!(ix.chunks[0].path, a);
         assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
@@ -2714,9 +2783,9 @@ mod tests {
         let v = scratch("unchanged");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
+        let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
         cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
-        assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
+        assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
     }
 
     /// Regression: `cmd_search` embedded the query with a hardcoded BGE while the
@@ -2731,7 +2800,7 @@ mod tests {
         seed(&v, &[a.as_str()]);
 
         let manifest: Manifest =
-            serde_json::from_slice(&fs::read(state_dir(&v).join("manifest.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(sem(&v).join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest.model, DEFAULT_MODEL, "the index records its model");
         assert!(model_named(&manifest.model).is_ok(), "and search can resolve it back");
 
@@ -2743,11 +2812,44 @@ mod tests {
     }
 
     #[test]
+    fn several_model_indexes_coexist_and_are_chosen_between() {
+        let v = scratch("choose-model");
+        let a = note(&v, "alpha");
+        assert!(choose_index(&v, None).is_err(), "nothing is built yet");
+
+        seed(&v, &[a.as_str()]);
+        let dflt = model_named(DEFAULT_MODEL).unwrap();
+        assert_eq!(choose_index(&v, None).unwrap().name, dflt.name);
+
+        // A second model is built *beside* the first, not over it — which is the
+        // point: comparing two models must not cost re-embedding for the one you
+        // already had.
+        let other = model_named("e5-small").unwrap();
+        save_index(
+            &semantic_dir(&v, other),
+            other,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(built_models(&v).len(), 2, "both survive");
+        assert!(sem(&v).join("vectors.f32").exists(), "the first is untouched");
+
+        assert_eq!(choose_index(&v, Some(other)).unwrap().name, "e5-small");
+        assert_eq!(choose_index(&v, None).unwrap().name, dflt.name, "default breaks the tie");
+        // Naming a model with no index is an error, not a silent fallback: it
+        // would otherwise answer from vectors the caller did not ask for.
+        assert!(choose_index(&v, Some(model_named("e5-large").unwrap())).is_err());
+    }
+
+    #[test]
     fn save_and_load_round_trip() {
         let v = scratch("roundtrip");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(ix.chunks.len(), 1);
         assert_eq!(ix.vectors.len(), model_named(DEFAULT_MODEL).unwrap().dim);
         assert_eq!(ix.by_path.get(&a).map(Vec::len), Some(1));
@@ -2758,12 +2860,12 @@ mod tests {
         let v = scratch("mismatch");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let f = state_dir(&v).join("vectors.f32");
+        let f = sem(&v).join("vectors.f32");
         let mut bytes = fs::read(&f).unwrap();
         bytes.truncate(bytes.len() - 4);
         fs::write(&f, bytes).unwrap();
         assert!(
-            load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
+            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
             "positional coupling means a mismatch returns wrong answers, not errors"
         );
     }
@@ -2773,11 +2875,11 @@ mod tests {
         let v = scratch("model");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let f = state_dir(&v).join("manifest.json");
+        let f = sem(&v).join("manifest.json");
         let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
         m["model"] = serde_json::Value::String("SomeOtherModel".into());
         fs::write(&f, serde_json::to_vec(&m).unwrap()).unwrap();
-        assert!(load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).is_none());
+        assert!(load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none());
     }
 
     #[test]
@@ -2794,8 +2896,8 @@ mod tests {
         let v = scratch("restamp");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        let old_stamp = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
+        let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
+        let old_stamp = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
         let abs = v.join(&a);
 
         // Move mtime without touching content.
@@ -2805,9 +2907,9 @@ mod tests {
 
         cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
 
-        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(
-            fs::read(state_dir(&v).join("vectors.f32")).unwrap(),
+            fs::read(sem(&v).join("vectors.f32")).unwrap(),
             before,
             "identical content must not be re-embedded"
         );
