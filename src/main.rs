@@ -2,7 +2,7 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full|--rehash] refresh (incremental by default)
+//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US]  refresh the index
 //!   org-semantic search  <vault> <query> [k]      semantic search, grouped by note
 //!   org-semantic keyword <vault> <query> [k] [--any]  lexical search, same predicates
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
@@ -62,6 +62,9 @@ struct Chunk {
     /// Priority cookie (`[#A]`) of the nearest enclosing heading.
     #[serde(default)]
     priority: Option<char>,
+    /// Language code in effect here, from a `# ltex: language=de-DE` comment or
+    /// the configured default.
+    lang: String,
     text: String,
 }
 
@@ -91,10 +94,49 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Read a language from an ltex magic comment, e.g. `# ltex: language=de-DE`.
+///
+/// Deliberately ltex-ls-plus' syntax rather than something new: a note that
+/// declares its language for grammar checking has already said what this needs
+/// to know, and one annotation serving both is better than two that can drift.
+/// The keyword is configurable for anyone not using ltex.
+///
+/// Applies from its own line onward, as ltex does, so a note may switch
+/// part-way.
+fn ltex_language(line: &str, keyword: &str) -> Option<String> {
+    let t = line.trim().trim_start_matches('#').trim();
+    let rest = strip_prefix_ci(t, &format!("{keyword}:"))?;
+    for part in rest.split_whitespace() {
+        if let Some(v) = strip_prefix_ci(part, "language=") {
+            let v = v.trim().trim_matches('"');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// A note's path relative to the vault root — what chunks and the manifest
 /// store, so the index survives the vault being moved.
 fn rel_path(vault: &Path, f: &Path) -> String {
     f.strip_prefix(vault).unwrap_or(f).to_string_lossy().into_owned()
+}
+
+/// Where a note's language comes from.
+#[derive(Clone, Debug)]
+struct LangConfig {
+    /// Used when a note says nothing.  Mirrors `lsp-ltex-plus-language`, whose
+    /// default is "en-US".
+    default: String,
+    /// Magic-comment keyword, `ltex` unless someone wants their own.
+    keyword: String,
+}
+
+impl Default for LangConfig {
+    fn default() -> Self {
+        LangConfig { default: "en-US".into(), keyword: "ltex".into() }
+    }
 }
 
 // ----------------------------------------------------------------- chunking
@@ -184,7 +226,7 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 /// Deliberately not a full org parser: for deciding where one passage ends and
 /// the next begins, headings, property drawers and tags are the whole of what
 /// matters, and the available Rust org parsers are alpha-stage.
-fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
+fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     // Tags of each open heading, so a chunk can inherit from every ancestor.
@@ -204,6 +246,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
     let mut buf = String::new();
     let mut in_drawer = false;
     let mut seen_heading = false;
+    let mut cur_lang = lang.default.clone();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
     // they apply to the whole file either way.
@@ -227,7 +270,8 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
                  title: &str,
                  file_tags: &[String],
                  id: &Option<String>,
-                 line: usize| {
+                 line: usize,
+                 lang: &str| {
         let body = buf.trim();
         if body.is_empty() {
             return;
@@ -255,6 +299,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
                 tags: tags.clone(),
                 todo: todo.clone(),
                 priority,
+                lang: lang.to_string(),
                 text: piece,
             });
         }
@@ -285,7 +330,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
 
         if let Some(h) = parse_headline(line, &todo_keywords) {
             flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
-                  &title, &file_tags, &cur_id, cur_line);
+                  &title, &file_tags, &cur_id, cur_line, &cur_lang);
             buf.clear();
             let depth = h.level.saturating_sub(1);
             stack.truncate(depth);
@@ -313,6 +358,14 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
             title = rest.trim().to_string();
             continue;
         }
+        // Takes effect from here on, so a note may switch language part-way.
+        if let Some(l) = ltex_language(line, &lang.keyword) {
+            flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
+                  &title, &file_tags, &cur_id, cur_line, &cur_lang);
+            buf.clear();
+            cur_lang = l;
+            continue;
+        }
         // Other keywords, drawer ends and comments are markup, not prose.
         if trimmed.starts_with("#+") || trimmed.starts_with("# ") || trimmed == ":END:" {
             continue;
@@ -322,7 +375,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
         buf.push('\n');
     }
     flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
-          &title, &file_tags, &cur_id, cur_line);
+          &title, &file_tags, &cur_id, cur_line, &cur_lang);
     chunks
 }
 
@@ -588,6 +641,9 @@ struct Filters {
     /// Any may match: `dir:` names alternative subtrees to look in.
     dirs: Vec<String>,
     todos: Vec<String>,
+    /// Language codes; any may match.  `lang:de` matches `de-DE`, so a query
+    /// need not know the regional variant a note declared.
+    langs: Vec<String>,
     text: String,
 }
 
@@ -597,6 +653,7 @@ impl Filters {
             && self.not_tags.is_empty()
             && self.dirs.is_empty()
             && self.todos.is_empty()
+            && self.langs.is_empty()
     }
 
     fn matches(&self, c: &Chunk) -> bool {
@@ -617,8 +674,23 @@ impl Filters {
         if !self.dirs.is_empty() && !self.dirs.iter().any(|d| under(&c.path, d)) {
             return false;
         }
+        if !self.langs.is_empty()
+            && !self.langs.iter().any(|l| lang_matches(&c.lang, l))
+        {
+            return false;
+        }
         true
     }
+}
+
+/// Does a chunk's language answer to WANT?
+///
+/// Matched at subtag boundaries, so `lang:de` finds `de-DE` and `de-AT` while
+/// `lang:de-DE` finds only the one.
+fn lang_matches(c: &str, want: &str) -> bool {
+    c.eq_ignore_ascii_case(want)
+        || c.to_ascii_lowercase()
+            .starts_with(&format!("{}-", want.to_ascii_lowercase()))
 }
 
 /// Is PATH inside directory D?  Compared component-wise so that `dir:03 Lit`
@@ -637,7 +709,7 @@ fn under(path: &str, d: &str) -> bool {
 /// tag.  Anything unrecognised stays in the free text, so a colon inside an
 /// ordinary word — a URL, a ratio — is never mistaken for a predicate.
 fn parse_query(q: &str) -> Filters {
-    const KEYS: [&str; 3] = ["tag", "dir", "todo"];
+    const KEYS: [&str; 4] = ["tag", "dir", "todo", "lang"];
     let mut f = Filters::default();
     let mut text: Vec<String> = Vec::new();
     let mut rest = q.trim();
@@ -656,6 +728,7 @@ fn parse_query(q: &str) -> Filters {
                     "tag" if neg => f.not_tags.push(v),
                     "tag" => f.tags.push(v),
                     "dir" => f.dirs.push(v),
+                    "lang" => f.langs.push(v),
                     _ => f.todos.push(v),
                 }
             }
@@ -908,7 +981,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 
 /// Recorded so that changing the embedding model invalidates every vector.
 /// Vectors from two different models are not comparable, and mixing them
@@ -1032,7 +1105,7 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -1146,7 +1219,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, &path, text), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, &path, text, lang), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -1342,6 +1415,9 @@ fn describe_filters(f: &Filters) -> String {
     for t in &f.todos {
         parts.push(format!("todo:{t}"));
     }
+    for l in &f.langs {
+        parts.push(format!("lang:{l}"));
+    }
     parts.join(" ")
 }
 
@@ -1427,7 +1503,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()));
         }
         if chunks.len() >= n {
             break;
@@ -1505,7 +1581,7 @@ fn cmd_tokens(vault: &Path, limit: usize) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -1565,7 +1641,11 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
         let (chunks, _, _) =
-            enforce_token_limit(chunk_file(f, &rel_path(vault, f), &text), &measure, TOKEN_LIMIT);
+            enforce_token_limit(
+                chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()),
+                &measure,
+                TOKEN_LIMIT,
+            );
         println!("\n=== {} — {} chunks", f.display(), chunks.len());
         for (i, c) in chunks.iter().enumerate() {
             let full = format!("{}\n{}", c.heading, c.text);
@@ -1647,7 +1727,28 @@ fn main() -> Result<()> {
             // `--rehash` reads and hashes every note, ignoring stamps: the
             // backstop for a change that left mtime untouched.
             let rehash = args.iter().any(|a| a == "--rehash");
-            cmd_index(Path::new(vault), full, rehash)
+            let mut lang = LangConfig::default();
+            for (i, a) in args.iter().enumerate() {
+                match a.as_str() {
+                    "--lang" => {
+                        if let Some(v) = args.get(i + 1) {
+                            lang.default = v.clone();
+                        }
+                    }
+                    "--lang-keyword" => {
+                        if let Some(v) = args.get(i + 1) {
+                            lang.keyword = v.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if lang.default.eq_ignore_ascii_case("auto") {
+                return Err(anyhow!(
+                    "--lang auto needs a language classifier, which is not built yet"
+                ));
+            }
+            cmd_index(Path::new(vault), full, rehash, &lang)
         }
         Some("search") => {
             let vault = args
@@ -1736,7 +1837,7 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), "Note.org", text)
+        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, &LangConfig::default())
     }
 
     #[test]
@@ -1847,6 +1948,7 @@ mod tests {
             tags: Vec::new(),
             todo: None,
             priority: None,
+            lang: "en-US".into(),
             text: long,
         }];
         let (out, resplit, _) = enforce_token_limit(c, &words, 50);
@@ -1867,6 +1969,7 @@ mod tests {
             tags: Vec::new(),
             todo: None,
             priority: None,
+            lang: "en-US".into(),
             text: "short body".into(),
         }];
         let (out, resplit, _) = enforce_token_limit(c, &words, 50);
@@ -1930,6 +2033,7 @@ mod tests {
                 tags: Vec::new(),
                 todo: None,
                 priority: None,
+                lang: "en-US".into(),
                 text: "body".into(),
             });
             files.insert((*p).to_string(), content_hash(&fs::read(dir.join(p)).unwrap()));
@@ -1953,7 +2057,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -1968,7 +2072,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -2033,7 +2137,7 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
 
         let ix = load_index(&state_dir(&v)).unwrap();
         assert_eq!(
@@ -2112,7 +2216,7 @@ mod tests {
 
     #[test]
     fn chunks_store_a_vault_relative_path() {
-        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n");
+        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", &LangConfig::default());
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
 
@@ -2127,6 +2231,7 @@ mod tests {
             tags: tags.iter().map(|s| s.to_string()).collect(),
             todo: todo.map(str::to_string),
             priority: None,
+            lang: "en-US".into(),
             text: "body".into(),
         }
     }
@@ -2204,10 +2309,10 @@ mod tests {
         let b = note(&v, "beta");
         let chunks = vec![
             Chunk { path: a.clone(), id: None, heading: "alpha".into(), line: 1,
-                    tags: vec!["physics".into()], todo: None, priority: None,
+                    tags: vec!["physics".into()], todo: None, priority: None, lang: "en-US".into(),
                     text: "the quick brown fox".into() },
             Chunk { path: b.clone(), id: None, heading: "beta".into(), line: 1,
-                    tags: vec!["german".into()], todo: None, priority: None,
+                    tags: vec!["german".into()], todo: None, priority: None, lang: "en-US".into(),
                     text: "der schnelle braune Fuchs".into() },
         ];
         let dir = state_dir(&v);
@@ -2235,7 +2340,7 @@ mod tests {
         let b = note(&v, "beta");
         let mk = |p: &str, t: &str| Chunk {
             path: p.into(), id: None, heading: p.into(), line: 1,
-            tags: vec![], todo: None, priority: None, text: t.into(),
+            tags: vec![], todo: None, priority: None, lang: "en-US".into(), text: t.into(),
         };
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
@@ -2249,5 +2354,65 @@ mod tests {
         assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap().is_empty());
         assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10, true).unwrap().len(), 1);
         assert_eq!(lexical::doc_count(&dir).unwrap(), 1);
+    }
+
+    // ------------------------------------------------------------- languages
+
+    #[test]
+    fn ltex_magic_comment_is_read() {
+        assert_eq!(ltex_language("# ltex: language=de-DE", "ltex").as_deref(), Some("de-DE"));
+        assert_eq!(ltex_language("#ltex: language=fr", "ltex").as_deref(), Some("fr"));
+        assert_eq!(
+            ltex_language("# ltex: language=de-DE enabled=false", "ltex").as_deref(),
+            Some("de-DE"),
+            "other ltex settings on the line are ignored, not tripped over"
+        );
+        assert_eq!(ltex_language("# ltex: enabled=false", "ltex"), None);
+        assert_eq!(ltex_language("# just a comment", "ltex"), None);
+        assert_eq!(
+            ltex_language("# spell: language=it", "spell").as_deref(),
+            Some("it"),
+            "the keyword is configurable"
+        );
+    }
+
+    /// ltex applies a magic comment from its own line onward, so a note may
+    /// switch part-way; chunks before it keep the default.
+    #[test]
+    fn language_applies_from_its_line_onward() {
+        let c = chunks_of(
+            "#+title: T\n* English part\nalpha\n\n# ltex: language=de-DE\n* Deutscher Teil\nbeta\n",
+        );
+        let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
+        assert_eq!(by("alpha").lang, "en-US", "the configured default");
+        assert_eq!(by("beta").lang, "de-DE");
+    }
+
+    #[test]
+    fn the_default_language_is_configurable() {
+        let cfg = LangConfig { default: "it-IT".into(), keyword: "ltex".into() };
+        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", &cfg);
+        assert_eq!(c[0].lang, "it-IT");
+    }
+
+    #[test]
+    fn lang_predicate_matches_at_subtag_boundaries() {
+        assert!(lang_matches("de-DE", "de"), "lang:de finds de-DE");
+        assert!(lang_matches("de-DE", "de-DE"));
+        assert!(lang_matches("de-AT", "de"));
+        assert!(!lang_matches("de-DE", "de-AT"));
+        assert!(!lang_matches("en-US", "de"));
+    }
+
+    #[test]
+    fn lang_filters_the_candidate_set() {
+        let mut de = chunk_with("a.org", &[], None);
+        de.lang = "de-DE".into();
+        let mut en = chunk_with("b.org", &[], None);
+        en.lang = "en-US".into();
+        let f = parse_query("lang:de Wörter");
+        assert!(f.matches(&de));
+        assert!(!f.matches(&en));
+        assert_eq!(f.text, "Wörter", "the predicate does not reach the embedder");
     }
 }
