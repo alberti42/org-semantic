@@ -53,6 +53,8 @@ reach:
 - `#+title:` names the note, rather than guessing from the filename.
 - Every chunk carries its enclosing `:ID:`, so an editor can jump to a hit
   through `org-id` instead of by file position — surviving renames and moves.
+- Tags are parsed with org's inheritance rules and become search filters, as do
+  TODO keywords and priorities.
 - Heading breadcrumbs (`Note > Section > Subsection`) are prepended to each
   chunk before embedding, so a passage carries the context it sits under.
 
@@ -87,8 +89,36 @@ org-semantic tokens <dir> [limit]             token-length distribution of the c
 org-semantic bench  <dir> [n] [config]        embedding throughput
 ```
 
-The index lives in `<dir>/.org-semantic/` — three files, about 10 MB for a thousand
-notes. Add it to your `.gitignore`; it is derived data and rebuilds in one pass.
+### Filters
+
+A query may carry predicates, which narrow *which* chunks are searched before
+anything is embedded:
+
+```sh
+org-semantic search ~/notes 'tag:Literature estimating eigenvalues on hardware'
+org-semantic search ~/notes 'dir:"01 Daily notes" atom sorting in a tweezer array'
+org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
+```
+
+| predicate | meaning |
+|---|---|
+| `tag:x` | chunk carries tag `x`; repeating narrows (all must match) |
+| `-tag:x` | chunk does not carry it |
+| `dir:x` | note lives under directory `x`; repeating widens (any may match) |
+| `todo:x` | nearest enclosing heading has TODO keyword `x` |
+
+Tags follow org's own inheritance — `#+filetags:` plus every ancestor heading's
+tags — so a chunk under `* Project :work:` is found by `tag:work` whether or not
+its own subheading says so. Values with spaces take quotes; matching is
+case-insensitive; anything unrecognised (`2:1`, a URL) stays as search text.
+
+Predicates are stripped before embedding, so query syntax never reaches the
+model — `tag:work` would otherwise have it looking for notes *about* the words
+"tag" and "work".
+
+The index lives in `<dir>/.org-semantic/` — three files, about 10 MB for a
+thousand notes. Add it to your `.gitignore`; it is derived data and rebuilds in
+one pass.
 
 **Indexing is incremental by default.** A file whose modification time and size
 are unchanged is not even read; one whose timestamp moved is read and hashed, and
@@ -130,14 +160,13 @@ another vault is a different argument, not a different configuration.
 Early, and useful. It indexes an org tree, searches it, and updates
 incrementally.
 
-The roadmap is org depth rather than more formats: filtering by tag, TODO state
-and `#+filetags:`; honouring `:noexport:` and archived subtrees; treating
-`#+begin_src` blocks distinctly, since code embedded as prose pollutes results;
-and an Emacs command that jumps to a hit.
+The roadmap is org depth rather than more formats: honouring `:noexport:` and
+archived subtrees; treating `#+begin_src` blocks distinctly, since code embedded
+as prose pollutes results; a lexical mode over the same index, for the exact
+identifiers embeddings are weak at; and an Emacs command that jumps to a hit.
 
-Known gaps: no hybrid keyword search yet — embeddings are weak on exact
-identifiers, and a technical vault is full of them — and re-split pieces of a
-long section share their section's line number.
+Known gaps: no lexical search yet, and re-split pieces of a long section share
+their section's line number.
 
 ## Prior art
 

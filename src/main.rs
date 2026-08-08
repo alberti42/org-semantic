@@ -36,6 +36,9 @@ const STATE_DIR: &str = ".org-semantic";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Chunk {
+    /// Relative to the vault root.  Relative rather than absolute so the index
+    /// survives the vault being moved or renamed, and so `dir:` predicates are
+    /// expressible without knowing where the vault lives.
     path: String,
     /// The `:ID:` of the nearest enclosing node, when it has one — this is what
     /// lets Emacs jump through `org-id` rather than by file position.
@@ -44,6 +47,17 @@ struct Chunk {
     heading: String,
     /// 1-based, for the case where there is no `:ID:` to jump by.
     line: usize,
+    /// Effective org tags: `#+filetags:` plus every ancestor heading's tags plus
+    /// its own.  Org inherits tags down the outline, so a chunk under
+    /// `* Project :work:` carries `work` whether or not its own heading says so.
+    #[serde(default)]
+    tags: Vec<String>,
+    /// TODO keyword of the nearest enclosing heading, if it has one.
+    #[serde(default)]
+    todo: Option<String>,
+    /// Priority cookie (`[#A]`) of the nearest enclosing heading.
+    #[serde(default)]
+    priority: Option<char>,
     text: String,
 }
 
@@ -73,21 +87,113 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// A note's path relative to the vault root — what chunks and the manifest
+/// store, so the index survives the vault being moved.
+fn rel_path(vault: &Path, f: &Path) -> String {
+    f.strip_prefix(vault).unwrap_or(f).to_string_lossy().into_owned()
+}
+
 // ----------------------------------------------------------------- chunking
+
+/// TODO keywords recognised when a file does not declare its own with
+/// `#+TODO:`.  An explicit set rather than an all-caps heuristic: headings like
+/// "GPU benchmarks" or "PID loop" would otherwise lose their first word.
+const DEFAULT_TODO_KEYWORDS: &[&str] = &[
+    "TODO", "NEXT", "STARTED", "WAITING", "HOLD", "SOMEDAY", "PROJ",
+    "DONE", "CANCELLED", "CANCELED",
+];
+
+/// What a heading line says, once its markup is taken off.
+struct Headline {
+    level: usize,
+    todo: Option<String>,
+    priority: Option<char>,
+    text: String,
+    tags: Vec<String>,
+}
+
+/// Parse `** TODO [#A] Fix the laser :hardware:urgent:`.
+///
+/// Each part is optional and order is fixed by org: stars, keyword, priority,
+/// title, tags.  Anything unrecognised stays in the title rather than being
+/// dropped, so a heading is never silently truncated.
+fn parse_headline(line: &str, todo_keywords: &[String]) -> Option<Headline> {
+    let level = heading_level(line)?;
+    let mut rest = line[level..].trim();
+
+    let todo = rest
+        .split_whitespace()
+        .next()
+        .filter(|w| todo_keywords.iter().any(|k| k == w))
+        .map(str::to_string);
+    if let Some(k) = &todo {
+        rest = rest[k.len()..].trim_start();
+    }
+
+    let mut priority = None;
+    if let Some(after) = rest.strip_prefix("[#") {
+        let mut cs = after.chars();
+        if let (Some(c), Some(']')) = (cs.next(), cs.next()) {
+            priority = Some(c);
+            rest = after[c.len_utf8() + 1..].trim_start();
+        }
+    }
+
+    // Tags are a trailing `:a:b:` run, and org allows word characters plus
+    // @#%_ inside them.  Checked rather than assumed: a heading ending in a
+    // bare ratio like "2:1" must not be read as a tag block.
+    let mut tags = Vec::new();
+    if let Some((head, last)) = rest.rsplit_once(char::is_whitespace) {
+        if last.len() > 2 && last.starts_with(':') && last.ends_with(':') {
+            let parts: Vec<&str> = last.trim_matches(':').split(':').collect();
+            let ok = !parts.is_empty()
+                && parts.iter().all(|t| {
+                    !t.is_empty()
+                        && t.chars().all(|c| c.is_alphanumeric() || "_@#%-".contains(c))
+                });
+            if ok {
+                tags = parts.iter().map(|t| t.to_string()).collect();
+                rest = head.trim_end();
+            }
+        }
+    }
+
+    Some(Headline { level, todo, priority, text: rest.to_string(), tags })
+}
+
+/// Split `:a:b:` as written by `#+filetags:`, tolerating a bare space-separated
+/// list, which org also accepts.
+fn parse_tag_list(s: &str) -> Vec<String> {
+    s.split(|c: char| c == ':' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 
 /// Split TEXT into chunks, one per heading, further split when a section runs
 /// past `MAX_CHARS`.
 ///
+/// REL is the note's path relative to the vault root, and is what the chunk
+/// stores.  PATH is only used to fall back to the filename when a note has no
+/// `#+title:`.
+///
 /// Deliberately not a full org parser: for deciding where one passage ends and
-/// the next begins, headings and property drawers are the whole of what
+/// the next begins, headings, property drawers and tags are the whole of what
 /// matters, and the available Rust org parsers are alpha-stage.
-fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
+fn chunk_file(path: &Path, rel: &str, text: &str) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
+    // Tags of each open heading, so a chunk can inherit from every ancestor.
+    let mut tag_stack: Vec<Vec<String>> = Vec::new();
+    let mut todo_stack: Vec<Option<String>> = Vec::new();
+    let mut prio_stack: Vec<Option<char>> = Vec::new();
     let mut title = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mut file_tags: Vec<String> = Vec::new();
+    let mut todo_keywords: Vec<String> =
+        DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
     let mut file_id: Option<String> = None;
     let mut cur_id: Option<String> = None;
     let mut cur_line = 1usize;
@@ -95,10 +201,27 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
     let mut in_drawer = false;
     let mut seen_heading = false;
 
+    // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
+    // they apply to the whole file either way.
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = strip_prefix_ci(t, "#+filetags:") {
+            file_tags.extend(parse_tag_list(rest));
+        } else if let Some(rest) = strip_prefix_ci(t, "#+todo:") {
+            todo_keywords.extend(parse_tag_list(rest).into_iter().filter(|w| w != "|"));
+        } else if let Some(rest) = strip_prefix_ci(t, "#+seq_todo:") {
+            todo_keywords.extend(parse_tag_list(rest).into_iter().filter(|w| w != "|"));
+        }
+    }
+
     let flush = |chunks: &mut Vec<Chunk>,
                  buf: &str,
                  stack: &[String],
+                 tag_stack: &[Vec<String>],
+                 todo_stack: &[Option<String>],
+                 prio_stack: &[Option<char>],
                  title: &str,
+                 file_tags: &[String],
                  id: &Option<String>,
                  line: usize| {
         let body = buf.trim();
@@ -110,12 +233,24 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
         } else {
             format!("{} > {}", title, stack.join(" > "))
         };
+        // File tags, then every ancestor's, deduplicated but order-stable.
+        let mut tags: Vec<String> = Vec::new();
+        for t in file_tags.iter().chain(tag_stack.iter().flatten()) {
+            if !tags.iter().any(|x| x == t) {
+                tags.push(t.clone());
+            }
+        }
+        let todo = todo_stack.iter().rev().find_map(|t| t.clone());
+        let priority = prio_stack.iter().rev().find_map(|p| *p);
         for piece in split_long(body) {
             chunks.push(Chunk {
-                path: path.to_string_lossy().into_owned(),
+                path: rel.to_string(),
                 id: id.clone(),
                 heading: heading.clone(),
                 line,
+                tags: tags.clone(),
+                todo: todo.clone(),
+                priority,
                 text: piece,
             });
         }
@@ -144,25 +279,25 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
             continue;
         }
 
-        // Heading: one or more stars followed by a space.
-        if let Some(level) = heading_level(line) {
-            flush(&mut chunks, &buf, &stack, &title, &cur_id, cur_line);
+        if let Some(h) = parse_headline(line, &todo_keywords) {
+            flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
+                  &title, &file_tags, &cur_id, cur_line);
             buf.clear();
-            let text = line[level..].trim();
-            // Drop a trailing tag block, ":tag1:tag2:", which is markup rather
-            // than prose and would otherwise skew the embedding.
-            let text = text.rsplit_once(char::is_whitespace).map_or(text, |(l, r)| {
-                if r.starts_with(':') && r.ends_with(':') && r.len() > 2 {
-                    l.trim_end()
-                } else {
-                    text
-                }
-            });
-            stack.truncate(level.saturating_sub(1));
-            while stack.len() < level - 1 {
+            let depth = h.level.saturating_sub(1);
+            stack.truncate(depth);
+            tag_stack.truncate(depth);
+            todo_stack.truncate(depth);
+            prio_stack.truncate(depth);
+            while stack.len() < depth {
                 stack.push(String::new());
+                tag_stack.push(Vec::new());
+                todo_stack.push(None);
+                prio_stack.push(None);
             }
-            stack.push(text.to_string());
+            stack.push(h.text);
+            tag_stack.push(h.tags);
+            todo_stack.push(h.todo);
+            prio_stack.push(h.priority);
             // Inherited until the node declares its own in the drawer below.
             cur_id = file_id.clone();
             cur_line = n;
@@ -182,7 +317,8 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
         buf.push_str(line);
         buf.push('\n');
     }
-    flush(&mut chunks, &buf, &stack, &title, &cur_id, cur_line);
+    flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
+          &title, &file_tags, &cur_id, cur_line);
     chunks
 }
 
@@ -430,11 +566,126 @@ fn normalize(v: &mut [f32]) {
 
 // ------------------------------------------------------------------ commands
 
+// ------------------------------------------------------------------ filters
+
+/// Metadata predicates pulled out of a query string.
+///
+/// Kept separate from the free text for two reasons.  They constrain *which*
+/// chunks are considered, which is meaningful for any retrieval method, whereas
+/// text operators only mean something to a keyword index — so a lexical mode
+/// added later applies the very same predicates.  And stripping them stops
+/// query syntax reaching the embedder: `tag:work` in the embedded string would
+/// have the model looking for notes *about* the words "tag" and "work".
+#[derive(Default, Debug, PartialEq)]
+struct Filters {
+    /// All must be present: successive `tag:` terms narrow.
+    tags: Vec<String>,
+    not_tags: Vec<String>,
+    /// Any may match: `dir:` names alternative subtrees to look in.
+    dirs: Vec<String>,
+    todos: Vec<String>,
+    text: String,
+}
+
+impl Filters {
+    fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+            && self.not_tags.is_empty()
+            && self.dirs.is_empty()
+            && self.todos.is_empty()
+    }
+
+    fn matches(&self, c: &Chunk) -> bool {
+        if !self.tags.iter().all(|t| c.tags.iter().any(|x| x.eq_ignore_ascii_case(t))) {
+            return false;
+        }
+        if self.not_tags.iter().any(|t| c.tags.iter().any(|x| x.eq_ignore_ascii_case(t))) {
+            return false;
+        }
+        if !self.todos.is_empty()
+            && !self
+                .todos
+                .iter()
+                .any(|t| c.todo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(t)))
+        {
+            return false;
+        }
+        if !self.dirs.is_empty() && !self.dirs.iter().any(|d| under(&c.path, d)) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Is PATH inside directory D?  Compared component-wise so that `dir:03 Lit`
+/// does not match `03 Literature review/…`.
+fn under(path: &str, d: &str) -> bool {
+    let d = d.trim_end_matches('/');
+    if d.is_empty() {
+        return true;
+    }
+    path.strip_prefix(d).is_some_and(|r| r.starts_with('/'))
+}
+
+/// Split a query into predicates and free text.
+///
+/// Accepts `key:value`, `key:"value with spaces"` and a leading `-` to negate a
+/// tag.  Anything unrecognised stays in the free text, so a colon inside an
+/// ordinary word — a URL, a ratio — is never mistaken for a predicate.
+fn parse_query(q: &str) -> Filters {
+    const KEYS: [&str; 3] = ["tag", "dir", "todo"];
+    let mut f = Filters::default();
+    let mut text: Vec<String> = Vec::new();
+    let mut rest = q.trim();
+
+    while !rest.is_empty() {
+        let (tok, tail) = next_token(rest);
+        rest = tail;
+        let (neg, body) = match tok.strip_prefix('-') {
+            Some(b) => (true, b),
+            None => (false, tok.as_str()),
+        };
+        match body.split_once(':') {
+            Some((k, v)) if KEYS.contains(&k.to_ascii_lowercase().as_str()) && !v.is_empty() => {
+                let v = v.trim_matches('"').to_string();
+                match k.to_ascii_lowercase().as_str() {
+                    "tag" if neg => f.not_tags.push(v),
+                    "tag" => f.tags.push(v),
+                    "dir" => f.dirs.push(v),
+                    _ => f.todos.push(v),
+                }
+            }
+            _ => text.push(tok),
+        }
+    }
+    f.text = text.join(" ");
+    f
+}
+
+/// One whitespace-separated token, except that a quoted run counts as one —
+/// including after a `key:`, so `dir:"03 Literature review"` survives.
+fn next_token(s: &str) -> (String, &str) {
+    let s = s.trim_start();
+    let mut out = String::new();
+    let mut in_quotes = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                out.push(c);
+            }
+            c if c.is_whitespace() && !in_quotes => return (out, &s[i..]),
+            c => out.push(c),
+        }
+    }
+    (out, "")
+}
+
 // ------------------------------------------------------------ index on disk
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 /// Recorded so that changing the embedding model invalidates every vector.
 /// Vectors from two different models are not comparable, and mixing them
@@ -581,7 +832,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
     let (mut by_stamp, mut by_hash, mut changed_files, mut new_files) = (0usize, 0, 0, 0);
 
     for f in &files {
-        let path = f.to_string_lossy().into_owned();
+        let path = rel_path(vault, f);
         let stamp = stamp_of(f);
 
         // Fast path: same mtime and size as when we last looked.
@@ -658,7 +909,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
     let mut resplit = 0usize;
 
     for f in &files {
-        let path = f.to_string_lossy().into_owned();
+        let path = rel_path(vault, f);
         if reused.contains(path.as_str()) {
             if let Some(ix) = &old {
                 for &j in ix.by_path.get(&path).map(Vec::as_slice).unwrap_or(&[]) {
@@ -672,7 +923,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, text), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, &path, text), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -779,6 +1030,23 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
     Ok(())
 }
 
+fn describe_filters(f: &Filters) -> String {
+    let mut parts = Vec::new();
+    for t in &f.tags {
+        parts.push(format!("tag:{t}"));
+    }
+    for t in &f.not_tags {
+        parts.push(format!("-tag:{t}"));
+    }
+    for d in &f.dirs {
+        parts.push(format!("dir:{d}"));
+    }
+    for t in &f.todos {
+        parts.push(format!("todo:{t}"));
+    }
+    parts.join(" ")
+}
+
 fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     let dir = state_dir(vault);
     let chunks: Vec<Chunk> = serde_json::from_slice(
@@ -798,21 +1066,41 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
 
+    // Predicates constrain which chunks are considered; only the remaining free
+    // text is embedded.
+    let f = parse_query(query);
+    let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&chunks[i])).collect();
+    if !f.is_empty() {
+        println!(
+            "filter: {} → {} of {n} chunks",
+            describe_filters(&f),
+            candidates.len()
+        );
+    }
+    if candidates.is_empty() {
+        println!("no chunk matches those filters");
+        return Ok(());
+    }
+    if f.text.trim().is_empty() {
+        return Err(anyhow!("nothing to search for: the query is only filters"));
+    }
+
     let t0 = Instant::now();
     let mut model = model()?;
     let load = t0.elapsed();
 
     let t1 = Instant::now();
     let mut q = model
-        .embed(&[format!("{QUERY_PREFIX}{query}")], None)
+        .embed(&[format!("{QUERY_PREFIX}{}", f.text)], None)
         .map_err(|e| anyhow!("embedding query: {e}"))?
         .remove(0);
     normalize(&mut q);
     let embed = t1.elapsed();
 
     let t2 = Instant::now();
-    let mut scored: Vec<(f32, usize)> = (0..n)
-        .map(|i| {
+    let mut scored: Vec<(f32, usize)> = candidates
+        .iter()
+        .map(|&i| {
             let s = &vectors[i * DIM..(i + 1) * DIM];
             (s.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i)
         })
@@ -852,6 +1140,15 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
         if let Some(id) = &c.id {
             println!("       id:{id}");
         }
+        if !c.tags.is_empty() || c.todo.is_some() {
+            let todo = c.todo.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
+            let tags = if c.tags.is_empty() {
+                String::new()
+            } else {
+                format!(":{}:", c.tags.join(":"))
+            };
+            println!("       {todo}{tags}");
+        }
         for (score, i) in hits {
             let c = &chunks[*i];
             let section = c
@@ -866,9 +1163,10 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
         }
     }
     eprintln!(
-        "\n[model load {:.0}ms · query embed {:.0}ms · search over {n} vectors {:.2}ms]",
+        "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
         embed.as_secs_f64() * 1000.0,
+        candidates.len(),
         search.as_secs_f64() * 1000.0
     );
     Ok(())
@@ -884,7 +1182,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &text));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text));
         }
         if chunks.len() >= n {
             break;
@@ -962,7 +1260,7 @@ fn cmd_tokens(vault: &Path, limit: usize) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &text));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -1021,7 +1319,8 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
-        let (chunks, _, _) = enforce_token_limit(chunk_file(f, &text), &measure, TOKEN_LIMIT);
+        let (chunks, _, _) =
+            enforce_token_limit(chunk_file(f, &rel_path(vault, f), &text), &measure, TOKEN_LIMIT);
         println!("\n=== {} — {} chunks", f.display(), chunks.len());
         for (i, c) in chunks.iter().enumerate() {
             let full = format!("{}\n{}", c.heading, c.text);
@@ -1126,7 +1425,7 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), text)
+        chunk_file(Path::new("/vault/Note.org"), "Note.org", text)
     }
 
     #[test]
@@ -1230,10 +1529,13 @@ mod tests {
     fn enforce_token_limit_accounts_for_the_heading() {
         let long = para("w", 200);
         let c = vec![Chunk {
-            path: "/v/n.org".into(),
+            path: "n.org".into(),
             id: Some("id".into()),
             heading: para("h", 10),
             line: 1,
+            tags: Vec::new(),
+            todo: None,
+            priority: None,
             text: long,
         }];
         let (out, resplit, _) = enforce_token_limit(c, &words, 50);
@@ -1247,10 +1549,13 @@ mod tests {
     #[test]
     fn enforce_token_limit_leaves_conforming_chunks_alone() {
         let c = vec![Chunk {
-            path: "/v/n.org".into(),
+            path: "n.org".into(),
             id: None,
             heading: "H".into(),
             line: 3,
+            tags: Vec::new(),
+            todo: None,
+            priority: None,
             text: "short body".into(),
         }];
         let (out, resplit, _) = enforce_token_limit(c, &words, 50);
@@ -1289,17 +1594,19 @@ mod tests {
         d
     }
 
+    /// Write a note and return its vault-relative path, which is what the
+    /// index stores.
     fn note(dir: &Path, name: &str) -> String {
         let body = format!(
             ":PROPERTIES:\n:ID: id-{name}\n:END:\n#+title: {name}\n\n* S\nText about {name}.\n"
         );
-        let p = dir.join(format!("{name}.org"));
-        fs::write(&p, &body).unwrap();
-        p.to_string_lossy().into_owned()
+        let rel = format!("{name}.org");
+        fs::write(dir.join(&rel), &body).unwrap();
+        rel
     }
 
     /// Seed an index without embedding anything: vectors are zeros, which is
-    /// all the reuse and prune paths care about.
+    /// all the reuse and prune paths inspect.  PATHS are vault-relative.
     fn seed(dir: &Path, paths: &[&str]) {
         let mut chunks = Vec::new();
         let mut files = std::collections::BTreeMap::new();
@@ -1309,13 +1616,16 @@ mod tests {
                 id: None,
                 heading: "H".into(),
                 line: 1,
+                tags: Vec::new(),
+                todo: None,
+                priority: None,
                 text: "body".into(),
             });
-            files.insert((*p).to_string(), content_hash(&fs::read(p).unwrap()));
+            files.insert((*p).to_string(), content_hash(&fs::read(dir.join(p)).unwrap()));
         }
         let stamps = paths
             .iter()
-            .map(|p| ((*p).to_string(), stamp_of(Path::new(p)).unwrap()))
+            .map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap()))
             .collect();
         let vectors = vec![0.0f32; chunks.len() * DIM];
         save_index(&state_dir(dir), &chunks, &vectors, files, stamps).unwrap();
@@ -1331,7 +1641,7 @@ mod tests {
         let b = note(&v, "beta");
         seed(&v, &[a.as_str(), b.as_str()]);
 
-        fs::remove_file(&b).unwrap();
+        fs::remove_file(v.join(&b)).unwrap();
         cmd_index(&v, false, false).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
@@ -1405,11 +1715,12 @@ mod tests {
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
         let old_stamp = load_index(&state_dir(&v)).unwrap().stamps[&a];
+        let abs = v.join(&a);
 
         // Move mtime without touching content.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let body = fs::read(&a).unwrap();
-        fs::write(&a, &body).unwrap();
+        let body = fs::read(&abs).unwrap();
+        fs::write(&abs, &body).unwrap();
 
         cmd_index(&v, false, false).unwrap();
 
@@ -1420,5 +1731,144 @@ mod tests {
             "identical content must not be re-embedded"
         );
         assert_ne!(ix.stamps[&a], old_stamp, "the new stamp must be recorded");
+    }
+
+    // ------------------------------------------------------------ org parsing
+
+    #[test]
+    fn headline_parts_are_separated() {
+        let kw: Vec<String> = DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
+        let h = parse_headline("** TODO [#A] Fix the laser :hardware:urgent:", &kw).unwrap();
+        assert_eq!(h.level, 2);
+        assert_eq!(h.todo.as_deref(), Some("TODO"));
+        assert_eq!(h.priority, Some('A'));
+        assert_eq!(h.text, "Fix the laser");
+        assert_eq!(h.tags, vec!["hardware", "urgent"]);
+    }
+
+    #[test]
+    fn a_heading_without_markup_keeps_all_its_words() {
+        let kw: Vec<String> = DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
+        let h = parse_headline("* GPU benchmarks", &kw).unwrap();
+        assert_eq!(h.todo, None, "an all-caps word is not a keyword unless declared");
+        assert_eq!(h.text, "GPU benchmarks");
+        assert!(h.tags.is_empty());
+    }
+
+    /// A trailing `2:1` is a ratio, not a tag block.
+    #[test]
+    fn a_trailing_colon_run_that_is_not_tags_is_left_alone() {
+        let kw: Vec<String> = DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
+        let h = parse_headline("* Duty cycle 2:1", &kw).unwrap();
+        assert_eq!(h.text, "Duty cycle 2:1");
+        assert!(h.tags.is_empty());
+    }
+
+    #[test]
+    fn tags_are_inherited_from_ancestors_and_filetags() {
+        let c = chunks_of(
+            "#+title: T\n#+filetags: :physics:\n\n* Project :work:\nalpha\n\n** Sub :urgent:\nbeta\n\n* Other\ngamma\n",
+        );
+        let by = |needle: &str| c.iter().find(|x| x.text.trim() == needle).unwrap();
+        assert_eq!(by("alpha").tags, vec!["physics", "work"]);
+        assert_eq!(by("beta").tags, vec!["physics", "work", "urgent"], "inherits the ancestor");
+        assert_eq!(by("gamma").tags, vec!["physics"], "sibling does not inherit");
+    }
+
+    #[test]
+    fn todo_and_priority_are_inherited_by_the_body_beneath_them() {
+        let c = chunks_of("#+title: T\n* TODO [#B] Task\nalpha\n\n** Detail\nbeta\n");
+        let by = |needle: &str| c.iter().find(|x| x.text.trim() == needle).unwrap();
+        assert_eq!(by("alpha").todo.as_deref(), Some("TODO"));
+        assert_eq!(by("alpha").priority, Some('B'));
+        assert_eq!(by("beta").todo.as_deref(), Some("TODO"), "nearest enclosing heading wins");
+    }
+
+    #[test]
+    fn a_file_can_declare_its_own_todo_keywords() {
+        let c = chunks_of("#+title: T\n#+TODO: LATER | SHIPPED\n* LATER Rewire\nalpha\n");
+        assert_eq!(c[0].todo.as_deref(), Some("LATER"));
+        assert_eq!(c[0].heading, "T > Rewire");
+    }
+
+    #[test]
+    fn tags_do_not_reach_the_embedded_text_or_the_heading() {
+        let c = chunks_of("#+title: T\n#+filetags: :physics:\n* Section :work:\nbody\n");
+        assert_eq!(c[0].heading, "T > Section");
+        assert!(!c[0].text.contains("work"));
+        assert_eq!(c[0].tags, vec!["physics", "work"]);
+    }
+
+    #[test]
+    fn chunks_store_a_vault_relative_path() {
+        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n");
+        assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
+    }
+
+    // --------------------------------------------------------------- filters
+
+    fn chunk_with(path: &str, tags: &[&str], todo: Option<&str>) -> Chunk {
+        Chunk {
+            path: path.into(),
+            id: None,
+            heading: "H".into(),
+            line: 1,
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            todo: todo.map(str::to_string),
+            priority: None,
+            text: "body".into(),
+        }
+    }
+
+    #[test]
+    fn predicates_are_split_from_free_text() {
+        let f = parse_query("tag:work dir:\"03 Literature review\" -tag:draft atom heating");
+        assert_eq!(f.tags, vec!["work"]);
+        assert_eq!(f.not_tags, vec!["draft"]);
+        assert_eq!(f.dirs, vec!["03 Literature review"]);
+        assert_eq!(f.text, "atom heating", "only the prose reaches the embedder");
+    }
+
+    /// A colon inside an ordinary word is not a predicate.
+    #[test]
+    fn unknown_keys_and_bare_colons_stay_in_the_text() {
+        let f = parse_query("see https://example.com/a ratio 2:1 note:kept rabi");
+        assert!(f.is_empty());
+        assert_eq!(f.text, "see https://example.com/a ratio 2:1 note:kept rabi");
+    }
+
+    #[test]
+    fn tags_narrow_and_dirs_widen() {
+        let both = chunk_with("a.org", &["work", "urgent"], None);
+        let one = chunk_with("a.org", &["work"], None);
+        let f = parse_query("tag:work tag:urgent x");
+        assert!(f.matches(&both), "all tags must be present");
+        assert!(!f.matches(&one));
+
+        let f = parse_query("dir:alpha dir:beta x");
+        assert!(f.matches(&chunk_with("alpha/n.org", &[], None)), "any dir may match");
+        assert!(f.matches(&chunk_with("beta/n.org", &[], None)));
+        assert!(!f.matches(&chunk_with("gamma/n.org", &[], None)));
+    }
+
+    #[test]
+    fn negation_and_todo_filter() {
+        let f = parse_query("-tag:draft x");
+        assert!(!f.matches(&chunk_with("a.org", &["draft"], None)));
+        assert!(f.matches(&chunk_with("a.org", &["final"], None)));
+
+        let f = parse_query("todo:next x");
+        assert!(f.matches(&chunk_with("a.org", &[], Some("NEXT"))), "case-insensitive");
+        assert!(!f.matches(&chunk_with("a.org", &[], Some("DONE"))));
+        assert!(!f.matches(&chunk_with("a.org", &[], None)));
+    }
+
+    /// `dir:03 Lit` must not match `03 Literature review/…`.
+    #[test]
+    fn dir_matches_whole_components_only() {
+        assert!(under("03 Literature review/x.org", "03 Literature review"));
+        assert!(under("03 Literature review/2025/x.org", "03 Literature review"));
+        assert!(!under("03 Literature review/x.org", "03 Lit"));
+        assert!(!under("other/x.org", "03 Literature review"));
     }
 }
