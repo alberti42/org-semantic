@@ -83,29 +83,30 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 
 ```
 org-semantic index   <dir> [--full|--rehash] [--lang en-US|auto] [--fold]
-org-semantic search  <dir> <query> [k]        semantic search, grouped per note
-org-semantic lexical <dir> <query> [k] [--any] [--fold]
+org-semantic search  <dir> <query> [k]        ranked by meaning; --lexical by words
+org-semantic search  <dir> <query> [k] [--lexical [--any] [--fold]]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
 ```
 
-### Two modes, deliberately separate
+### Two rankings, deliberately unmixed
 
-`search` ranks by meaning, scoring the query's embedding against every chunk's.
-`lexical` ranks by words, using [tantivy](https://github.com/quickwit-oss/tantivy)
-— BM25 scoring over an inverted index, with a real query language: phrases,
-boolean operators, field boosts. Terms are ANDed by default, since OR would rank
-anything merely containing "oscillations" for the query "Rabi oscillations";
-`--any` restores OR. They are separate commands
-rather than one fused ranking because a phrase or a boolean means nothing to an
-embedding: fusing them would mix results that honoured your query with results
-that could not.
+Without a flag, `search` ranks by **meaning**, scoring the query's embedding
+against every chunk's. With `--lexical` it ranks by **words**, using
+[tantivy](https://github.com/quickwit-oss/tantivy) — BM25 over an inverted index,
+with a real query language: phrases, boolean operators, field boosts. Terms are
+ANDed by default, since OR would rank anything merely containing "oscillations"
+for the query "Rabi oscillations"; `--any` restores OR.
+
+One command, but never one merged result list. A phrase or a boolean means
+nothing to an embedding, so fusing the two would mix hits that honoured your
+query with hits that could not.
 
 The difference is not academic. Searching your notes for the surname `Gehm`:
 
 ```console
-$ org-semantic lexical ~/notes Gehm
+$ org-semantic search ~/notes Gehm --lexical
 13.181  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
 
 $ org-semantic search ~/notes Gehm

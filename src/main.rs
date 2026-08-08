@@ -3,8 +3,8 @@
 //! Prototype.  Commands:
 //!
 //!   org-semantic index  <vault> [--full|--rehash] [--lang en-US] [--fold]
-//!   org-semantic search  <vault> <query> [k]      semantic search, grouped by note
-//!   org-semantic lexical <vault> <query> [k] [--any] [--fold]
+//!   org-semantic search  <vault> <query> [k] [--lexical]  ranked by meaning, or
+//!                                                          by words with --lexical
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
 //!   org-semantic bench  <vault> [n] [config]      embedding throughput
@@ -1998,27 +1998,22 @@ fn main() -> Result<()> {
         Some("search") => {
             let vault = args
                 .get(2)
-                .ok_or_else(|| anyhow!("usage: search <vault> <query> [k]"))?;
+                .ok_or_else(|| anyhow!("usage: search <vault> <query> [k] [--lexical]"))?;
             let query = args
                 .get(3)
-                .ok_or_else(|| anyhow!("usage: search <vault> <query> [k]"))?;
+                .ok_or_else(|| anyhow!("usage: search <vault> <query> [k] [--lexical]"))?;
             let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
-            cmd_search(Path::new(vault), query, k)
-        }
-        Some("lexical") => {
-            let vault = args
-                .get(2)
-                .ok_or_else(|| anyhow!("usage: lexical <vault> <query> [k]"))?;
-            let query = args
-                .get(3)
-                .ok_or_else(|| anyhow!("usage: lexical <vault> <query> [k]"))?;
-            let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
-            // Flags are looked for only past the positional arguments, so a
-            // query whose text happens to be `--any` stays a query.  Emacs will
-            // be building argv programmatically, where that is easy to hit.
-            let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-            let fold = args.iter().skip(4).any(|a| a == "--fold");
-            cmd_lexical(Path::new(vault), query, k, conjunction, fold)
+            // One command, two rankings, never mixed.  A shared entry point is
+            // not the same as a fused result list: `--lexical` returns purely
+            // word-ranked hits, `search` alone purely meaning-ranked ones.
+            let lexical = args.iter().skip(4).any(|a| a == "--lexical");
+            if lexical {
+                let conjunction = !args.iter().skip(4).any(|a| a == "--any");
+                let fold = args.iter().skip(4).any(|a| a == "--fold");
+                cmd_lexical(Path::new(vault), query, k, conjunction, fold)
+            } else {
+                cmd_search(Path::new(vault), query, k)
+            }
         }
         Some("chunks") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
@@ -2047,8 +2042,7 @@ fn main() -> Result<()> {
         _ => Err(anyhow!(
             "usage:\n\
              \x20 org-semantic index   <vault> [--full|--rehash] [--lang en-US|auto] [--fold]\n\
-             \x20 org-semantic search  <vault> <query> [k]\n\
-             \x20 org-semantic lexical <vault> <query> [k] [--any] [--fold]\n\
+             \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
              \x20 org-semantic bench   <vault> [n] [config]"
