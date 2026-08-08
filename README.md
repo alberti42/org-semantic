@@ -84,7 +84,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ```
 org-semantic index   <dir> [--full|--rehash] [--lang en-US|auto] [--fold]
 org-semantic search  <dir> <query> [k]        semantic search, grouped per note
-org-semantic keyword <dir> <query> [k] [--any] [--fold]
+org-semantic lexical <dir> <query> [k] [--any] [--fold]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
@@ -93,7 +93,7 @@ org-semantic bench   <dir> [n] [config]        embedding throughput
 ### Two modes, deliberately separate
 
 `search` ranks by meaning, scoring the query's embedding against every chunk's.
-`keyword` ranks by words, using [tantivy](https://github.com/quickwit-oss/tantivy)
+`lexical` ranks by words, using [tantivy](https://github.com/quickwit-oss/tantivy)
 — BM25 scoring over an inverted index, with a real query language: phrases,
 boolean operators, field boosts. Terms are ANDed by default, since OR would rank
 anything merely containing "oscillations" for the query "Rabi oscillations";
@@ -105,7 +105,7 @@ that could not.
 The difference is not academic. Searching your notes for the surname `Gehm`:
 
 ```console
-$ org-semantic keyword ~/notes Gehm
+$ org-semantic lexical ~/notes Gehm
 13.181  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
 
 $ org-semantic search ~/notes Gehm
@@ -193,7 +193,7 @@ modified** — org-semantic only reads them.
 | | **18 MB** | |
 
 `chunks.json` is the source of truth and is shared: `search` scores against
-`vectors.f32` and `keyword` against `tantivy/`, but both resolve a hit back to
+`vectors.f32` and `lexical` against `tantivy/`, but both resolve a hit back to
 the same record, so either mode can be displayed, filtered and jumped to
 identically. `manifest.json` is used only while indexing, never while searching.
 
