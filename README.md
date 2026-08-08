@@ -92,10 +92,12 @@ org-semantic bench   <dir> [n] [config]        embedding throughput
 
 ### Two modes, deliberately separate
 
-`search` ranks by meaning; `keyword` ranks by words, with tantivy's query
-language — phrases, boolean operators, field boosts. Terms are ANDed by default,
-since OR would rank anything merely containing "oscillations" for the query
-"Rabi oscillations"; `--any` restores OR. They are separate commands
+`search` ranks by meaning, scoring the query's embedding against every chunk's.
+`keyword` ranks by words, using [tantivy](https://github.com/quickwit-oss/tantivy)
+— BM25 scoring over an inverted index, with a real query language: phrases,
+boolean operators, field boosts. Terms are ANDed by default, since OR would rank
+anything merely containing "oscillations" for the query "Rabi oscillations";
+`--any` restores OR. They are separate commands
 rather than one fused ranking because a phrase or a boolean means nothing to an
 embedding: fusing them would mix results that honoured your query with results
 that could not.
@@ -243,19 +245,24 @@ incrementally.
 
 The roadmap is org depth rather than more formats: honouring `:noexport:` and
 archived subtrees; treating `#+begin_src` blocks distinctly, since code embedded
-as prose pollutes results; a lexical mode over the same index, for the exact
-identifiers embeddings are weak at; and an Emacs command that jumps to a hit.
+as prose pollutes results; and an Emacs command that jumps to a hit.
 
-Known gaps: no lexical search yet, and re-split pieces of a long section share
-their section's line number.
+Known gaps. The two modes are not fused into a single ranking — deliberately,
+since a phrase or a boolean means nothing to an embedding, so a combined result
+list would mix hits that honoured your query with hits that could not. If that
+is ever added it should be a third subcommand using reciprocal rank fusion, and
+only once there is evidence it beats picking the right mode. Auto language
+detection mislabels about 4% of chunks on a code-heavy vault. Re-split pieces of
+a long section share their section's line number.
 
 ## Prior art
 
 [markdown-vdb](https://github.com/geckse/markdown-vdb) reaches a very similar
 architecture for Markdown — filesystem-native, CLI-first, no server.
 [mdvault](https://pypi.org/project/mdvault/) and
-[markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) add hybrid
-BM25/FTS5 search, which org-semantic does not have yet. All three are
+[markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) combine
+BM25/FTS5 with semantic search into one ranking; org-semantic has both but keeps
+them as separate commands, for the reason given under Status. All three are
 Markdown-first; org-semantic exists because none of them parse org.
 
 ## Licence
