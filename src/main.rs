@@ -3288,3 +3288,77 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod prefix_check {
+    use super::*;
+
+    const PASSAGES: [&str; 6] = [
+        "Atoms escape the optical tweezer when the trap depth drops below the recoil energy.",
+        "Die Woerter der deutschen Sprache sind manchmal sehr lang und zusammengesetzt.",
+        "La pasta va cotta in acqua salata per circa otto minuti.",
+        "Rabi oscillations between two hyperfine ground states are driven by a microwave field.",
+        "Der Zug faehrt jeden Morgen um sieben Uhr vom Hauptbahnhof ab.",
+        "Compiling the kernel requires a working C toolchain and about two gigabytes of disk.",
+    ];
+    /// (query, index of the passage that should win)
+    const QUERIES: [(&str, usize); 5] = [
+        ("why do atoms get lost from the trap", 0),
+        ("how long should I boil pasta", 2),
+        ("driving transitions with microwaves", 3),
+        ("wann faehrt der Zug ab", 4),
+        ("building software from source", 5),
+    ];
+
+    fn score(which: EmbeddingModel, q_prefix: &str, p_prefix: &str) -> (usize, f32) {
+        let mut model = model_with(which, None, false).unwrap();
+        let docs: Vec<String> = PASSAGES.iter().map(|p| format!("{p_prefix}{p}")).collect();
+        let mut dv = model.embed(&docs, None).unwrap();
+        dv.iter_mut().for_each(|v| normalize(v));
+        let (mut hits, mut margin) = (0usize, 0.0f32);
+        for (q, want) in QUERIES {
+            let mut qv = model.embed(&[format!("{q_prefix}{q}")], None).unwrap();
+            normalize(&mut qv[0]);
+            let mut s: Vec<(f32, usize)> = dv
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.iter().zip(qv[0].iter()).map(|(a, b)| a * b).sum::<f32>(), i))
+                .collect();
+            s.sort_by(|a, b| b.0.total_cmp(&a.0));
+            if s[0].1 == want {
+                hits += 1;
+            }
+            // How far the intended passage sits above the best distractor.
+            let got = s.iter().find(|(_, i)| *i == want).unwrap().0;
+            let best_other = s.iter().find(|(_, i)| *i != want).unwrap().0;
+            margin += got - best_other;
+        }
+        (hits, margin / QUERIES.len() as f32)
+    }
+
+    #[test]
+    #[ignore]
+    fn prefixes_earn_their_place() {
+        // Only models already in the cache: this must not quietly pull gigabytes.
+        let cached: Vec<String> = fs::read_dir(cache_dir())
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        for m in MODELS {
+            let code = TextEmbedding::list_supported_models()
+                .into_iter()
+                .find(|i| i.model == m.which)
+                .map(|i| i.model_code.replace('/', "--"))
+                .unwrap_or_default();
+            if !cached.iter().any(|c| c == &format!("models--{code}")) {
+                println!("{:<14} not cached, skipped", m.name);
+                continue;
+            }
+            let with = score(m.which.clone(), m.query, m.passage);
+            let without = score(m.which.clone(), "", "");
+            println!(
+                "{:<14} prefixed {}/{} margin {:+.3}   bare {}/{} margin {:+.3}",
+                m.name, with.0, QUERIES.len(), with.1, without.0, QUERIES.len(), without.1
+            );
+        }
+    }
+}

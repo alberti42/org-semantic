@@ -132,8 +132,12 @@ ranking carries meaning, never the absolute number.
 The list is deliberately short. fastembed offers forty models, but each family
 expects its own prefixes — BGE prefixes only the query, E5 prefixes the indexed
 passage too — and using the wrong convention costs retrieval quality with no
-error and no warning. An entry in that table is a claim that its prefixes have
-been checked; adding one is four lines.
+error and no warning. The table carries each family's documented convention, so
+adding a model means looking its prefixes up rather than guessing; that is four
+lines.
+
+`bge-small-en` and `e5-small` have been run end-to-end. The base and large
+variants inherit their family's prefixes and have not been exercised here.
 
 ### Two indexes, built separately
 
