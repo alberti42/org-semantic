@@ -25,9 +25,14 @@ tokenizers = { version = "0.22.2", default-features = false, features = ["onig"]
 # query parser are the parts worth not reimplementing; BM25 scoring alone would
 # have been fifteen lines.
 tantivy = "0.26"
-# Language classification for `--lang auto`.  Zero dependencies of its own, and
-# from the same authors as tantivy.
-whichlang = "0.1"
+# Language classification for `--lang auto`: fastText's `lid.176`, 176
+# languages.  Pinned to the 0.7 line, which binds the C++ library.  0.8 is a
+# pure-Rust rewrite that returns nonsense for quantized models like this one —
+# see docs/fasttext-lid.md before "upgrading".
+fasttext = "0.7.8"
+# Fetches the classifier model on first use.  Already in the tree via hf-hub, so
+# depending on it directly costs nothing.
+ureq = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

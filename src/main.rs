@@ -16,10 +16,12 @@
 
 use anyhow::{anyhow, Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fasttext::FastText;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// BGE-small-en-v1.5.
@@ -94,31 +96,63 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Classify prose, returning a two-letter code.
+/// fastText's `lid.176`, product-quantized to 917 kB.  Fetched on first use
+/// rather than vendored: it is CC BY-SA 3.0 while this is MIT, and downloading
+/// keeps it out of the distribution so ShareAlike never engages.
+const LID_URL: &str = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz";
+
+/// The loaded classifier, shared for the run.  `FastText` is `Sync`, and
+/// loading costs ~20 ms, which is not worth paying per note.
+fn classifier() -> Result<&'static FastText> {
+    static LID: OnceLock<FastText> = OnceLock::new();
+    if let Some(m) = LID.get() {
+        return Ok(m);
+    }
+    let path = xdg_cache().join("org-semantic").join("lid.176.ftz");
+    if !path.exists() {
+        let dir = path.parent().expect("joined path has a parent");
+        fs::create_dir_all(dir)?;
+        eprintln!("fetching the language model from {LID_URL}");
+        let bytes = ureq::get(LID_URL).call()?.body_mut().read_to_vec()?;
+        // Write beside the target and rename, so an interrupted download does
+        // not leave a truncated file that later runs would happily load.
+        let tmp = path.with_extension("part");
+        fs::write(&tmp, &bytes)?;
+        fs::rename(&tmp, &path)?;
+    }
+    let mut m = FastText::new();
+    m.load_model(path.to_str().ok_or_else(|| anyhow!("model path is not UTF-8"))?)
+        .map_err(|e| anyhow!("loading {}: {e}", path.display()))?;
+    let _ = LID.set(m);
+    Ok(LID.get().expect("just set"))
+}
+
+/// Load the classifier before indexing starts, so a failed download is an error
+/// on the way in rather than a panic part-way through a long run.
+fn prepare_lang(lang: &LangConfig) -> Result<()> {
+    if lang.default.eq_ignore_ascii_case(LANG_AUTO) {
+        classifier()?;
+    }
+    Ok(())
+}
+
+/// Classify prose, returning the code fastText emits — two letters for most of
+/// its 176 languages, which is what ltex and the rest of this speak.
 ///
 /// Applied per note rather than per chunk: a chunk can be a two-line heading,
 /// and a classifier given two lines guesses.  A whole note is usually enough.
 fn detect_lang(prose: &str) -> String {
-    // whichlang speaks ISO 639-3; the rest of this speaks 639-1, as ltex does.
-    match whichlang::detect_language(prose).three_letter_code() {
-        "ara" => "ar",
-        "cmn" => "zh",
-        "deu" => "de",
-        "fra" => "fr",
-        "hin" => "hi",
-        "ita" => "it",
-        "jpn" => "ja",
-        "kor" => "ko",
-        "nld" => "nl",
-        "por" => "pt",
-        "rus" => "ru",
-        "spa" => "es",
-        "swe" => "sv",
-        "tur" => "tr",
-        "vie" => "vi",
-        _ => "en",
-    }
-    .to_string()
+    // Newlines separate documents for fastText, so a multi-line note would be
+    // classified by its first line alone.
+    let text = prose.replace('\n', " ");
+    let preds = classifier()
+        .expect("classifier loaded by prepare_lang")
+        .predict(&text, 1, 0.0)
+        .unwrap_or_default();
+    preds
+        .first()
+        .map(|p| p.label.trim_start_matches("__label__").to_string())
+        .unwrap_or_else(|| "en".into())
 }
 
 /// The value that stands for "classify this note", accepted by `--lang` and
@@ -631,13 +665,16 @@ fn hard_split(para: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec
 
 // ----------------------------------------------------------------- embedding
 
-fn cache_dir() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
+fn xdg_cache() -> PathBuf {
+    std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache")
-        });
-    base.join("fastembed")
+        })
+}
+
+fn cache_dir() -> PathBuf {
+    xdg_cache().join("fastembed")
 }
 
 fn model() -> Result<TextEmbedding> {
@@ -1993,6 +2030,7 @@ fn main() -> Result<()> {
             // for: it maps `ö` to `o`, and the transliteration a German speaker
             // would actually type is `Woerter`, which this does not produce.
             let fold = args.iter().skip(3).any(|a| a == "--fold");
+            prepare_lang(&lang)?;
             cmd_index(Path::new(vault), full, rehash, &lang, fold)
         }
         Some("search") => {
@@ -2026,6 +2064,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            prepare_lang(&lang)?;
             cmd_chunks(Path::new(vault), needle, &lang)
         }
         Some("tokens") => {
@@ -2715,7 +2754,7 @@ mod tests {
     // ------------------------------------------------------ auto-detection
 
     #[test]
-    fn detect_lang_maps_to_two_letter_codes() {
+    fn detect_lang_returns_two_letter_codes() {
         assert_eq!(detect_lang("The quick brown fox jumps over the lazy dog again and again"), "en");
         assert_eq!(
             detect_lang("Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert"),
@@ -2724,6 +2763,21 @@ mod tests {
         assert_eq!(
             detect_lang("Les élèves de la classe ont étudié la théorie pendant toute la semaine"),
             "fr"
+        );
+    }
+
+    /// The regression that pinned `fasttext` to 0.7: the 0.8 rewrite answered
+    /// `ar` at p = 0.999 here.  Multi-line because newlines separate documents
+    /// for fastText, and a note classified by its first line alone is the other
+    /// way this silently goes wrong.  See docs/fasttext-lid.md.
+    #[test]
+    fn a_quantized_model_classifies_multi_line_prose() {
+        assert_eq!(
+            detect_lang(
+                "Die Wörter der deutschen Sprache sind manchmal sehr lang\n\
+                 und kompliziert, aber man gewöhnt sich daran mit der Zeit."
+            ),
+            "de"
         );
     }
 

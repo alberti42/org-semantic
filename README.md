@@ -152,14 +152,16 @@ that section in two. The keyword is configurable if you don't use ltex.
 Otherwise `--lang` applies, defaulting to `en-US` to match
 `lsp-ltex-plus-language`. `--lang auto` classifies each note from its own prose
 instead, per note rather than per chunk, since a chunk can be a two-line heading.
+It uses fastText's `lid.176` (176 languages, 917 kB), downloaded to
+`$XDG_CACHE_HOME/org-semantic/` the first time you ask for `auto`.
 
-**Auto-detection is accurate on prose and unreliable on notes that are mostly
-code.** Measured across a 951-note vault it placed German and English correctly
-but labelled about 4% of chunks French — every one of them a shell-snippet or
-key-binding note with too little natural language to classify. A misclassified
-chunk is stemmed wrongly and becomes harder to find, with nothing to indicate
-why. An explicit `# ltex: language=…` overrides the classifier, and it is a line
-such notes want anyway so ltex doesn't grammar-check your shell commands.
+**Auto-detection is accurate on prose and guesses when there is no prose.**
+Measured across a 951-note vault it placed English, German and Italian correctly;
+the 0.4% it got wrong are notes that are almost entirely attachment links or
+shell snippets, where it is classifying filenames. A misclassified chunk is
+stemmed wrongly and becomes harder to find, with nothing to indicate why. An
+explicit `# ltex: language=…` overrides the classifier, and it is a line such
+notes want anyway so ltex doesn't grammar-check your shell commands.
 
 Lexical search stems each note in its own language: `oscillation` finds
 `oscillations` in English notes, `Sprachen` finds `Sprache` in German ones, and
