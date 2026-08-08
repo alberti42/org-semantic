@@ -776,33 +776,145 @@ mod lexical {
     use tantivy::collector::TopDocs;
     use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
     use tantivy::schema::{
-        Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT,
+        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED,
+        STRING, TEXT,
+    };
+    use tantivy::tokenizer::{
+        AsciiFoldingFilter, Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer,
+        TextAnalyzer,
     };
     use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+
+    /// How text is analysed before it is indexed.
+    ///
+    /// Baked into the index: querying with one analyzer against tokens produced
+    /// by another fails silently, returning nothing rather than erroring.  It is
+    /// therefore *derived from the chunks* — indexing and searching compute the
+    /// same value independently — and stored beside the index so that a change
+    /// is noticed and forces a rebuild.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Analyzer {
+        /// Primary subtags present in the vault, sorted: `["de", "en"]`.
+        ///
+        /// A field's analyzer is fixed and tantivy cannot detect a document's
+        /// language, so each language gets its own body field and every chunk
+        /// goes into exactly one — a partition, not a copy.  Nothing is indexed
+        /// under a language it is not, and no chunk is scored twice.
+        pub langs: Vec<String>,
+        /// Fold accents, so `Worter` matches `Wörter`.  Off by default: it maps
+        /// `ö` to `o`, and `Worter` is not a German word — the transliteration
+        /// someone would actually type is `Woerter`, which this does not do.
+        pub fold: bool,
+    }
+
+    /// Primary subtag of a language code: `de-DE` becomes `de`, so regional
+    /// variants share one analyzer rather than splitting the index further.
+    pub fn primary_subtag(code: &str) -> String {
+        code.split(['-', '_']).next().unwrap_or(code).to_ascii_lowercase()
+    }
+
+    impl Analyzer {
+        /// Derived from the corpus, so indexing and searching always agree.
+        pub fn from_chunks(chunks: &[Chunk], fold: bool) -> Self {
+            let mut langs: Vec<String> =
+                chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
+            langs.sort();
+            langs.dedup();
+            if langs.is_empty() {
+                langs.push("en".into());
+            }
+            Analyzer { langs, fold }
+        }
+
+        pub fn key(&self) -> String {
+            format!("langs={} fold={}", self.langs.join("+"), self.fold)
+        }
+
+        fn language(subtag: &str) -> Option<Language> {
+            match subtag {
+                "en" => Some(Language::English),
+                "de" => Some(Language::German),
+                "fr" => Some(Language::French),
+                "it" => Some(Language::Italian),
+                "es" => Some(Language::Spanish),
+                "nl" => Some(Language::Dutch),
+                "pt" => Some(Language::Portuguese),
+                "ru" => Some(Language::Russian),
+                "sv" => Some(Language::Swedish),
+                "no" => Some(Language::Norwegian),
+                "da" => Some(Language::Danish),
+                "fi" => Some(Language::Finnish),
+                _ => None,
+            }
+        }
+
+        fn field_name(subtag: &str) -> String {
+            format!("body_{subtag}")
+        }
+
+        /// A language Snowball does not cover still gets its own field; it is
+        /// lower-cased but not stemmed, which is exact matching and perfectly
+        /// usable.
+        fn register(&self, index: &Index) -> Result<()> {
+            for l in &self.langs {
+                let mut b = TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(RemoveLongFilter::limit(40))
+                    .filter(LowerCaser)
+                    .dynamic();
+                if self.fold {
+                    b = b.filter_dynamic(AsciiFoldingFilter);
+                }
+                if let Some(lang) = Self::language(l) {
+                    b = b.filter_dynamic(Stemmer::new(lang));
+                }
+                index.tokenizers().register(&Self::field_name(l), b.build());
+            }
+            Ok(())
+        }
+    }
 
     pub struct Fields {
         pub path: Field,
         pub ord: Field,
-        pub body: Field,
+        /// One per language, paired with its primary subtag.
+        pub bodies: Vec<(String, Field)>,
         pub title: Field,
         pub tags: Field,
         pub dirs: Field,
         pub todo: Field,
+        pub lang: Field,
     }
 
-    pub fn schema() -> (Schema, Fields) {
+    pub fn schema(a: &Analyzer) -> (Schema, Fields) {
         let mut b = Schema::builder();
-        // STRING is indexed as one raw token; TEXT goes through the analyzer.
-        // Tags and directories must be STRING or stemming would turn `physics`
-        // into `physic` and `tag:physics` would stop matching.
+        // STRING is indexed as one raw token; each body field goes through its
+        // own language's analyzer.  Tags and directories must stay STRING, or
+        // stemming would turn `physics` into `physic` and `tag:physics` would
+        // stop matching.
+        let path = b.add_text_field("path", STRING | STORED);
+        let ord = b.add_u64_field("ord", tantivy::schema::INDEXED | STORED);
+        let bodies = a
+            .langs
+            .iter()
+            .map(|l| {
+                let name = Analyzer::field_name(l);
+                let opts = TextOptions::default().set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer(&name)
+                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                );
+                (l.clone(), b.add_text_field(&name, opts))
+            })
+            .collect();
         let f = Fields {
-            path: b.add_text_field("path", STRING | STORED),
-            ord: b.add_u64_field("ord", tantivy::schema::INDEXED | STORED),
-            body: b.add_text_field("body", TEXT),
+            path,
+            ord,
+            bodies,
             title: b.add_text_field("title", TEXT),
             tags: b.add_text_field("tags", STRING),
             dirs: b.add_text_field("dirs", STRING),
             todo: b.add_text_field("todo", STRING),
+            lang: b.add_text_field("lang", STRING),
         };
         (b.build(), f)
     }
@@ -811,14 +923,26 @@ mod lexical {
         state.join("tantivy")
     }
 
-    fn open_or_create(state: &Path) -> Result<(Index, Fields)> {
-        let (schema, fields) = schema();
+    fn key_file(state: &Path) -> std::path::PathBuf {
+        dir_of(state).join("analyzer.txt")
+    }
+
+    fn open_or_create(state: &Path, a: &Analyzer) -> Result<(Index, Fields)> {
         let d = dir_of(state);
+        // The schema depends on which languages exist, so a changed set means a
+        // different schema.  Discard rather than try to open the old one: the
+        // index is derived, and `sync` refills it.
+        if d.exists() && std::fs::read_to_string(key_file(state)).ok().as_deref() != Some(&a.key())
+        {
+            let _ = std::fs::remove_dir_all(&d);
+        }
         std::fs::create_dir_all(&d)?;
+        let (schema, fields) = schema(a);
         let index = match Index::open_in_dir(&d) {
             Ok(i) => i,
             Err(_) => Index::create_in_dir(&d, schema)?,
         };
+        a.register(&index)?;
         Ok((index, fields))
     }
 
@@ -826,7 +950,11 @@ mod lexical {
         let mut doc = TantivyDocument::default();
         doc.add_text(f.path, &c.path);
         doc.add_u64(f.ord, ord);
-        doc.add_text(f.body, &c.text);
+        // Exactly one body field: the chunk's own language.
+        let want = primary_subtag(&c.lang);
+        if let Some((_, fld)) = f.bodies.iter().find(|(l, _)| *l == want).or(f.bodies.first()) {
+            doc.add_text(*fld, &c.text);
+        }
         doc.add_text(f.title, c.heading.split(" > ").next().unwrap_or(&c.heading));
         for t in &c.tags {
             doc.add_text(f.tags, t);
@@ -836,6 +964,17 @@ mod lexical {
         }
         if let Some(t) = &c.todo {
             doc.add_text(f.todo, t);
+        }
+        // Both the full code and its primary subtag, so a plain term query
+        // answers `lang:de-DE` and `lang:de` alike — the same trick as the
+        // ancestor chain in `dirs`.
+        // Lower-cased on both sides: a STRING field is indexed raw, so `de-DE`
+        // and a query for `de-de` would otherwise not meet.
+        let full = c.lang.to_ascii_lowercase();
+        doc.add_text(f.lang, &full);
+        let primary = primary_subtag(&c.lang);
+        if primary != full {
+            doc.add_text(f.lang, &primary);
         }
         w.add_document(doc)?;
         Ok(())
@@ -857,11 +996,22 @@ mod lexical {
     }
 
     /// Apply CHANGED and DROPPED paths, or rebuild everything when FULL.
-    pub fn sync(state: &Path, chunks: &[Chunk], changed: &[String], dropped: &[String], full: bool) -> Result<()> {
-        let (index, f) = open_or_create(state)?;
+    pub fn sync(
+        state: &Path,
+        chunks: &[Chunk],
+        changed: &[String],
+        dropped: &[String],
+        full: bool,
+        a: &Analyzer,
+    ) -> Result<()> {
+        // A changed language set means a new schema, so partial updates against
+        // the old one are meaningless.
+        let rebuild =
+            full || std::fs::read_to_string(key_file(state)).ok().as_deref() != Some(&a.key());
+        let (index, f) = open_or_create(state, a)?;
         let mut w: IndexWriter = index.writer(50_000_000)?;
         let ords = ordinals(chunks);
-        if full {
+        if rebuild {
             w.delete_all_documents()?;
             for (i, c) in chunks.iter().enumerate() {
                 add(&w, &f, c, ords[i])?;
@@ -879,12 +1029,13 @@ mod lexical {
             }
         }
         w.commit()?;
+        std::fs::write(key_file(state), a.key())?;
         Ok(())
     }
 
     /// Number of live documents, for the consistency check.
-    pub fn doc_count(state: &Path) -> Result<u64> {
-        let (index, _) = open_or_create(state)?;
+    pub fn doc_count(state: &Path, a: &Analyzer) -> Result<u64> {
+        let (index, _) = open_or_create(state, a)?;
         Ok(index.reader()?.searcher().num_docs())
     }
 
@@ -895,8 +1046,9 @@ mod lexical {
         f: &Filters,
         limit: usize,
         conjunction: bool,
+        a: &Analyzer,
     ) -> Result<Vec<(f32, usize)>> {
-        let (index, fl) = open_or_create(state)?;
+        let (index, fl) = open_or_create(state, a)?;
         let searcher = index.reader()?.searcher();
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -915,6 +1067,14 @@ mod lexical {
         for t in &f.todos {
             clauses.push((Occur::Must, term(fl.todo, t)));
         }
+        if !f.langs.is_empty() {
+            let any: Vec<(Occur, Box<dyn Query>)> = f
+                .langs
+                .iter()
+                .map(|l| (Occur::Should, term(fl.lang, &l.to_ascii_lowercase())))
+                .collect();
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
+        }
         if !f.dirs.is_empty() {
             let any: Vec<(Occur, Box<dyn Query>)> = f
                 .dirs
@@ -924,7 +1084,11 @@ mod lexical {
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
         }
         if !f.text.trim().is_empty() {
-            let mut qp = QueryParser::for_index(&index, vec![fl.body, fl.title]);
+            // Every body field: a query's own language is unknown and too short
+            // to classify, so each language's clause matches its own documents.
+            let mut fields: Vec<Field> = fl.bodies.iter().map(|(_, f)| *f).collect();
+            fields.push(fl.title);
+            let mut qp = QueryParser::for_index(&index, fields);
             qp.set_field_boost(fl.title, 2.0);
             // All terms required by default.  tantivy's own default is OR,
             // which for "Rabi oscillations" ranks anything merely containing
@@ -1333,7 +1497,15 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Resul
                 .collect()
         })
         .unwrap_or_default();
-    if let Err(e) = lexical::sync(&dir, &chunks, &changed_paths, &dropped_paths, old.is_none()) {
+    let analyzer = lexical::Analyzer::from_chunks(&chunks, false);
+    if let Err(e) = lexical::sync(
+        &dir,
+        &chunks,
+        &changed_paths,
+        &dropped_paths,
+        old.is_none(),
+        &analyzer,
+    ) {
         eprintln!("  lexical index not updated ({e}); `keyword` will rebuild it");
     }
     println!(
@@ -1682,7 +1854,8 @@ fn cmd_keyword(vault: &Path, query: &str, k: usize, conjunction: bool) -> Result
     // The lexical index is derived, so it can be rebuilt rather than trusted.
     // A count that disagrees with chunks.json means it missed an update, and a
     // stale keyword index returns confidently wrong answers.
-    let have = lexical::doc_count(&dir).unwrap_or(0);
+    let analyzer = lexical::Analyzer::from_chunks(&chunks, false);
+    let have = lexical::doc_count(&dir, &analyzer).unwrap_or(0);
     if have != chunks.len() as u64 {
         eprint!(
             "  lexical index has {have} docs for {} chunks; rebuilding... ",
@@ -1690,7 +1863,7 @@ fn cmd_keyword(vault: &Path, query: &str, k: usize, conjunction: bool) -> Result
         );
         io::stderr().flush().ok();
         let t = Instant::now();
-        lexical::sync(&dir, &chunks, &[], &[], true)?;
+        lexical::sync(&dir, &chunks, &[], &[], true, &analyzer)?;
         eprintln!("{:.1}s", t.elapsed().as_secs_f64());
     }
 
@@ -1702,7 +1875,7 @@ fn cmd_keyword(vault: &Path, query: &str, k: usize, conjunction: bool) -> Result
     // Generous, because grouping collapses many chunks into one note: a single
     // well-matching note can otherwise fill the whole candidate pool and hide
     // every other note.
-    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100), conjunction)?;
+    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100), conjunction, &analyzer)?;
     let el = t.elapsed();
     if hits.is_empty() {
         println!("no match");
@@ -1723,12 +1896,12 @@ fn main() -> Result<()> {
         Some("index") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: index <vault>"))?;
             // `--incremental` is the default; accepted so a script can say so.
-            let full = args.iter().any(|a| a == "--full");
+            let full = args.iter().skip(3).any(|a| a == "--full");
             // `--rehash` reads and hashes every note, ignoring stamps: the
             // backstop for a change that left mtime untouched.
-            let rehash = args.iter().any(|a| a == "--rehash");
+            let rehash = args.iter().skip(3).any(|a| a == "--rehash");
             let mut lang = LangConfig::default();
-            for (i, a) in args.iter().enumerate() {
+            for (i, a) in args.iter().enumerate().skip(3) {
                 match a.as_str() {
                     "--lang" => {
                         if let Some(v) = args.get(i + 1) {
@@ -1768,9 +1941,10 @@ fn main() -> Result<()> {
                 .get(3)
                 .ok_or_else(|| anyhow!("usage: keyword <vault> <query> [k]"))?;
             let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
-            // `--any`: any term may match, tantivy's own default.  The opposite,
-            // `--all`, is accepted so a caller can be explicit.
-            let conjunction = !args.iter().any(|a| a == "--any");
+            // Flags are looked for only past the positional arguments, so a
+            // query whose text happens to be `--any` stays a query.  Emacs will
+            // be building argv programmatically, where that is easy to hit.
+            let conjunction = !args.iter().skip(4).any(|a| a == "--any");
             cmd_keyword(Path::new(vault), query, k, conjunction)
         }
         Some("chunks") => {
@@ -2317,19 +2491,20 @@ mod tests {
         ];
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
-        lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
-        assert_eq!(lexical::doc_count(&dir).unwrap(), 2);
+        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
+        assert_eq!(lexical::doc_count(&dir, &an).unwrap(), 2);
 
-        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(chunks[hits[0].1].path, a, "resolves back to the right chunk");
 
         // A predicate must constrain the lexical side exactly as it does the
         // semantic one, or the two modes disagree about what was searched.
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10, true).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10, true, &an).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(chunks[hits[0].1].path, b);
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10, true).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10, true, &an).unwrap();
         assert!(hits.is_empty(), "predicate excludes the only textual match");
     }
 
@@ -2345,15 +2520,17 @@ mod tests {
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
         let chunks = vec![mk(&a, "brown fox"), mk(&b, "brown bear")];
-        lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap().len(), 2);
+        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an).unwrap().len(), 2);
 
         // beta changes, alpha is deleted.
         let chunks = vec![mk(&b, "crimson bear")];
-        lexical::sync(&dir, &chunks, &[b.clone()], &[a.clone()], false).unwrap();
-        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap().is_empty());
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10, true).unwrap().len(), 1);
-        assert_eq!(lexical::doc_count(&dir).unwrap(), 1);
+        let an2 = lexical::Analyzer::from_chunks(&chunks, false);
+        lexical::sync(&dir, &chunks, &[b.clone()], &[a.clone()], false, &an2).unwrap();
+        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an2).unwrap().is_empty());
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10, true, &an2).unwrap().len(), 1);
+        assert_eq!(lexical::doc_count(&dir, &an2).unwrap(), 1);
     }
 
     // ------------------------------------------------------------- languages
@@ -2414,5 +2591,43 @@ mod tests {
         assert!(f.matches(&de));
         assert!(!f.matches(&en));
         assert_eq!(f.text, "Wörter", "the predicate does not reach the embedder");
+    }
+
+    /// Each chunk is stemmed in its own language, and `lang:` constrains the
+    /// lexical side exactly as it constrains the semantic one.
+    ///
+    /// Regression: `langs` was added to `Filters` and honoured by the semantic
+    /// path but never given a clause here, so `lang:en` returned German hits —
+    /// the one invariant this project cannot afford to break quietly.
+    #[test]
+    fn each_language_is_stemmed_in_its_own_field_and_lang_filters_apply() {
+        let v = scratch("langs");
+        let en = note(&v, "en");
+        let de = note(&v, "de");
+        let mk = |p: &str, lang: &str, t: &str| Chunk {
+            path: p.into(), id: None, heading: p.into(), line: 1,
+            tags: vec![], todo: None, priority: None,
+            lang: lang.into(), text: t.into(),
+        };
+        let chunks = vec![
+            mk(&en, "en-US", "the damped oscillations of a trapped atom"),
+            mk(&de, "de-DE", "Die Wörter der Sprache sind lang"),
+        ];
+        let dir = state_dir(&v);
+        fs::create_dir_all(&dir).unwrap();
+        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        assert_eq!(an.langs, vec!["de", "en"], "derived from the corpus");
+        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
+
+        let hits = |q: &str| {
+            lexical::search(&dir, &chunks, &parse_query(q), 10, true, &an).unwrap().len()
+        };
+        assert_eq!(hits("oscillation"), 1, "English stemming: singular finds plural");
+        assert_eq!(hits("Sprachen"), 1, "German stemming: plural finds singular");
+        assert_eq!(hits("lang:de Sprachen"), 1);
+        assert_eq!(hits("lang:de-DE Sprachen"), 1, "full code matches");
+        assert_eq!(hits("lang:DE-de Sprachen"), 1, "and is case-insensitive");
+        assert_eq!(hits("lang:en Sprachen"), 0, "the predicate must exclude it");
+        assert_eq!(hits("lang:de oscillation"), 0);
     }
 }

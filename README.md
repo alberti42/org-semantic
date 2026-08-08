@@ -131,6 +131,13 @@ org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 | `-tag:x` | chunk does not carry it |
 | `dir:x` | note lives under directory `x`; repeating widens (any may match) |
 | `todo:x` | nearest enclosing heading has TODO keyword `x` |
+| `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT` |
+
+A note declares its language the way ltex-ls-plus already asks for it —
+`# ltex: language=de-DE`, in effect from that line onward — otherwise `--lang`
+applies (default `en-US`). Lexical search stems each note in its own language:
+`oscillation` finds `oscillations` in English notes, `Sprachen` finds `Sprache`
+in German ones, and neither leaks into the other.
 
 Tags follow org's own inheritance — `#+filetags:` plus every ancestor heading's
 tags — so a chunk under `* Project :work:` is found by `tag:work` whether or not
