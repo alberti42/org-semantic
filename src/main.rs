@@ -3,7 +3,8 @@
 //! Prototype.  Commands:
 //!
 //!   org-semantic index  <vault> [--full|--rehash] refresh (incremental by default)
-//!   org-semantic search <vault> <query> [k]       query it, grouped by note
+//!   org-semantic search  <vault> <query> [k]      semantic search, grouped by note
+//!   org-semantic keyword <vault> <query> [k]      lexical search, same predicates
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
 //!   org-semantic bench  <vault> [n] [config]      embedding throughput
@@ -33,6 +34,9 @@ const QUERY_PREFIX: &str = "Represent this sentence for searching relevant passa
 const MAX_CHARS: usize = 1500;
 
 const STATE_DIR: &str = ".org-semantic";
+
+/// How many matching sections to show beneath a note before collapsing.
+const SECTIONS_PER_NOTE: usize = 3;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Chunk {
@@ -681,6 +685,221 @@ fn next_token(s: &str) -> (String, &str) {
     (out, "")
 }
 
+// ----------------------------------------------------------- lexical index
+
+/// A tantivy index over the same chunks, for the exact-word matching
+/// embeddings are poor at.
+///
+/// Derived, never authoritative: `chunks.json` is the source of truth, and this
+/// can be discarded and rebuilt at any time.  A document therefore identifies
+/// its chunk by `(path, ord)` rather than by position — chunk positions shift
+/// whenever a note gains or loses a chunk, so a stored index would silently
+/// point at the wrong text after any edit.
+mod lexical {
+    use super::{ancestor_dirs, Chunk, Filters};
+    use anyhow::{anyhow, Result};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use tantivy::collector::TopDocs;
+    use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+    use tantivy::schema::{
+        Field, IndexRecordOption, Schema, Value, STORED, STRING, TEXT,
+    };
+    use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+
+    pub struct Fields {
+        pub path: Field,
+        pub ord: Field,
+        pub body: Field,
+        pub title: Field,
+        pub tags: Field,
+        pub dirs: Field,
+        pub todo: Field,
+    }
+
+    pub fn schema() -> (Schema, Fields) {
+        let mut b = Schema::builder();
+        // STRING is indexed as one raw token; TEXT goes through the analyzer.
+        // Tags and directories must be STRING or stemming would turn `physics`
+        // into `physic` and `tag:physics` would stop matching.
+        let f = Fields {
+            path: b.add_text_field("path", STRING | STORED),
+            ord: b.add_u64_field("ord", tantivy::schema::INDEXED | STORED),
+            body: b.add_text_field("body", TEXT),
+            title: b.add_text_field("title", TEXT),
+            tags: b.add_text_field("tags", STRING),
+            dirs: b.add_text_field("dirs", STRING),
+            todo: b.add_text_field("todo", STRING),
+        };
+        (b.build(), f)
+    }
+
+    fn dir_of(state: &Path) -> std::path::PathBuf {
+        state.join("tantivy")
+    }
+
+    fn open_or_create(state: &Path) -> Result<(Index, Fields)> {
+        let (schema, fields) = schema();
+        let d = dir_of(state);
+        std::fs::create_dir_all(&d)?;
+        let index = match Index::open_in_dir(&d) {
+            Ok(i) => i,
+            Err(_) => Index::create_in_dir(&d, schema)?,
+        };
+        Ok((index, fields))
+    }
+
+    fn add(w: &IndexWriter, f: &Fields, c: &Chunk, ord: u64) -> Result<()> {
+        let mut doc = TantivyDocument::default();
+        doc.add_text(f.path, &c.path);
+        doc.add_u64(f.ord, ord);
+        doc.add_text(f.body, &c.text);
+        doc.add_text(f.title, c.heading.split(" > ").next().unwrap_or(&c.heading));
+        for t in &c.tags {
+            doc.add_text(f.tags, t);
+        }
+        for d in ancestor_dirs(&c.path) {
+            doc.add_text(f.dirs, &d);
+        }
+        if let Some(t) = &c.todo {
+            doc.add_text(f.todo, t);
+        }
+        w.add_document(doc)?;
+        Ok(())
+    }
+
+    /// Ordinal of each chunk within its own note, which with the path is a
+    /// stable identity across edits elsewhere in the vault.
+    fn ordinals(chunks: &[Chunk]) -> Vec<u64> {
+        let mut seen: HashMap<&str, u64> = HashMap::new();
+        chunks
+            .iter()
+            .map(|c| {
+                let n = seen.entry(c.path.as_str()).or_insert(0);
+                let ord = *n;
+                *n += 1;
+                ord
+            })
+            .collect()
+    }
+
+    /// Apply CHANGED and DROPPED paths, or rebuild everything when FULL.
+    pub fn sync(state: &Path, chunks: &[Chunk], changed: &[String], dropped: &[String], full: bool) -> Result<()> {
+        let (index, f) = open_or_create(state)?;
+        let mut w: IndexWriter = index.writer(50_000_000)?;
+        let ords = ordinals(chunks);
+        if full {
+            w.delete_all_documents()?;
+            for (i, c) in chunks.iter().enumerate() {
+                add(&w, &f, c, ords[i])?;
+            }
+        } else {
+            for p in changed.iter().chain(dropped.iter()) {
+                w.delete_term(Term::from_field_text(f.path, p));
+            }
+            let touched: std::collections::HashSet<&str> =
+                changed.iter().map(String::as_str).collect();
+            for (i, c) in chunks.iter().enumerate() {
+                if touched.contains(c.path.as_str()) {
+                    add(&w, &f, c, ords[i])?;
+                }
+            }
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Number of live documents, for the consistency check.
+    pub fn doc_count(state: &Path) -> Result<u64> {
+        let (index, _) = open_or_create(state)?;
+        Ok(index.reader()?.searcher().num_docs())
+    }
+
+    /// Search, returning `(score, chunk index)` against CHUNKS.
+    pub fn search(
+        state: &Path,
+        chunks: &[Chunk],
+        f: &Filters,
+        limit: usize,
+    ) -> Result<Vec<(f32, usize)>> {
+        let (index, fl) = open_or_create(state)?;
+        let searcher = index.reader()?.searcher();
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        let term = |field, v: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, v),
+                IndexRecordOption::Basic,
+            ))
+        };
+        for t in &f.tags {
+            clauses.push((Occur::Must, term(fl.tags, t)));
+        }
+        for t in &f.not_tags {
+            clauses.push((Occur::MustNot, term(fl.tags, t)));
+        }
+        for t in &f.todos {
+            clauses.push((Occur::Must, term(fl.todo, t)));
+        }
+        if !f.dirs.is_empty() {
+            let any: Vec<(Occur, Box<dyn Query>)> = f
+                .dirs
+                .iter()
+                .map(|d| (Occur::Should, term(fl.dirs, d.trim_end_matches('/'))))
+                .collect();
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
+        }
+        if !f.text.trim().is_empty() {
+            let mut qp = QueryParser::for_index(&index, vec![fl.body, fl.title]);
+            qp.set_field_boost(fl.title, 2.0);
+            // All terms required unless the query says otherwise.  tantivy
+            // defaults to OR, which for "Rabi oscillations" would rank anything
+            // merely containing "oscillations".
+            qp.set_conjunction_by_default();
+            clauses.push((Occur::Must, qp.parse_query(&f.text)?));
+        }
+        if clauses.is_empty() {
+            return Err(anyhow!("nothing to search for"));
+        }
+
+        // (path, ord) back to a position in CHUNKS.
+        let ords = ordinals(chunks);
+        let mut by_key: HashMap<(&str, u64), usize> = HashMap::new();
+        for (i, c) in chunks.iter().enumerate() {
+            by_key.insert((c.path.as_str(), ords[i]), i);
+        }
+
+        let query = BooleanQuery::new(clauses);
+        let hits = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+        let mut out = Vec::with_capacity(hits.len());
+        for (score, addr) in hits {
+            let doc: TantivyDocument = searcher.doc(addr)?;
+            let path = doc.get_first(fl.path).and_then(|v| v.as_str()).unwrap_or("");
+            let ord = doc.get_first(fl.ord).and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(&i) = by_key.get(&(path, ord)) {
+                out.push((score, i));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Every directory a note sits under, relative to the vault root, so `dir:x`
+/// matches a whole subtree by exact token rather than needing a prefix query.
+fn ancestor_dirs(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    let parts: Vec<&str> = path.split('/').collect();
+    for p in &parts[..parts.len().saturating_sub(1)] {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(p);
+        out.push(acc.clone());
+    }
+    out
+}
+
 // ------------------------------------------------------------ index on disk
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
@@ -1020,7 +1239,26 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         );
     }
 
+    let hashes_snapshot: std::collections::BTreeSet<String> =
+        hashes.keys().cloned().collect();
     let written = save_index(&dir, &chunks, &vectors, hashes, stamps)?;
+    // The lexical index follows the same deltas.  Failing to update it must not
+    // fail the run: it is derived, and `keyword` rebuilds it when the counts
+    // disagree.
+    let changed_paths: Vec<String> = stale.iter().map(|s| s.path.clone()).collect();
+    let dropped_paths: Vec<String> = old
+        .as_ref()
+        .map(|ix| {
+            ix.files
+                .keys()
+                .filter(|p| !hashes_snapshot.contains(*p))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(e) = lexical::sync(&dir, &chunks, &changed_paths, &dropped_paths, old.is_none()) {
+        eprintln!("  lexical index not updated ({e}); `keyword` will rebuild it");
+    }
     println!(
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
@@ -1028,6 +1266,62 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// Print hits grouped by note.
+///
+/// A note that matches a query tends to match it in several places, and a flat
+/// top-k then spends every slot on one document.  Each note appears once, at
+/// the rank of its best chunk, with its other matching sections beneath it.
+fn report(chunks: &[Chunk], scored: Vec<(f32, usize)>, k: usize) {
+    let mut notes: Vec<(String, Vec<(f32, usize)>)> = Vec::new();
+    for (score, i) in scored {
+        let path = &chunks[i].path;
+        match notes.iter_mut().find(|(p, _)| p == path) {
+            Some((_, hits)) => {
+                if hits.len() < SECTIONS_PER_NOTE {
+                    hits.push((score, i));
+                }
+            }
+            None => {
+                if notes.len() < k {
+                    notes.push((path.clone(), vec![(score, i)]));
+                }
+            }
+        }
+    }
+
+    for (path, hits) in &notes {
+        let (best, bi) = hits[0];
+        let c = &chunks[bi];
+        let title = c.heading.split(" > ").next().unwrap_or(&c.heading);
+        println!("\n{best:.3}  {title}");
+        println!("       {}:{}", path, c.line);
+        if let Some(id) = &c.id {
+            println!("       id:{id}");
+        }
+        if !c.tags.is_empty() || c.todo.is_some() {
+            let todo = c.todo.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
+            let tags = if c.tags.is_empty() {
+                String::new()
+            } else {
+                format!(":{}:", c.tags.join(":"))
+            };
+            println!("       {todo}{tags}");
+        }
+        for (score, i) in hits {
+            let c = &chunks[*i];
+            let section = c
+                .heading
+                .split_once(" > ")
+                .map(|(_, rest)| rest)
+                .unwrap_or("(top)");
+            let preview: String =
+                c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
+            println!("       · {score:.3} L{:<5} {section}", c.line);
+            println!("               {preview}…");
+        }
+    }
 }
 
 fn describe_filters(f: &Filters) -> String {
@@ -1108,60 +1402,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let search = t2.elapsed();
 
-    // Grouped by note.  A note that matches a query tends to match it in several
-    // places, and a flat top-k then spends every slot on one document — which is
-    // what happened on the phase-estimation query.  Each note appears once, at
-    // the rank of its best chunk, with its other matching sections listed under
-    // it.
-    const SECTIONS_PER_NOTE: usize = 3;
-    let mut notes: Vec<(String, Vec<(f32, usize)>)> = Vec::new();
-    for (score, i) in scored {
-        let path = &chunks[i].path;
-        match notes.iter_mut().find(|(p, _)| p == path) {
-            Some((_, hits)) => {
-                if hits.len() < SECTIONS_PER_NOTE {
-                    hits.push((score, i));
-                }
-            }
-            None => {
-                if notes.len() < k {
-                    notes.push((path.clone(), vec![(score, i)]));
-                }
-            }
-        }
-    }
-
-    for (path, hits) in &notes {
-        let (best, bi) = hits[0];
-        let c = &chunks[bi];
-        let title = c.heading.split(" > ").next().unwrap_or(&c.heading);
-        println!("\n{best:.3}  {title}");
-        println!("       {}:{}", path, c.line);
-        if let Some(id) = &c.id {
-            println!("       id:{id}");
-        }
-        if !c.tags.is_empty() || c.todo.is_some() {
-            let todo = c.todo.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
-            let tags = if c.tags.is_empty() {
-                String::new()
-            } else {
-                format!(":{}:", c.tags.join(":"))
-            };
-            println!("       {todo}{tags}");
-        }
-        for (score, i) in hits {
-            let c = &chunks[*i];
-            let section = c
-                .heading
-                .split_once(" > ")
-                .map(|(_, rest)| rest)
-                .unwrap_or("(top)");
-            let preview: String =
-                c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
-            println!("       · {score:.3} L{:<5} {section}", c.line);
-            println!("               {preview}…");
-        }
-    }
+    report(&chunks, scored, k);
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -1339,6 +1580,59 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
     Ok(())
 }
 
+/// Lexical search: exact words, phrases and boolean operators, over the same
+/// chunks the semantic index describes.
+///
+/// A separate command rather than a mode of `search`, deliberately.  The two
+/// honour the same `tag:`/`dir:`/`todo:` predicates, but a phrase or a boolean
+/// means nothing to an embedding, so a fused ranking would mix results that
+/// honoured the query with results that could not.  Fusing them is a later
+/// decision, to be made once there is evidence it helps.
+fn cmd_keyword(vault: &Path, query: &str, k: usize) -> Result<()> {
+    let dir = state_dir(vault);
+    let chunks: Vec<Chunk> = serde_json::from_slice(
+        &fs::read(dir.join("chunks.json"))
+            .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
+    )?;
+
+    // The lexical index is derived, so it can be rebuilt rather than trusted.
+    // A count that disagrees with chunks.json means it missed an update, and a
+    // stale keyword index returns confidently wrong answers.
+    let have = lexical::doc_count(&dir).unwrap_or(0);
+    if have != chunks.len() as u64 {
+        eprint!(
+            "  lexical index has {have} docs for {} chunks; rebuilding... ",
+            chunks.len()
+        );
+        io::stderr().flush().ok();
+        let t = Instant::now();
+        lexical::sync(&dir, &chunks, &[], &[], true)?;
+        eprintln!("{:.1}s", t.elapsed().as_secs_f64());
+    }
+
+    let f = parse_query(query);
+    if !f.is_empty() {
+        println!("filter: {}", describe_filters(&f));
+    }
+    let t = Instant::now();
+    // Generous, because grouping collapses many chunks into one note: a single
+    // well-matching note can otherwise fill the whole candidate pool and hide
+    // every other note.
+    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100))?;
+    let el = t.elapsed();
+    if hits.is_empty() {
+        println!("no match");
+        return Ok(());
+    }
+    report(&chunks, hits, k);
+    eprintln!(
+        "\n[lexical search over {} chunks {:.1}ms]",
+        chunks.len(),
+        el.as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -1361,6 +1655,16 @@ fn main() -> Result<()> {
             let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
             cmd_search(Path::new(vault), query, k)
         }
+        Some("keyword") => {
+            let vault = args
+                .get(2)
+                .ok_or_else(|| anyhow!("usage: keyword <vault> <query> [k]"))?;
+            let query = args
+                .get(3)
+                .ok_or_else(|| anyhow!("usage: keyword <vault> <query> [k]"))?;
+            let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
+            cmd_keyword(Path::new(vault), query, k)
+        }
         Some("chunks") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
@@ -1378,7 +1682,7 @@ fn main() -> Result<()> {
             cmd_bench(Path::new(vault), n, cfg)
         }
         _ => Err(anyhow!(
-            "usage:\n  org-semantic index  <vault>\n  org-semantic search <vault> <query> [k]\n  org-semantic bench  <vault> [n]"
+            "usage:\n  org-semantic index   <vault>\n  org-semantic search <vault> <query> [k]\n  org-semantic bench  <vault> [n]"
         )),
     }
 }
@@ -1870,5 +2174,73 @@ mod tests {
         assert!(under("03 Literature review/2025/x.org", "03 Literature review"));
         assert!(!under("03 Literature review/x.org", "03 Lit"));
         assert!(!under("other/x.org", "03 Literature review"));
+    }
+
+    // --------------------------------------------------------------- lexical
+
+    #[test]
+    fn ancestor_dirs_names_every_enclosing_directory() {
+        assert_eq!(
+            ancestor_dirs("03 Literature review/Reviewed in 2025/x.org"),
+            vec!["03 Literature review", "03 Literature review/Reviewed in 2025"]
+        );
+        assert!(ancestor_dirs("top.org").is_empty(), "a note at the root has none");
+    }
+
+    /// The lexical index identifies a chunk by (path, ordinal), never by
+    /// position: positions shift whenever any earlier note gains or loses a
+    /// chunk, and a stored position would then point at the wrong text.
+    #[test]
+    fn lexical_round_trips_through_a_real_index() {
+        let v = scratch("lexical");
+        let a = note(&v, "alpha");
+        let b = note(&v, "beta");
+        let chunks = vec![
+            Chunk { path: a.clone(), id: None, heading: "alpha".into(), line: 1,
+                    tags: vec!["physics".into()], todo: None, priority: None,
+                    text: "the quick brown fox".into() },
+            Chunk { path: b.clone(), id: None, heading: "beta".into(), line: 1,
+                    tags: vec!["german".into()], todo: None, priority: None,
+                    text: "der schnelle braune Fuchs".into() },
+        ];
+        let dir = state_dir(&v);
+        fs::create_dir_all(&dir).unwrap();
+        lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
+        assert_eq!(lexical::doc_count(&dir).unwrap(), 2);
+
+        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(chunks[hits[0].1].path, a, "resolves back to the right chunk");
+
+        // A predicate must constrain the lexical side exactly as it does the
+        // semantic one, or the two modes disagree about what was searched.
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(chunks[hits[0].1].path, b);
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10).unwrap();
+        assert!(hits.is_empty(), "predicate excludes the only textual match");
+    }
+
+    #[test]
+    fn lexical_sync_replaces_a_changed_note_and_drops_a_deleted_one() {
+        let v = scratch("lexical-sync");
+        let a = note(&v, "alpha");
+        let b = note(&v, "beta");
+        let mk = |p: &str, t: &str| Chunk {
+            path: p.into(), id: None, heading: p.into(), line: 1,
+            tags: vec![], todo: None, priority: None, text: t.into(),
+        };
+        let dir = state_dir(&v);
+        fs::create_dir_all(&dir).unwrap();
+        let chunks = vec![mk(&a, "brown fox"), mk(&b, "brown bear")];
+        lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap().len(), 2);
+
+        // beta changes, alpha is deleted.
+        let chunks = vec![mk(&b, "crimson bear")];
+        lexical::sync(&dir, &chunks, &[b.clone()], &[a.clone()], false).unwrap();
+        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap().is_empty());
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10).unwrap().len(), 1);
+        assert_eq!(lexical::doc_count(&dir).unwrap(), 1);
     }
 }

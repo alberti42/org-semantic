@@ -82,12 +82,35 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index  <dir> [--full|--rehash]   refresh the index (incremental by default)
-org-semantic search <dir> <query> [k]         query it, results grouped per note
-org-semantic chunks <dir> <path-substring>    show chunking decisions, no embedding
-org-semantic tokens <dir> [limit]             token-length distribution of the corpus
-org-semantic bench  <dir> [n] [config]        embedding throughput
+org-semantic index   <dir> [--full|--rehash]  refresh the index (incremental by default)
+org-semantic search  <dir> <query> [k]        semantic search, grouped per note
+org-semantic keyword <dir> <query> [k]        lexical search, same predicates
+org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
+org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
+org-semantic bench   <dir> [n] [config]        embedding throughput
 ```
+
+### Two modes, deliberately separate
+
+`search` ranks by meaning; `keyword` ranks by words, with tantivy's query
+language — phrases, boolean operators, field boosts. They are separate commands
+rather than one fused ranking because a phrase or a boolean means nothing to an
+embedding: fusing them would mix results that honoured your query with results
+that could not.
+
+The difference is not academic. Searching your notes for the surname `Gehm`:
+
+```console
+$ org-semantic keyword ~/notes Gehm
+13.181  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
+
+$ org-semantic search ~/notes Gehm
+0.660   01 Deutsche Wörter 2024                        ← noise
+```
+
+A surname carries no meaning for an embedding model. Equally, `why do the atoms
+heat up and get lost from the trap` finds the right passage semantically and
+nothing at all lexically, since none of those words appear in it.
 
 ### Filters
 
