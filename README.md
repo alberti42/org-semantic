@@ -82,9 +82,9 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash]  refresh the index (incremental by default)
+org-semantic index   <dir> [--full|--rehash] [--lang en-US] [--fold]
 org-semantic search  <dir> <query> [k]        semantic search, grouped per note
-org-semantic keyword <dir> <query> [k] [--any] lexical search, same predicates
+org-semantic keyword <dir> <query> [k] [--any] [--fold]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
@@ -138,6 +138,11 @@ A note declares its language the way ltex-ls-plus already asks for it —
 applies (default `en-US`). Lexical search stems each note in its own language:
 `oscillation` finds `oscillations` in English notes, `Sprachen` finds `Sprache`
 in German ones, and neither leaks into the other.
+
+`--fold` folds accents, so `eleves` matches `élèves`. Off by default, and worth
+noting it does nothing for German — that stemmer already strips umlauts, so
+`Worter` finds `Wörter` regardless. It is French, Spanish and Portuguese that
+need it. Changing it rebuilds the lexical index once (0.2 s).
 
 Tags follow org's own inheritance — `#+filetags:` plus every ancestor heading's
 tags — so a chunk under `* Project :work:` is found by `tag:work` whether or not

@@ -2,9 +2,9 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US]  refresh the index
+//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US] [--fold]
 //!   org-semantic search  <vault> <query> [k]      semantic search, grouped by note
-//!   org-semantic keyword <vault> <query> [k] [--any]  lexical search, same predicates
+//!   org-semantic keyword <vault> <query> [k] [--any] [--fold]
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
 //!   org-semantic bench  <vault> [n] [config]      embedding throughput
@@ -801,9 +801,13 @@ mod lexical {
         /// goes into exactly one — a partition, not a copy.  Nothing is indexed
         /// under a language it is not, and no chunk is scored twice.
         pub langs: Vec<String>,
-        /// Fold accents, so `Worter` matches `Wörter`.  Off by default: it maps
-        /// `ö` to `o`, and `Worter` is not a German word — the transliteration
-        /// someone would actually type is `Woerter`, which this does not do.
+        /// Fold accents, so `eleves` matches `élèves`.
+        ///
+        /// Off by default, and worth less than it looks for German: the German
+        /// Snowball stemmer already strips umlauts, so `Worter` finds `Wörter`
+        /// without it.  Where it earns its place is French, Spanish and
+        /// Portuguese, whose stemmers keep accents — there `eleves` finds
+        /// nothing until this is on.
         pub fold: bool,
     }
 
@@ -925,6 +929,14 @@ mod lexical {
 
     fn key_file(state: &Path) -> std::path::PathBuf {
         dir_of(state).join("analyzer.txt")
+    }
+
+    /// The analyzer the stored index was built with.  A plain file read, so it
+    /// can be checked before opening the index — the caller must rebuild on a
+    /// mismatch rather than let `open_or_create` discard an index nothing then
+    /// refills.
+    pub fn stored_key(state: &Path) -> Option<String> {
+        std::fs::read_to_string(key_file(state)).ok()
     }
 
     fn open_or_create(state: &Path, a: &Analyzer) -> Result<(Index, Fields)> {
@@ -1269,7 +1281,7 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bool) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -1497,7 +1509,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Resul
                 .collect()
         })
         .unwrap_or_default();
-    let analyzer = lexical::Analyzer::from_chunks(&chunks, false);
+    let analyzer = lexical::Analyzer::from_chunks(&chunks, fold);
     if let Err(e) = lexical::sync(
         &dir,
         &chunks,
@@ -1844,23 +1856,34 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
 /// means nothing to an embedding, so a fused ranking would mix results that
 /// honoured the query with results that could not.  Fusing them is a later
 /// decision, to be made once there is evidence it helps.
-fn cmd_keyword(vault: &Path, query: &str, k: usize, conjunction: bool) -> Result<()> {
+fn cmd_keyword(
+    vault: &Path,
+    query: &str,
+    k: usize,
+    conjunction: bool,
+    fold: bool,
+) -> Result<()> {
     let dir = state_dir(vault);
     let chunks: Vec<Chunk> = serde_json::from_slice(
         &fs::read(dir.join("chunks.json"))
             .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
     )?;
 
-    // The lexical index is derived, so it can be rebuilt rather than trusted.
-    // A count that disagrees with chunks.json means it missed an update, and a
-    // stale keyword index returns confidently wrong answers.
-    let analyzer = lexical::Analyzer::from_chunks(&chunks, false);
-    let have = lexical::doc_count(&dir, &analyzer).unwrap_or(0);
-    if have != chunks.len() as u64 {
-        eprint!(
-            "  lexical index has {have} docs for {} chunks; rebuilding... ",
-            chunks.len()
-        );
+    // The lexical index is derived, so it is rebuilt rather than trusted.  Two
+    // things invalidate it: a different analyzer, since tokens produced by one
+    // cannot be queried with another; and a document count that disagrees with
+    // chunks.json, which means an update was missed.  Either way the answer is
+    // one rebuild — 0.2 s for 6328 chunks — after which the new configuration is
+    // stored and subsequent searches find it current.
+    let analyzer = lexical::Analyzer::from_chunks(&chunks, fold);
+    let reason = if lexical::stored_key(&dir).as_deref() != Some(&analyzer.key()) {
+        Some("analyzer changed".to_string())
+    } else {
+        let have = lexical::doc_count(&dir, &analyzer).unwrap_or(0);
+        (have != chunks.len() as u64).then(|| format!("{have} docs for {} chunks", chunks.len()))
+    };
+    if let Some(why) = reason {
+        eprint!("  rebuilding lexical index ({why})... ");
         io::stderr().flush().ok();
         let t = Instant::now();
         lexical::sync(&dir, &chunks, &[], &[], true, &analyzer)?;
@@ -1921,7 +1944,11 @@ fn main() -> Result<()> {
                     "--lang auto needs a language classifier, which is not built yet"
                 ));
             }
-            cmd_index(Path::new(vault), full, rehash, &lang)
+            // Accent folding, so `Worter` matches `Wörter`.  Off unless asked
+            // for: it maps `ö` to `o`, and the transliteration a German speaker
+            // would actually type is `Woerter`, which this does not produce.
+            let fold = args.iter().skip(3).any(|a| a == "--fold");
+            cmd_index(Path::new(vault), full, rehash, &lang, fold)
         }
         Some("search") => {
             let vault = args
@@ -1945,7 +1972,8 @@ fn main() -> Result<()> {
             // query whose text happens to be `--any` stays a query.  Emacs will
             // be building argv programmatically, where that is easy to hit.
             let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-            cmd_keyword(Path::new(vault), query, k, conjunction)
+            let fold = args.iter().skip(4).any(|a| a == "--fold");
+            cmd_keyword(Path::new(vault), query, k, conjunction, fold)
         }
         Some("chunks") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
@@ -2231,7 +2259,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -2246,7 +2274,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -2311,7 +2339,7 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
 
         let ix = load_index(&state_dir(&v)).unwrap();
         assert_eq!(
