@@ -139,9 +139,29 @@ Predicates are stripped before embedding, so query syntax never reaches the
 model — `tag:work` would otherwise have it looking for notes *about* the words
 "tag" and "work".
 
-The index lives in `<dir>/.org-semantic/` — three files, about 10 MB for a
-thousand notes. Add it to your `.gitignore`; it is derived data and rebuilds in
-one pass.
+### What it writes
+
+Everything goes in one hidden directory beside your notes. **No note is ever
+modified** — org-semantic only reads them.
+
+| path | 951-note vault | what it is |
+|---|---|---|
+| `.org-semantic/chunks.json` | 6.0 MB | every chunk: text, heading path, line, `:ID:`, tags, TODO |
+| `.org-semantic/vectors.f32` | 9.7 MB | one 384-float embedding per chunk, in the same order |
+| `.org-semantic/manifest.json` | 0.2 MB | per-note hash and `(mtime, size)`, so a re-run knows what changed |
+| `.org-semantic/tantivy/` | 2.5 MB | the lexical index |
+| | **18 MB** | |
+
+`chunks.json` is the source of truth and is shared: `search` scores against
+`vectors.f32` and `keyword` against `tantivy/`, but both resolve a hit back to
+the same record, so either mode can be displayed, filtered and jumped to
+identically. `manifest.json` is used only while indexing, never while searching.
+
+Add `/.org-semantic/` to the vault's `.gitignore`. All of it is derived — delete
+the directory and `org-semantic index` rebuilds it in one pass.
+
+One thing lives outside the vault: the embedding model, cached once in
+`$XDG_CACHE_HOME/fastembed` (~190 MB) and shared by every vault.
 
 **Indexing is incremental by default.** A file whose modification time and size
 are unchanged is not even read; one whose timestamp moved is read and hashed, and
