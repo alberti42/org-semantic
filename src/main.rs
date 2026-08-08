@@ -1031,8 +1031,47 @@ mod lexical {
             Analyzer { langs, fold }
         }
 
+        /// The analyzer an incremental update needs: everything PREVIOUS knew,
+        /// plus any language the new chunks introduce.
+        ///
+        /// The set only ever grows.  A language that has left the corpus keeps
+        /// an empty field, which costs nothing, whereas dropping it would change
+        /// the schema and force a rebuild for no gain.
+        pub fn widen(previous: Option<&Analyzer>, chunks: &[Chunk], fold: bool) -> Self {
+            // Not via `from_chunks`: its empty-corpus fallback to `en` would be
+            // added to an existing set whenever a run has nothing stale, which
+            // is a schema change and so a needless rebuild.
+            let mut langs: Vec<String> =
+                chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
+            if let Some(p) = previous {
+                langs.extend(p.langs.iter().cloned());
+            }
+            langs.sort();
+            langs.dedup();
+            if langs.is_empty() {
+                langs.push("en".into());
+            }
+            Analyzer { langs, fold }
+        }
+
+        /// Identifies both the analyzer and the schema it was built for, and is
+        /// stored beside the index.  `v2` is where the index became
+        /// self-contained; bump it whenever the schema changes, so a stale index
+        /// is discarded rather than opened against the wrong schema.
         pub fn key(&self) -> String {
-            format!("langs={} fold={}", self.langs.join("+"), self.fold)
+            format!("v2 langs={} fold={}", self.langs.join("+"), self.fold)
+        }
+
+        /// Rebuild the analyzer from a stored key.  This is what lets the
+        /// lexical index be searched without `chunks.json`: the languages come
+        /// back from the index's own metadata rather than from the corpus.
+        pub fn from_key(key: &str) -> Option<Self> {
+            let rest = key.strip_prefix("v2 ")?;
+            let (langs, fold) = rest.split_once(" fold=")?;
+            Some(Analyzer {
+                langs: langs.strip_prefix("langs=")?.split('+').map(String::from).collect(),
+                fold: fold.trim().parse().ok()?,
+            })
         }
 
         fn language(subtag: &str) -> Option<Language> {
@@ -1088,6 +1127,10 @@ mod lexical {
         pub dirs: Field,
         pub todo: Field,
         pub lang: Field,
+        /// The chunk itself, as JSON.  Stored rather than indexed: it is what
+        /// makes a hit answerable without `chunks.json`, and one opaque field
+        /// beats plumbing every display field through the schema twice.
+        pub chunk: Field,
     }
 
     pub fn schema(a: &Analyzer) -> (Schema, Fields) {
@@ -1120,6 +1163,7 @@ mod lexical {
             dirs: b.add_text_field("dirs", STRING),
             todo: b.add_text_field("todo", STRING),
             lang: b.add_text_field("lang", STRING),
+            chunk: b.add_text_field("chunk", STORED),
         };
         (b.build(), f)
     }
@@ -1189,6 +1233,7 @@ mod lexical {
         if primary != full {
             doc.add_text(f.lang, &primary);
         }
+        doc.add_text(f.chunk, serde_json::to_string(c)?);
         w.add_document(doc)?;
         Ok(())
     }
@@ -1208,38 +1253,36 @@ mod lexical {
             .collect()
     }
 
-    /// Apply CHANGED and DROPPED paths, or rebuild everything when FULL.
+    /// Replace the documents of CHANGED and DROPPED notes, or rebuild
+    /// everything when FULL.
+    ///
+    /// CHUNKS holds only the notes being written — a note's documents are
+    /// deleted by path and re-added, so nothing else has to be present.
     pub fn sync(
         state: &Path,
         chunks: &[Chunk],
-        changed: &[String],
         dropped: &[String],
         full: bool,
         a: &Analyzer,
     ) -> Result<()> {
-        // A changed language set means a new schema, so partial updates against
-        // the old one are meaningless.
-        let rebuild =
-            full || std::fs::read_to_string(key_file(state)).ok().as_deref() != Some(&a.key());
         let (index, f) = open_or_create(state, a)?;
         let mut w: IndexWriter = index.writer(50_000_000)?;
-        let ords = ordinals(chunks);
-        if rebuild {
+        if full {
             w.delete_all_documents()?;
-            for (i, c) in chunks.iter().enumerate() {
-                add(&w, &f, c, ords[i])?;
-            }
         } else {
-            for p in changed.iter().chain(dropped.iter()) {
+            // A note is replaced wholesale: its old documents go, its new ones
+            // arrive.  Deleting by path covers a note whose chunk count shrank.
+            let mut paths: Vec<&str> = chunks.iter().map(|c| c.path.as_str()).collect();
+            paths.extend(dropped.iter().map(String::as_str));
+            paths.sort_unstable();
+            paths.dedup();
+            for p in paths {
                 w.delete_term(Term::from_field_text(f.path, p));
             }
-            let touched: std::collections::HashSet<&str> =
-                changed.iter().map(String::as_str).collect();
-            for (i, c) in chunks.iter().enumerate() {
-                if touched.contains(c.path.as_str()) {
-                    add(&w, &f, c, ords[i])?;
-                }
-            }
+        }
+        let ords = ordinals(chunks);
+        for (i, c) in chunks.iter().enumerate() {
+            add(&w, &f, c, ords[i])?;
         }
         w.commit()?;
         std::fs::write(key_file(state), a.key())?;
@@ -1252,15 +1295,15 @@ mod lexical {
         Ok(index.reader()?.searcher().num_docs())
     }
 
-    /// Search, returning `(score, chunk index)` against CHUNKS.
+    /// Search, returning the matching chunks themselves — the index carries
+    /// everything a hit needs, so no chunk table has to be loaded alongside.
     pub fn search(
         state: &Path,
-        chunks: &[Chunk],
         f: &Filters,
         limit: usize,
         conjunction: bool,
         a: &Analyzer,
-    ) -> Result<Vec<(f32, usize)>> {
+    ) -> Result<Vec<(f32, Chunk)>> {
         let (index, fl) = open_or_create(state, a)?;
         let searcher = index.reader()?.searcher();
 
@@ -1316,22 +1359,13 @@ mod lexical {
             return Err(anyhow!("nothing to search for"));
         }
 
-        // (path, ord) back to a position in CHUNKS.
-        let ords = ordinals(chunks);
-        let mut by_key: HashMap<(&str, u64), usize> = HashMap::new();
-        for (i, c) in chunks.iter().enumerate() {
-            by_key.insert((c.path.as_str(), ords[i]), i);
-        }
-
         let query = BooleanQuery::new(clauses);
         let hits = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
         let mut out = Vec::with_capacity(hits.len());
         for (score, addr) in hits {
             let doc: TantivyDocument = searcher.doc(addr)?;
-            let path = doc.get_first(fl.path).and_then(|v| v.as_str()).unwrap_or("");
-            let ord = doc.get_first(fl.ord).and_then(|v| v.as_u64()).unwrap_or(0);
-            if let Some(&i) = by_key.get(&(path, ord)) {
-                out.push((score, i));
+            if let Some(json) = doc.get_first(fl.chunk).and_then(|v| v.as_str()) {
+                out.push((score, serde_json::from_str(json)?));
             }
         }
         Ok(out)
@@ -1482,41 +1516,68 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bool) -> Result<()> {
-    let t0 = Instant::now();
-    let mut files = Vec::new();
-    org_files(vault, &mut files)?;
-    files.sort();
+/// One note as a scan found it: new or changed, with its text already read.
+struct Stale {
+    path: String,
+    text: String,
+}
 
-    let dir = state_dir(vault);
-    let old = if full { None } else { load_index(&dir) };
+/// What a pass over the vault found, relative to what an index last recorded.
+///
+/// Both indexes use this against **their own** record of what they have seen, so
+/// either can be brought up to date without the other having run.
+struct Scan {
+    hashes: std::collections::BTreeMap<String, u64>,
+    stamps: std::collections::BTreeMap<String, Stamp>,
+    /// Unchanged since that index last saw them.
+    reuse: Vec<String>,
+    /// New or changed, with their text.
+    stale: Vec<Stale>,
+    /// Recorded before, gone from disk now.
+    dropped: Vec<String>,
+    by_stamp: usize,
+    by_hash: usize,
+    changed: usize,
+    new: usize,
+}
 
-    // Three outcomes per note, cheapest first: its stamp matches, so it is not
-    // even read; its stamp moved but its bytes hash the same, so it is read and
-    // reused; or it is genuinely new or changed, and must be re-embedded.
-    struct Stale {
-        path: String,
-        text: String,
-    }
-    let mut hashes: std::collections::BTreeMap<String, u64> = Default::default();
-    let mut stamps: std::collections::BTreeMap<String, Stamp> = Default::default();
-    let mut reuse: Vec<String> = Vec::new();
-    let mut stale: Vec<Stale> = Vec::new();
-    let (mut by_stamp, mut by_hash, mut changed_files, mut new_files) = (0usize, 0, 0, 0);
+/// Three outcomes per note, cheapest first: its stamp matches, so it is not even
+/// read; its stamp moved but its bytes hash the same, so it is read and reused;
+/// or it is genuinely new or changed, and the caller must redo its work.
+fn scan_vault(
+    vault: &Path,
+    files: &[PathBuf],
+    prev: Option<(
+        &std::collections::BTreeMap<String, u64>,
+        &std::collections::BTreeMap<String, Stamp>,
+    )>,
+    rehash: bool,
+) -> Scan {
+    let mut sc = Scan {
+        hashes: Default::default(),
+        stamps: Default::default(),
+        reuse: Vec::new(),
+        stale: Vec::new(),
+        dropped: Vec::new(),
+        by_stamp: 0,
+        by_hash: 0,
+        changed: 0,
+        new: 0,
+    };
 
-    for f in &files {
+    for f in files {
         let path = rel_path(vault, f);
         let stamp = stamp_of(f);
 
         // Fast path: same mtime and size as when we last looked.
         if !rehash {
-            if let (Some(ix), Some(st)) = (&old, stamp) {
-                if ix.stamps.get(&path) == Some(&st) {
-                    if let Some(h) = ix.files.get(&path) {
-                        hashes.insert(path.clone(), *h);
-                        stamps.insert(path.clone(), st);
-                        reuse.push(path);
-                        by_stamp += 1;
+            if let (Some((files, stamps)), Some(st)) = (prev, stamp) {
+                if stamps.get(&path) == Some(&st) {
+                    if let Some(h) = files.get(&path) {
+                        sc.hashes.insert(path.clone(), *h);
+                        sc.stamps.insert(path.clone(), st);
+                        sc.reuse.push(path);
+                        sc.by_stamp += 1;
                         continue;
                     }
                 }
@@ -1531,32 +1592,149 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bo
             }
         };
         let hash = content_hash(text.as_bytes());
-        hashes.insert(path.clone(), hash);
+        sc.hashes.insert(path.clone(), hash);
         if let Some(st) = stamp {
-            stamps.insert(path.clone(), st);
+            sc.stamps.insert(path.clone(), st);
         }
 
-        match old.as_ref().and_then(|ix| ix.files.get(&path)) {
-            // Timestamp moved, content did not: restamp and reuse the vectors.
+        match prev.and_then(|(files, _)| files.get(&path)) {
+            // Timestamp moved, content did not: restamp and reuse the work.
             Some(h) if *h == hash => {
-                by_hash += 1;
-                reuse.push(path);
+                sc.by_hash += 1;
+                sc.reuse.push(path);
             }
             Some(_) => {
-                changed_files += 1;
-                stale.push(Stale { path, text });
+                sc.changed += 1;
+                sc.stale.push(Stale { path, text });
             }
             None => {
-                new_files += 1;
-                stale.push(Stale { path, text });
+                sc.new += 1;
+                sc.stale.push(Stale { path, text });
             }
         }
     }
 
-    let dropped = old
-        .as_ref()
-        .map(|ix| ix.files.keys().filter(|p| !hashes.contains_key(*p)).count())
-        .unwrap_or(0);
+    if let Some((files, _)) = prev {
+        sc.dropped = files.keys().filter(|p| !sc.hashes.contains_key(*p)).cloned().collect();
+    }
+    sc
+}
+
+/// What the lexical index has seen.  Kept apart from `manifest.json` on purpose:
+/// the two indexes are updated by separate commands, so each needs its own idea
+/// of which notes it is behind on.
+#[derive(Serialize, Deserialize)]
+struct LexManifest {
+    /// The analyzer the index was built with; a change means a new schema.
+    key: String,
+    files: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    stamps: std::collections::BTreeMap<String, Stamp>,
+}
+
+fn lex_manifest_path(dir: &Path) -> PathBuf {
+    dir.join("lexical.json")
+}
+
+/// Build or update the lexical index, and nothing else.
+///
+/// Deliberately free of the embedding model: no vectors, no tokenizer, no
+/// 512-token re-splitting — that limit is what BGE can read in one go, and BM25
+/// has no such bound.  Chunks here are therefore whole sections, which is why
+/// this needs neither a download nor a GPU-shaped wait.
+fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bool) -> Result<()> {
+    let t0 = Instant::now();
+    let mut files = Vec::new();
+    org_files(vault, &mut files)?;
+    files.sort();
+
+    let dir = state_dir(vault);
+    let old: Option<LexManifest> = (!full)
+        .then(|| fs::read(lex_manifest_path(&dir)).ok())
+        .flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+
+    let scan = scan_vault(vault, &files, old.as_ref().map(|m| (&m.files, &m.stamps)), rehash);
+
+    // Chunk only what changed.  The languages of those notes may introduce a
+    // field the schema does not have, and a schema change means the whole index
+    // is rebuilt — so the language set is carried in the stored key and only
+    // ever grows.
+    let mut chunks: Vec<Chunk> = Vec::new();
+    for st in &scan.stale {
+        let f = vault.join(&st.path);
+        chunks.extend(chunk_file(&f, &st.path, &st.text, lang));
+    }
+
+    let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
+    let analyzer = lexical::Analyzer::widen(previous.as_ref(), &chunks, fold);
+    let rebuilding = old.is_none() || previous.as_ref().map(|a| a.key()) != Some(analyzer.key());
+
+    // A rebuild has to see every note, not only the changed ones.
+    if rebuilding {
+        chunks.clear();
+        for f in &files {
+            let path = rel_path(vault, f);
+            match fs::read_to_string(f) {
+                Ok(text) => chunks.extend(chunk_file(f, &path, &text, lang)),
+                Err(e) => eprintln!("skipping {}: {e}", f.display()),
+            }
+        }
+    }
+
+    if old.is_some() {
+        println!(
+            "{} org files · {} by stamp · {} restamped · {} changed · {} new · {} removed",
+            files.len(),
+            scan.by_stamp,
+            scan.by_hash,
+            scan.changed,
+            scan.new,
+            scan.dropped.len()
+        );
+    } else {
+        println!("{} org files", files.len());
+    }
+
+    if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
+        println!("nothing changed; lexical index left as it is");
+        return Ok(());
+    }
+    if rebuilding && old.is_some() {
+        println!("  analyzer changed ({}); rebuilding", analyzer.key());
+    }
+
+    lexical::sync(&dir, &chunks, &scan.dropped, rebuilding, &analyzer)?;
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        lex_manifest_path(&dir),
+        serde_json::to_vec(&LexManifest {
+            key: analyzer.key(),
+            files: scan.hashes,
+            stamps: scan.stamps,
+        })?,
+    )?;
+    println!(
+        "lexical index: {} chunks written in {:.2}s",
+        chunks.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Result<()> {
+    let t0 = Instant::now();
+    let mut files = Vec::new();
+    org_files(vault, &mut files)?;
+    files.sort();
+
+    let dir = state_dir(vault);
+    let old = if full { None } else { load_index(&dir) };
+
+    let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
+    let Scan { hashes, stamps, reuse, stale, dropped, by_stamp, by_hash, changed: changed_files, new: new_files } =
+        scan;
+    let dropped = dropped.len();
 
     // Loaded only if something actually needs chunking.
     let tok = if stale.is_empty() {
@@ -1693,34 +1871,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bo
         );
     }
 
-    let hashes_snapshot: std::collections::BTreeSet<String> =
-        hashes.keys().cloned().collect();
     let written = save_index(&dir, &chunks, &vectors, hashes, stamps)?;
-    // The lexical index follows the same deltas.  Failing to update it must not
-    // fail the run: it is derived, and `lexical` rebuilds it when the counts
-    // disagree.
-    let changed_paths: Vec<String> = stale.iter().map(|s| s.path.clone()).collect();
-    let dropped_paths: Vec<String> = old
-        .as_ref()
-        .map(|ix| {
-            ix.files
-                .keys()
-                .filter(|p| !hashes_snapshot.contains(*p))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    let analyzer = lexical::Analyzer::from_chunks(&chunks, fold);
-    if let Err(e) = lexical::sync(
-        &dir,
-        &chunks,
-        &changed_paths,
-        &dropped_paths,
-        old.is_none(),
-        &analyzer,
-    ) {
-        eprintln!("  lexical index not updated ({e}); `keyword` will rebuild it");
-    }
     println!(
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
@@ -1735,27 +1886,26 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bo
 /// A note that matches a query tends to match it in several places, and a flat
 /// top-k then spends every slot on one document.  Each note appears once, at
 /// the rank of its best chunk, with its other matching sections beneath it.
-fn report(chunks: &[Chunk], scored: Vec<(f32, usize)>, k: usize) {
-    let mut notes: Vec<(String, Vec<(f32, usize)>)> = Vec::new();
-    for (score, i) in scored {
-        let path = &chunks[i].path;
+fn report(scored: &[(f32, &Chunk)], k: usize) {
+    let mut notes: Vec<(String, Vec<(f32, &Chunk)>)> = Vec::new();
+    for (score, c) in scored {
+        let path = &c.path;
         match notes.iter_mut().find(|(p, _)| p == path) {
             Some((_, hits)) => {
                 if hits.len() < SECTIONS_PER_NOTE {
-                    hits.push((score, i));
+                    hits.push((*score, c));
                 }
             }
             None => {
                 if notes.len() < k {
-                    notes.push((path.clone(), vec![(score, i)]));
+                    notes.push((path.clone(), vec![(*score, c)]));
                 }
             }
         }
     }
 
     for (path, hits) in &notes {
-        let (best, bi) = hits[0];
-        let c = &chunks[bi];
+        let (best, c) = hits[0];
         let title = c.heading.split(" > ").next().unwrap_or(&c.heading);
         println!("\n{best:.3}  {title}");
         println!("       {}:{}", path, c.line);
@@ -1771,8 +1921,7 @@ fn report(chunks: &[Chunk], scored: Vec<(f32, usize)>, k: usize) {
             };
             println!("       {todo}{tags}");
         }
-        for (score, i) in hits {
-            let c = &chunks[*i];
+        for (score, c) in hits {
             let section = c
                 .heading
                 .split_once(" > ")
@@ -1867,7 +2016,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let search = t2.elapsed();
 
-    report(&chunks, scored, k);
+    report(&scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect::<Vec<_>>(), k);
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -2066,30 +2215,19 @@ fn cmd_lexical(
     fold: bool,
 ) -> Result<()> {
     let dir = state_dir(vault);
-    let chunks: Vec<Chunk> = serde_json::from_slice(
-        &fs::read(dir.join("chunks.json"))
-            .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
-    )?;
-
-    // The lexical index is derived, so it is rebuilt rather than trusted.  Two
-    // things invalidate it: a different analyzer, since tokens produced by one
-    // cannot be queried with another; and a document count that disagrees with
-    // chunks.json, which means an update was missed.  Either way the answer is
-    // one rebuild — 0.2 s for 6328 chunks — after which the new configuration is
-    // stored and subsequent searches find it current.
-    let analyzer = lexical::Analyzer::from_chunks(&chunks, fold);
-    let reason = if lexical::stored_key(&dir).as_deref() != Some(&analyzer.key()) {
-        Some("analyzer changed".to_string())
-    } else {
-        let have = lexical::doc_count(&dir, &analyzer).unwrap_or(0);
-        (have != chunks.len() as u64).then(|| format!("{have} docs for {} chunks", chunks.len()))
-    };
-    if let Some(why) = reason {
-        eprint!("  rebuilding lexical index ({why})... ");
-        io::stderr().flush().ok();
-        let t = Instant::now();
-        lexical::sync(&dir, &chunks, &[], &[], true, &analyzer)?;
-        eprintln!("{:.1}s", t.elapsed().as_secs_f64());
+    // The analyzer comes from the index's own metadata, not from the corpus:
+    // tokens produced by one analyzer cannot be queried with another, and the
+    // stored key is the only record of which one built this index.
+    let stored = lexical::stored_key(&dir).ok_or_else(|| {
+        anyhow!("no lexical index in {} — run `index --lexical`", dir.display())
+    })?;
+    let analyzer = lexical::Analyzer::from_key(&stored)
+        .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
+    if analyzer.fold != fold {
+        eprintln!(
+            "  note: this index was built with --fold={}; rebuild to change it",
+            analyzer.fold
+        );
     }
 
     let f = parse_query(query);
@@ -2100,18 +2238,14 @@ fn cmd_lexical(
     // Generous, because grouping collapses many chunks into one note: a single
     // well-matching note can otherwise fill the whole candidate pool and hide
     // every other note.
-    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100), conjunction, &analyzer)?;
+    let hits = lexical::search(&dir, &f, (k * 25).max(100), conjunction, &analyzer)?;
     let el = t.elapsed();
     if hits.is_empty() {
         println!("no match");
         return Ok(());
     }
-    report(&chunks, hits, k);
-    eprintln!(
-        "\n[lexical search over {} chunks {:.1}ms]",
-        chunks.len(),
-        el.as_secs_f64() * 1000.0
-    );
+    report(&hits.iter().map(|(s, c)| (*s, c)).collect::<Vec<_>>(), k);
+    eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
 
@@ -2145,8 +2279,20 @@ fn main() -> Result<()> {
             // for: it maps `ö` to `o`, and the transliteration a German speaker
             // would actually type is `Woerter`, which this does not produce.
             let fold = args.iter().skip(3).any(|a| a == "--fold");
+            // Same convention as `search`: bare is semantic, `--lexical` is the
+            // word index, and the two are separate artifacts built separately.
+            // `--both` is one command for the Emacs side to call.
+            let lexical = args.iter().skip(3).any(|a| a == "--lexical");
+            let both = args.iter().skip(3).any(|a| a == "--both");
             prepare_lang(&lang)?;
-            cmd_index(Path::new(vault), full, rehash, &lang, fold)
+            let vault = Path::new(vault);
+            if both || !lexical {
+                cmd_index(vault, full, rehash, &lang)?;
+            }
+            if both || lexical {
+                cmd_index_lexical(vault, full, rehash, &lang, fold)?;
+            }
+            Ok(())
         }
         Some("search") => {
             let vault = args
@@ -2195,8 +2341,8 @@ fn main() -> Result<()> {
         }
         _ => Err(anyhow!(
             "usage:\n\
-             \x20 org-semantic index   <vault> [--full|--rehash] [--fold]\n\
-             \x20                             [--lang en-US[,de-DE,…] | auto]\n\
+             \x20 org-semantic index   <vault> [--lexical|--both] [--full|--rehash]\n\
+             \x20                             [--lang en-US[,de-DE,…] | auto] [--fold]\n\
              \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
@@ -2467,7 +2613,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -2482,7 +2628,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -2547,7 +2693,7 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, &LangConfig::default(), false).unwrap();
+        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
 
         let ix = load_index(&state_dir(&v)).unwrap();
         assert_eq!(
@@ -2728,19 +2874,22 @@ mod tests {
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
         let an = lexical::Analyzer::from_chunks(&chunks, false);
-        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
+        lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
         assert_eq!(lexical::doc_count(&dir, &an).unwrap(), 2);
 
-        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an).unwrap();
+        // The hit carries the chunk itself: nothing else has to be loaded to
+        // know what matched, which is what lets the two indexes stand apart.
+        let hits = lexical::search(&dir, &parse_query("brown"), 10, true, &an).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(chunks[hits[0].1].path, a, "resolves back to the right chunk");
+        assert_eq!(hits[0].1.path, a, "the hit carries its own chunk");
+        assert_eq!(hits[0].1.text, "the quick brown fox");
 
         // A predicate must constrain the lexical side exactly as it does the
         // semantic one, or the two modes disagree about what was searched.
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10, true, &an).unwrap();
+        let hits = lexical::search(&dir, &parse_query("tag:german Fuchs"), 10, true, &an).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(chunks[hits[0].1].path, b);
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10, true, &an).unwrap();
+        assert_eq!(hits[0].1.path, b);
+        let hits = lexical::search(&dir, &parse_query("tag:physics Fuchs"), 10, true, &an).unwrap();
         assert!(hits.is_empty(), "predicate excludes the only textual match");
     }
 
@@ -2757,15 +2906,17 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let chunks = vec![mk(&a, "brown fox"), mk(&b, "brown bear")];
         let an = lexical::Analyzer::from_chunks(&chunks, false);
-        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an).unwrap().len(), 2);
+        lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
+        assert_eq!(lexical::search(&dir, &parse_query("brown"), 10, true, &an).unwrap().len(), 2);
 
-        // beta changes, alpha is deleted.
-        let chunks = vec![mk(&b, "crimson bear")];
-        let an2 = lexical::Analyzer::from_chunks(&chunks, false);
-        lexical::sync(&dir, &chunks, &[b.clone()], &[a.clone()], false, &an2).unwrap();
-        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true, &an2).unwrap().is_empty());
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10, true, &an2).unwrap().len(), 1);
+        // beta changes, alpha is deleted.  Only beta's chunks are passed: a
+        // note is replaced by path, so an incremental update never has to hold
+        // the notes it is not touching.
+        let changed = vec![mk(&b, "crimson bear")];
+        let an2 = lexical::Analyzer::widen(Some(&an), &changed, false);
+        lexical::sync(&dir, &changed, &[a.clone()], false, &an2).unwrap();
+        assert!(lexical::search(&dir, &parse_query("brown"), 10, true, &an2).unwrap().is_empty());
+        assert_eq!(lexical::search(&dir, &parse_query("crimson"), 10, true, &an2).unwrap().len(), 1);
         assert_eq!(lexical::doc_count(&dir, &an2).unwrap(), 1);
     }
 
@@ -2853,10 +3004,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let an = lexical::Analyzer::from_chunks(&chunks, false);
         assert_eq!(an.langs, vec!["de", "en"], "derived from the corpus");
-        lexical::sync(&dir, &chunks, &[], &[], true, &an).unwrap();
+        lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
 
         let hits = |q: &str| {
-            lexical::search(&dir, &chunks, &parse_query(q), 10, true, &an).unwrap().len()
+            lexical::search(&dir, &parse_query(q), 10, true, &an).unwrap().len()
         };
         assert_eq!(hits("oscillation"), 1, "English stemming: singular finds plural");
         assert_eq!(hits("Sprachen"), 1, "German stemming: plural finds singular");

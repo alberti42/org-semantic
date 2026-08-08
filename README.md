@@ -82,13 +82,37 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash] [--lang en-US|auto] [--fold]
+org-semantic index   <dir> [--lexical|--both] [--full|--rehash]
+                           [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k]        ranked by meaning; --lexical by words
 org-semantic search  <dir> <query> [k] [--lexical [--any] [--fold]]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
 ```
+
+### Two indexes, built separately
+
+`index` follows the same convention as `search`: bare it builds the **semantic**
+index, `--lexical` builds the **word** index, and `--both` does the two in one
+command.
+
+```sh
+org-semantic index ~/notes                 # embeddings      ~10 min / 951 notes
+org-semantic index ~/notes --lexical       # BM25             1.3 s
+org-semantic index ~/notes --both          # both
+```
+
+They are separate artifacts with separate records of what they have seen, so each
+re-run only reads the notes *that* index is behind on. Both are incremental by
+default; `--full` rebuilds from scratch and `--rehash` re-reads every note,
+ignoring timestamps.
+
+The asymmetry is the point. Embedding is minutes and needs a 129 MB model; the
+lexical index is a second and needs nothing but the notes. Keeping them apart
+means editing a few notes and refreshing keyword search costs a second, and
+changing `--fold` or your language list no longer drags the embeddings through a
+rebuild they have no stake in.
 
 ### Two rankings, deliberately unmixed
 
@@ -211,14 +235,22 @@ modified** — org-semantic only reads them.
 |---|---|---|
 | `.org-semantic/chunks.json` | 6.0 MB | every chunk: text, heading path, line, `:ID:`, tags, TODO |
 | `.org-semantic/vectors.f32` | 9.7 MB | one 384-float embedding per chunk, in the same order |
-| `.org-semantic/manifest.json` | 0.2 MB | per-note hash and `(mtime, size)`, so a re-run knows what changed |
-| `.org-semantic/tantivy/` | 2.5 MB | the lexical index |
-| | **18 MB** | |
+| `.org-semantic/manifest.json` | 0.2 MB | what the semantic index has seen: per-note hash and `(mtime, size)` |
+| `.org-semantic/tantivy/` | 4.9 MB | the lexical index, including its own copy of each chunk |
+| `.org-semantic/lexical.json` | 0.2 MB | the same, for the lexical index |
+| | **21 MB** | |
 
-`chunks.json` is the source of truth and is shared: `search` scores against
-`vectors.f32` and `lexical` against `tantivy/`, but both resolve a hit back to
-the same record, so either mode can be displayed, filtered and jumped to
-identically. `manifest.json` is used only while indexing, never while searching.
+**The two indexes are independent.** Each carries everything its own hits need
+and its own record of which notes it is behind on, so either can be built,
+rebuilt or deleted without disturbing the other — which is what makes
+`index --lexical` a one-second operation rather than a ten-minute one. The cost
+is that the chunk text is stored twice; on this vault that is 4.9 MB against a
+9.7 MB vector file.
+
+They chunk slightly differently on purpose. The semantic index splits any section
+longer than 512 tokens, because that is what the embedding model reads in one
+go; BM25 has no such limit, so the lexical index keeps whole sections — 5757
+chunks against 6328.
 
 Add `/.org-semantic/` to the vault's `.gitignore`. All of it is derived — delete
 the directory and `org-semantic index` rebuilds it in one pass.
