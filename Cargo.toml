@@ -1,0 +1,22 @@
+[package]
+name = "org-semantic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# `default-features = false` drops `image-models`, which pulls the whole image
+# stack (image, ravif, av-scenechange) for CLIP support this does not use.
+fastembed = { version = "5.17.4", default-features = false, features = [
+    "ort-download-binaries-native-tls",
+    "hf-hub-native-tls",
+] }
+# Pinned to exactly what fastembed depends on, so both resolve to one `ort` and
+# the prebuilt static runtime is shared rather than built twice.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
+tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
