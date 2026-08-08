@@ -82,7 +82,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash] [--lang en-US] [--fold]
+org-semantic index   <dir> [--full|--rehash] [--lang en-US|auto] [--fold]
 org-semantic search  <dir> <query> [k]        semantic search, grouped per note
 org-semantic keyword <dir> <query> [k] [--any] [--fold]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
@@ -133,11 +133,35 @@ org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 | `todo:x` | nearest enclosing heading has TODO keyword `x` |
 | `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT` |
 
-A note declares its language the way ltex-ls-plus already asks for it —
-`# ltex: language=de-DE`, in effect from that line onward — otherwise `--lang`
-applies (default `en-US`). Lexical search stems each note in its own language:
-`oscillation` finds `oscillations` in English notes, `Sprachen` finds `Sprache`
-in German ones, and neither leaks into the other.
+### Languages
+
+A note declares its language the way ltex-ls-plus already asks for it:
+
+```org
+# ltex: language=de-DE
+```
+
+That takes effect from its own line onward, as ltex does, so a note may switch
+part-way — the marker forces a chunk boundary, since a chunk carries exactly one
+language. Placed between sections it costs nothing; placed mid-section it splits
+that section in two. The keyword is configurable if you don't use ltex.
+
+Otherwise `--lang` applies, defaulting to `en-US` to match
+`lsp-ltex-plus-language`. `--lang auto` classifies each note from its own prose
+instead, per note rather than per chunk, since a chunk can be a two-line heading.
+
+**Auto-detection is accurate on prose and unreliable on notes that are mostly
+code.** Measured across a 951-note vault it placed German and English correctly
+but labelled about 4% of chunks French — every one of them a shell-snippet or
+key-binding note with too little natural language to classify. A misclassified
+chunk is stemmed wrongly and becomes harder to find, with nothing to indicate
+why. An explicit `# ltex: language=…` overrides the classifier, and it is a line
+such notes want anyway so ltex doesn't grammar-check your shell commands.
+
+Lexical search stems each note in its own language: `oscillation` finds
+`oscillations` in English notes, `Sprachen` finds `Sprache` in German ones, and
+neither leaks into the other. Regional variants share a stemmer, so `de-DE` and
+`de-AT` are both German.
 
 `--fold` folds accents, so `eleves` matches `élèves`. Off by default, and worth
 noting it does nothing for German — that stemmer already strips umlauts, so
