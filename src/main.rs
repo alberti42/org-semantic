@@ -94,6 +94,37 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Classify prose, returning a two-letter code.
+///
+/// Applied per note rather than per chunk: a chunk can be a two-line heading,
+/// and a classifier given two lines guesses.  A whole note is usually enough.
+fn detect_lang(prose: &str) -> String {
+    // whichlang speaks ISO 639-3; the rest of this speaks 639-1, as ltex does.
+    match whichlang::detect_language(prose).three_letter_code() {
+        "ara" => "ar",
+        "cmn" => "zh",
+        "deu" => "de",
+        "fra" => "fr",
+        "hin" => "hi",
+        "ita" => "it",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "nld" => "nl",
+        "por" => "pt",
+        "rus" => "ru",
+        "spa" => "es",
+        "swe" => "sv",
+        "tur" => "tr",
+        "vie" => "vi",
+        _ => "en",
+    }
+    .to_string()
+}
+
+/// The value that stands for "classify this note", accepted by `--lang` and
+/// spelled as ltex-ls-plus spells it.
+const LANG_AUTO: &str = "auto";
+
 /// Read a language from an ltex magic comment, e.g. `# ltex: language=de-DE`.
 ///
 /// Deliberately ltex-ls-plus' syntax rather than something new: a note that
@@ -376,6 +407,24 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     }
     flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
           &title, &file_tags, &cur_id, cur_line, &cur_lang);
+
+    // Classification is deferred to here so it sees the note's prose rather than
+    // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
+    // would pull every note towards English.  Only chunks that took the default
+    // are replaced — an explicit `# ltex: language=…` always wins.
+    if lang.default.eq_ignore_ascii_case(LANG_AUTO) {
+        let prose: Vec<&str> = chunks
+            .iter()
+            .filter(|c| c.lang.eq_ignore_ascii_case(LANG_AUTO))
+            .map(|c| c.text.as_str())
+            .collect();
+        if !prose.is_empty() {
+            let detected = detect_lang(&prose.join("\n"));
+            for c in chunks.iter_mut().filter(|c| c.lang.eq_ignore_ascii_case(LANG_AUTO)) {
+                c.lang = detected.clone();
+            }
+        }
+    }
     chunks
 }
 
@@ -1815,7 +1864,7 @@ fn find_tokenizer() -> Result<PathBuf> {
 
 /// Print the chunks a file produces, without embedding — for checking chunking
 /// decisions (boundaries, overlap, headings) without paying for a full index.
-fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
+fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig) -> Result<()> {
     let tok = tokenizers::Tokenizer::from_file(find_tokenizer()?)
         .map_err(|e| anyhow!("loading tokenizer: {e}"))?;
     let mut files = Vec::new();
@@ -1826,7 +1875,7 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
         let measure = |s: &str| n_tokens(&tok, s);
         let (chunks, _, _) =
             enforce_token_limit(
-                chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()),
+                chunk_file(f, &rel_path(vault, f), &text, lang),
                 &measure,
                 TOKEN_LIMIT,
             );
@@ -1834,10 +1883,11 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
         for (i, c) in chunks.iter().enumerate() {
             let full = format!("{}\n{}", c.heading, c.text);
             println!(
-                "\n--- [{i}] L{} · {} tok · {} chars · {}",
+                "\n--- [{i}] L{} · {} tok · {} chars · lang={} · {}",
                 c.line,
                 n_tokens(&tok, &full),
                 c.text.len(),
+                c.lang,
                 c.heading.split(" > ").last().unwrap_or("")
             );
             println!("    head: {:?}", &c.text.chars().take(60).collect::<String>());
@@ -1939,11 +1989,6 @@ fn main() -> Result<()> {
                     _ => {}
                 }
             }
-            if lang.default.eq_ignore_ascii_case("auto") {
-                return Err(anyhow!(
-                    "--lang auto needs a language classifier, which is not built yet"
-                ));
-            }
             // Accent folding, so `Worter` matches `Wörter`.  Off unless asked
             // for: it maps `ö` to `o`, and the transliteration a German speaker
             // would actually type is `Woerter`, which this does not produce.
@@ -1978,7 +2023,15 @@ fn main() -> Result<()> {
         Some("chunks") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
-            cmd_chunks(Path::new(vault), needle)
+            let mut lang = LangConfig::default();
+            for (i, a) in args.iter().enumerate().skip(3) {
+                if a == "--lang" {
+                    if let Some(v) = args.get(i + 1) {
+                        lang.default = v.clone();
+                    }
+                }
+            }
+            cmd_chunks(Path::new(vault), needle, &lang)
         }
         Some("tokens") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: tokens <vault> [limit]"))?;
@@ -2657,5 +2710,55 @@ mod tests {
         assert_eq!(hits("lang:DE-de Sprachen"), 1, "and is case-insensitive");
         assert_eq!(hits("lang:en Sprachen"), 0, "the predicate must exclude it");
         assert_eq!(hits("lang:de oscillation"), 0);
+    }
+
+    // ------------------------------------------------------ auto-detection
+
+    #[test]
+    fn detect_lang_maps_to_two_letter_codes() {
+        assert_eq!(detect_lang("The quick brown fox jumps over the lazy dog again and again"), "en");
+        assert_eq!(
+            detect_lang("Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert"),
+            "de"
+        );
+        assert_eq!(
+            detect_lang("Les élèves de la classe ont étudié la théorie pendant toute la semaine"),
+            "fr"
+        );
+    }
+
+    #[test]
+    fn auto_classifies_a_note_from_its_prose() {
+        let cfg = LangConfig { default: "auto".into(), keyword: "ltex".into() };
+        let de = chunk_file(
+            Path::new("/v/de.org"),
+            "de.org",
+            "#+title: Notiz\n* Abschnitt\nDie Wörter der deutschen Sprache sind manchmal sehr lang\n",
+            &cfg,
+        );
+        assert_eq!(de[0].lang, "de");
+        let en = chunk_file(
+            Path::new("/v/en.org"),
+            "en.org",
+            "#+title: Note\n* Section\nThe damped oscillations of a trapped atom in the tweezer\n",
+            &cfg,
+        );
+        assert_eq!(en[0].lang, "en");
+    }
+
+    /// An explicit declaration always beats the classifier — otherwise a note
+    /// could not correct a wrong guess.
+    #[test]
+    fn an_explicit_language_wins_over_auto() {
+        let cfg = LangConfig { default: "auto".into(), keyword: "ltex".into() };
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n             # ltex: language=it-IT\n* Two\nThe text here is still English but declared Italian\n",
+            &cfg,
+        );
+        let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
+        assert_eq!(by("damped").lang, "en", "classified");
+        assert_eq!(by("declared").lang, "it-IT", "declared, and not overruled");
     }
 }
