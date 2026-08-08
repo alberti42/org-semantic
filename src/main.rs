@@ -2,7 +2,7 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US|auto:en,de] [--fold]
+//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US,de-DE|auto] [--fold]
 //!   org-semantic search  <vault> <query> [k] [--lexical]  ranked by meaning, or
 //!                                                          by words with --lexical
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
@@ -101,12 +101,29 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// keeps it out of the distribution so ShareAlike never engages.
 const LID_URL: &str = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz";
 
-/// The loaded classifier, shared for the run.  `FastText` is `Sync`, and
-/// loading costs ~20 ms, which is not worth paying per note.
-fn classifier() -> Result<&'static FastText> {
-    static LID: OnceLock<FastText> = OnceLock::new();
-    if let Some(m) = LID.get() {
-        return Ok(m);
+/// The classifier and the set of languages it knows.
+///
+/// The languages are read from the model rather than listed here, so the two can
+/// never drift.
+struct Lid {
+    model: FastText,
+    langs: std::collections::HashSet<String>,
+}
+
+impl Lid {
+    /// Is CODE a language the classifier knows?  Compared on the primary subtag,
+    /// since the model speaks `de` where a vault speaks `de-DE`.
+    fn knows(&self, code: &str) -> bool {
+        self.langs.contains(&lexical::primary_subtag(code))
+    }
+}
+
+/// The loaded classifier, shared for the run.  `FastText` is `Sync`, and loading
+/// costs ~20 ms, which is not worth paying per note.
+fn classifier() -> Result<&'static Lid> {
+    static LID: OnceLock<Lid> = OnceLock::new();
+    if let Some(l) = LID.get() {
+        return Ok(l);
     }
     let path = xdg_cache().join("org-semantic").join("lid.176.ftz");
     if !path.exists() {
@@ -120,18 +137,31 @@ fn classifier() -> Result<&'static FastText> {
         fs::write(&tmp, &bytes)?;
         fs::rename(&tmp, &path)?;
     }
-    let mut m = FastText::new();
-    m.load_model(path.to_str().ok_or_else(|| anyhow!("model path is not UTF-8"))?)
+    let mut model = FastText::new();
+    model
+        .load_model(path.to_str().ok_or_else(|| anyhow!("model path is not UTF-8"))?)
         .map_err(|e| anyhow!("loading {}: {e}", path.display()))?;
-    let _ = LID.set(m);
+    let langs = model
+        .get_labels()
+        .map_err(|e| anyhow!("reading the model's languages: {e}"))?
+        .0
+        .iter()
+        .map(|l| l.trim_start_matches("__label__").to_ascii_lowercase())
+        .collect();
+    let _ = LID.set(Lid { model, langs });
     Ok(LID.get().expect("just set"))
 }
 
-/// Load the classifier before indexing starts, so a failed download is an error
-/// on the way in rather than a panic part-way through a long run.
+/// Fetch and load the classifier before any work starts, so a failed download is
+/// an error on the way in rather than a panic part-way through a long run.
+///
+/// Unconditional even when a single `--lang` means nothing will be classified:
+/// the model is still what says whether a language exists, and `index` is
+/// already downloading an embedding model two orders of magnitude larger.
 fn prepare_lang(lang: &LangConfig) -> Result<()> {
-    if lang.auto_candidates().is_some() {
-        classifier()?;
+    let lid = classifier()?;
+    for l in lang.languages.iter().filter(|l| !lid.knows(l)) {
+        eprintln!("  --lang {l}: not a language the classifier knows");
     }
     Ok(())
 }
@@ -158,6 +188,7 @@ fn detect_lang(prose: &str, candidates: &[&str]) -> String {
     let k = if candidates.is_empty() { 1 } else { LID_LABELS };
     let preds = classifier()
         .expect("classifier loaded by prepare_lang")
+        .model
         .predict(&text, k, 0.0)
         .unwrap_or_default();
     let mut ranked = preds.iter().map(|p| p.label.trim_start_matches("__label__"));
@@ -204,39 +235,85 @@ fn rel_path(vault: &Path, f: &Path) -> String {
     f.strip_prefix(vault).unwrap_or(f).to_string_lossy().into_owned()
 }
 
-/// Where a note's language comes from.
+/// Where a note's language comes from: the languages the vault is written in,
+/// as `--lang` spelled them.
+///
+/// The length of the list decides the whole policy:
+///
+/// - **one** — every note that does not declare its own is that language, and
+///   the classifier never runs (nor is its model downloaded)
+/// - **several** — the classifier runs, restricted to answering with one of them
+/// - **none** — `--lang auto`: the classifier runs unrestricted, all 176
 #[derive(Clone, Debug)]
 struct LangConfig {
-    /// Used when a note says nothing.  Mirrors `lsp-ltex-plus-language`, whose
-    /// default is "en-US".
-    default: String,
+    /// Mirrors `lsp-ltex-plus-language`, whose default is "en-US".
+    languages: Vec<String>,
     /// Magic-comment keyword, `ltex` unless someone wants their own.
     keyword: String,
 }
 
 impl Default for LangConfig {
     fn default() -> Self {
-        LangConfig { default: "en-US".into(), keyword: "ltex".into() }
+        LangConfig { languages: vec!["en-US".into()], keyword: "ltex".into() }
     }
 }
 
 impl LangConfig {
-    /// The candidate set for classification: `None` when the default names a
-    /// fixed language, otherwise the languages `auto` may answer with — empty
-    /// for a bare `auto`, meaning all 176.
+    /// `--lang en-US` / `--lang en-US,de-DE` / `--lang auto`.
+    fn parse(spec: &str) -> Self {
+        let languages = if spec.trim().eq_ignore_ascii_case(LANG_AUTO) {
+            Vec::new()
+        } else {
+            spec.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+        };
+        LangConfig { languages, keyword: "ltex".into() }
+    }
+
+    /// Does a note without its own declaration need classifying?
+    fn detects(&self) -> bool {
+        self.languages.len() != 1
+    }
+
+    /// What the classifier may answer with; empty means anything.
+    fn candidates(&self) -> Vec<&str> {
+        if self.detects() {
+            self.languages.iter().map(String::as_str).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The language written on a chunk that declares nothing.  With one
+    /// language that is the answer; otherwise it is a placeholder the
+    /// classifier replaces once it has seen the whole note.
+    fn undeclared(&self) -> &str {
+        match self.languages.as_slice() {
+            [only] => only,
+            _ => LANG_AUTO,
+        }
+    }
+
+    /// What a note's own `# ltex: language=…` is worth.
     ///
-    /// Spelled `auto:en-US,de-DE`.  The entries are returned as written, so a
-    /// vault that thinks in `en-US` gets `en-US` back rather than fastText's
-    /// bare `en`.
-    fn auto_candidates(&self) -> Option<Vec<&str>> {
-        let rest = strip_prefix_ci(self.default.trim(), LANG_AUTO)?;
-        match rest.strip_prefix(':') {
-            Some(list) => Some(
-                list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
-            ),
-            None if rest.is_empty() => Some(Vec::new()),
-            // `auto-something` is not `auto`.
-            None => None,
+    /// A declaration wins over everything, including a `--lang` list that does
+    /// not mention it — the list says what the classifier may *guess*, never
+    /// what a note may *state*.  The one exception is a language the classifier
+    /// has never heard of, which is a typo far more often than a real language;
+    /// that falls back to the first configured language, the vault's default.
+    /// Under `auto` there is no such default, so the note is classified instead.
+    fn accept_declared(&self, declared: &str, note: &str) -> String {
+        if classifier().is_ok_and(|lid| lid.knows(declared)) {
+            return declared.to_string();
+        }
+        match self.languages.first() {
+            Some(default) => {
+                eprintln!("  {note}: unknown language `{declared}`, using `{default}`");
+                default.clone()
+            }
+            None => {
+                eprintln!("  {note}: unknown language `{declared}`, classifying instead");
+                self.undeclared().to_string()
+            }
         }
     }
 }
@@ -348,7 +425,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     let mut buf = String::new();
     let mut in_drawer = false;
     let mut seen_heading = false;
-    let mut cur_lang = lang.default.clone();
+    let mut cur_lang = lang.undeclared().to_string();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
     // they apply to the whole file either way.
@@ -465,7 +542,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
             flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
                   &title, &file_tags, &cur_id, cur_line, &cur_lang);
             buf.clear();
-            cur_lang = l;
+            cur_lang = lang.accept_declared(&l, rel);
             continue;
         }
         // Other keywords, drawer ends and comments are markup, not prose.
@@ -483,15 +560,16 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
     // would pull every note towards English.  Only chunks that took the default
     // are replaced — an explicit `# ltex: language=…` always wins.
-    if let Some(candidates) = lang.auto_candidates() {
+    if lang.detects() {
+        let undeclared = lang.undeclared();
         let prose: Vec<&str> = chunks
             .iter()
-            .filter(|c| c.lang.eq_ignore_ascii_case(&lang.default))
+            .filter(|c| c.lang == undeclared)
             .map(|c| c.text.as_str())
             .collect();
         if !prose.is_empty() {
-            let detected = detect_lang(&prose.join("\n"), &candidates);
-            for c in chunks.iter_mut().filter(|c| c.lang.eq_ignore_ascii_case(&lang.default)) {
+            let detected = detect_lang(&prose.join("\n"), &lang.candidates());
+            for c in chunks.iter_mut().filter(|c| c.lang == undeclared) {
                 c.lang = detected.clone();
             }
         }
@@ -2052,7 +2130,7 @@ fn main() -> Result<()> {
                 match a.as_str() {
                     "--lang" => {
                         if let Some(v) = args.get(i + 1) {
-                            lang.default = v.clone();
+                            lang = LangConfig { keyword: lang.keyword, ..LangConfig::parse(v) };
                         }
                     }
                     "--lang-keyword" => {
@@ -2097,7 +2175,7 @@ fn main() -> Result<()> {
             for (i, a) in args.iter().enumerate().skip(3) {
                 if a == "--lang" {
                     if let Some(v) = args.get(i + 1) {
-                        lang.default = v.clone();
+                        lang = LangConfig::parse(v);
                     }
                 }
             }
@@ -2118,7 +2196,7 @@ fn main() -> Result<()> {
         _ => Err(anyhow!(
             "usage:\n\
              \x20 org-semantic index   <vault> [--full|--rehash] [--fold]\n\
-             \x20                             [--lang en-US|auto|auto:en-US,de-DE]\n\
+             \x20                             [--lang en-US[,de-DE,…] | auto]\n\
              \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
@@ -2725,7 +2803,7 @@ mod tests {
 
     #[test]
     fn the_default_language_is_configurable() {
-        let cfg = LangConfig { default: "it-IT".into(), keyword: "ltex".into() };
+        let cfg = LangConfig::parse("it-IT");
         let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", &cfg);
         assert_eq!(c[0].lang, "it-IT");
     }
@@ -2837,22 +2915,30 @@ mod tests {
     }
 
     #[test]
-    fn auto_candidates_are_parsed_from_the_default() {
-        let auto = |s: &str| {
-            let cfg = LangConfig { default: s.into(), keyword: "ltex".into() };
-            cfg.auto_candidates().map(|v| v.join(","))
-        };
-        assert_eq!(auto("en-US"), None);
-        assert_eq!(auto("auto").as_deref(), Some(""));
-        assert_eq!(auto("AUTO").as_deref(), Some(""));
-        assert_eq!(auto("auto:en-US, de-DE").as_deref(), Some("en-US,de-DE"));
-        // Not `auto`, and must not be read as an unrestricted one.
-        assert_eq!(auto("autopilot"), None);
+    fn the_length_of_the_language_list_decides_the_policy() {
+        // One language: no classifier, and it is what undeclared notes get.
+        let one = LangConfig::parse("en-US");
+        assert!(!one.detects());
+        assert_eq!(one.undeclared(), "en-US");
+        assert!(one.candidates().is_empty());
+
+        // Several: classify, restricted to them.
+        let some = LangConfig::parse("en-US, de-DE");
+        assert!(some.detects());
+        assert_eq!(some.candidates(), vec!["en-US", "de-DE"]);
+
+        // `auto`: classify, unrestricted.
+        let auto = LangConfig::parse("AUTO");
+        assert!(auto.detects());
+        assert!(auto.candidates().is_empty());
+
+        // A language merely named `autopilot` is not `auto`.
+        assert!(!LangConfig::parse("autopilot").detects());
     }
 
     #[test]
     fn auto_classifies_a_note_from_its_prose() {
-        let cfg = LangConfig { default: "auto".into(), keyword: "ltex".into() };
+        let cfg = LangConfig::parse("auto");
         let de = chunk_file(
             Path::new("/v/de.org"),
             "de.org",
@@ -2873,7 +2959,7 @@ mod tests {
     /// could not correct a wrong guess.
     #[test]
     fn an_explicit_language_wins_over_auto() {
-        let cfg = LangConfig { default: "auto".into(), keyword: "ltex".into() };
+        let cfg = LangConfig::parse("auto");
         let c = chunk_file(
             Path::new("/v/n.org"),
             "n.org",
@@ -2883,5 +2969,54 @@ mod tests {
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
         assert_eq!(by("declared").lang, "it-IT", "declared, and not overruled");
+    }
+
+    #[test]
+    fn an_explicit_language_wins_even_from_outside_the_candidate_set() {
+        // The vault says it is written in English and German.  A note that
+        // declares Italian is Italian: the list constrains what the classifier
+        // may guess, never what a note states about itself.
+        let cfg = LangConfig::parse("en-US,de-DE");
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n# ltex: language=it-IT\n* Two\nQuesto paragrafo dichiara la propria lingua\n",
+            &cfg,
+        );
+        let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
+        assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
+        assert_eq!(by("dichiara").lang, "it-IT", "declared, outside the candidates");
+    }
+
+    #[test]
+    fn one_language_classifies_nothing_but_still_honours_a_declaration() {
+        let cfg = LangConfig::parse("en-US");
+        assert!(!cfg.detects(), "a single language must not run the classifier");
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            "#+title: N\n* One\nPlain English body text here\n\n# ltex: language=de-DE\n* Two\nDieser Abschnitt ist auf Deutsch geschrieben\n",
+            &cfg,
+        );
+        let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
+        assert_eq!(by("Plain").lang, "en-US");
+        assert_eq!(by("Abschnitt").lang, "de-DE");
+    }
+
+    #[test]
+    fn a_declaration_the_classifier_does_not_know_falls_back_to_the_default() {
+        // `klingon` is a typo far more often than a language, and honouring it
+        // would file the chunk under a language nothing ever searches.  The
+        // first configured language is the vault's default and takes over.
+        let body = "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
+        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("de-DE,en-US"));
+        assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
+
+        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("en-US"));
+        assert_eq!(single[0].lang, "en-US");
+
+        // Under `auto` there is no configured default, so it is classified.
+        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("auto"));
+        assert_eq!(auto[0].lang, "en");
     }
 }

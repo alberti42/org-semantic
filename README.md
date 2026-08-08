@@ -149,32 +149,38 @@ part-way — the marker forces a chunk boundary, since a chunk carries exactly o
 language. Placed between sections it costs nothing; placed mid-section it splits
 that section in two. The keyword is configurable if you don't use ltex.
 
-Otherwise `--lang` applies, defaulting to `en-US` to match
-`lsp-ltex-plus-language`. `--lang auto` classifies each note from its own prose
-instead, per note rather than per chunk, since a chunk can be a two-line heading.
-It uses fastText's `lid.176` (176 languages, 917 kB), downloaded to
-`$XDG_CACHE_HOME/org-semantic/` the first time you ask for `auto`.
-
-**Auto-detection is accurate on prose and guesses when there is no prose.**
-Measured across a 951-note vault it placed English, German and Italian correctly;
-the 0.4% it got wrong were notes that are almost entirely attachment links or
-shell snippets, where it is classifying filenames.
-
-Naming the languages your vault is actually written in removes those:
+Otherwise `--lang` names the languages the vault is written in, and **how many
+you name decides everything else**:
 
 ```
-org-semantic index ~/notes --full --lang auto:en-US,de-DE,it-IT
+--lang en-US                  one language: every undeclared note is English
+--lang en-US,de-DE,it-IT      several: each note is classified as one of these
+--lang auto                   classified with no restriction, all 176
 ```
 
-The answer is then the highest-ranked language among the ones you listed, so a
-note cannot come back Portuguese because a screenshot filename looked like it.
-On the same vault that takes the misclassifications to zero. Candidates are
-matched on their primary subtag but stored as you wrote them, so `de-DE` stays
-`de-DE` rather than becoming fastText's bare `de`.
+Classification is per note rather than per chunk, since a chunk can be a two-line
+heading. It uses fastText's `lid.176` (917 kB), downloaded to
+`$XDG_CACHE_HOME/org-semantic/` on first use.
+
+**It is accurate on prose and guesses when there is no prose.** Measured across a
+951-note vault, `auto` placed English, German and Italian correctly; the 0.4% it
+got wrong were notes that are almost entirely attachment links or shell snippets,
+where it is classifying filenames. **Listing your languages removes those** — the
+answer is the best-ranked language among the ones you named, so a note cannot
+come back Portuguese because a screenshot filename looked like it. On the same
+vault that takes the misclassifications to zero.
+
+Languages are matched on their primary subtag but stored as you wrote them, so
+`de-DE` stays `de-DE` rather than becoming fastText's bare `de`. The first one
+you name is the vault's default.
 
 A misclassified chunk is stemmed wrongly and becomes harder to find, with nothing
-to indicate why. An explicit `# ltex: language=…` overrides the classifier, and
-it is a line such notes want anyway so ltex doesn't grammar-check your shell
+to indicate why. An explicit `# ltex: language=…` overrides the classifier — it
+wins even over a language list that doesn't mention it, because the list says
+what may be *guessed*, never what a note may *state*. The exception is a code the
+classifier doesn't know, which is a typo far more often than a language; that
+warns and falls back to the default. Such a marker is a line those notes want
+anyway, so ltex doesn't grammar-check your shell
 commands.
 
 Lexical search stems each note in its own language: `oscillation` finds
