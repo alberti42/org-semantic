@@ -2,7 +2,7 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--force]         build/refresh the index
+//!   org-semantic index  <vault> [--full]          refresh (incremental by default)
 //!   org-semantic search <vault> <query> [k]       query it, grouped by note
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
@@ -533,61 +533,91 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-fn cmd_index(vault: &Path, force: bool) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
 
     let dir = state_dir(vault);
-    let old = if force { None } else { load_index(&dir) };
+    let old = if full { None } else { load_index(&dir) };
 
-    let tok = tokenizers::Tokenizer::from_file(find_tokenizer()?)
-        .map_err(|e| anyhow!("loading tokenizer: {e}"))?;
-    let measure = |s: &str| n_tokens(&tok, s);
+    // Read and hash everything first.  Deciding what is stale before touching
+    // the tokenizer means a run that only drops deleted notes loads neither the
+    // tokenizer nor the model.  The whole corpus is a few megabytes of text.
+    struct Seen {
+        path: String,
+        text: String,
+        hash: u64,
+    }
+    let mut seen: Vec<Seen> = Vec::with_capacity(files.len());
+    for f in &files {
+        match fs::read_to_string(f) {
+            Ok(text) => {
+                let hash = content_hash(text.as_bytes());
+                seen.push(Seen { path: f.to_string_lossy().into_owned(), text, hash });
+            }
+            Err(e) => eprintln!("skipping {}: {e}", f.display()),
+        }
+    }
 
-    // Assembled in file order with a slot per chunk.  Unchanged files copy
-    // their vectors straight across; changed ones leave zeroed slots that the
-    // embedding pass below fills, so the two halves stay positionally aligned
-    // however much of the corpus is reused.
+    let manifest: std::collections::BTreeMap<String, u64> =
+        seen.iter().map(|s| (s.path.clone(), s.hash)).collect();
+    let dropped = old
+        .as_ref()
+        .map(|ix| ix.files.keys().filter(|p| !manifest.contains_key(*p)).count())
+        .unwrap_or(0);
+
+    let mut stale = vec![false; seen.len()];
+    let (mut reused_files, mut changed_files, mut new_files) = (0usize, 0usize, 0usize);
+    for (i, s) in seen.iter().enumerate() {
+        match old.as_ref().and_then(|ix| ix.files.get(&s.path)) {
+            Some(h) if *h == s.hash => reused_files += 1,
+            Some(_) => {
+                changed_files += 1;
+                stale[i] = true;
+            }
+            None => {
+                new_files += 1;
+                stale[i] = true;
+            }
+        }
+    }
+
+    // Loaded only if something actually needs chunking.
+    let tok = if stale.iter().any(|&b| b) {
+        Some(
+            tokenizers::Tokenizer::from_file(find_tokenizer()?)
+                .map_err(|e| anyhow!("loading tokenizer: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    // Assembled in file order with a slot per chunk.  Unchanged files copy their
+    // vectors straight across; stale ones leave zeroed slots that the embedding
+    // pass fills, so chunks and vectors stay positionally aligned however much
+    // of the corpus is reused.
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut vectors: Vec<f32> = Vec::new();
     let mut pending: Vec<usize> = Vec::new();
     let mut pending_len: Vec<usize> = Vec::new();
-    let mut manifest: std::collections::BTreeMap<String, u64> = Default::default();
-    let (mut reused_files, mut changed_files, mut new_files, mut resplit) = (0, 0, 0, 0usize);
+    let mut resplit = 0usize;
 
-    for f in &files {
-        let path = f.to_string_lossy().into_owned();
-        let text = match fs::read_to_string(f) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("skipping {}: {e}", f.display());
-                continue;
-            }
-        };
-        let hash = content_hash(text.as_bytes());
-        manifest.insert(path.clone(), hash);
-
-        if let Some(ix) = &old {
-            if ix.files.get(&path) == Some(&hash) {
-                // A file with no chunks at all — empty, or nothing but a
-                // heading — is still unchanged.  Counting it as changed made
-                // every run report work it then did not do.
-                for &i in ix.by_path.get(&path).map(Vec::as_slice).unwrap_or(&[]) {
-                    chunks.push(ix.chunks[i].clone());
-                    vectors.extend_from_slice(&ix.vectors[i * DIM..(i + 1) * DIM]);
+    for (i, s) in seen.iter().enumerate() {
+        if !stale[i] {
+            if let Some(ix) = &old {
+                for &j in ix.by_path.get(&s.path).map(Vec::as_slice).unwrap_or(&[]) {
+                    chunks.push(ix.chunks[j].clone());
+                    vectors.extend_from_slice(&ix.vectors[j * DIM..(j + 1) * DIM]);
                 }
-                reused_files += 1;
-                continue;
             }
-            if ix.files.contains_key(&path) {
-                changed_files += 1;
-            } else {
-                new_files += 1;
-            }
+            continue;
         }
-        let (cs, n, lens) = enforce_token_limit(chunk_file(f, &text), &measure, TOKEN_LIMIT);
+        let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
+        let measure = |t: &str| n_tokens(tok, t);
+        let (cs, n, lens) =
+            enforce_token_limit(chunk_file(Path::new(&s.path), &s.text), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -596,11 +626,6 @@ fn cmd_index(vault: &Path, force: bool) -> Result<()> {
             vectors.extend(std::iter::repeat(0.0).take(DIM));
         }
     }
-
-    let dropped = old
-        .as_ref()
-        .map(|ix| ix.files.keys().filter(|p| !manifest.contains_key(*p)).count())
-        .unwrap_or(0);
 
     if old.is_some() {
         println!(
@@ -621,65 +646,72 @@ fn cmd_index(vault: &Path, force: bool) -> Result<()> {
         t0.elapsed().as_secs_f64()
     );
 
-    if pending.is_empty() {
+    // Only a run that changes nothing at all may skip the write.  Dropping a
+    // deleted note produces no work to embed but must still be persisted, or
+    // the note stays searchable until something unrelated happens to change.
+    if pending.is_empty() && dropped == 0 && old.is_some() {
         println!("nothing changed; index left as it is");
         return Ok(());
     }
 
-    let t1 = Instant::now();
-    let mut model = model()?;
-    println!("model loaded in {:.2}s", t1.elapsed().as_secs_f64());
+    if pending.is_empty() {
+        println!("no new text to embed; pruning {dropped} removed note(s)");
+    } else {
+        let t1 = Instant::now();
+        let mut model = model()?;
+        println!("model loaded in {:.2}s", t1.elapsed().as_secs_f64());
 
-    let t2 = Instant::now();
-    // Heading path prepended so a passage carries the context it sits under.
-    let texts: Vec<String> = pending
-        .iter()
-        .map(|&i| format!("{}\n{}", chunks[i].heading, chunks[i].text))
-        .collect();
-    let total_tokens: usize = pending_len.iter().sum();
+        let t2 = Instant::now();
+        // Heading path prepended so a passage carries the context it sits under.
+        let texts: Vec<String> = pending
+            .iter()
+            .map(|&i| format!("{}\n{}", chunks[i].heading, chunks[i].text))
+            .collect();
+        let total_tokens: usize = pending_len.iter().sum();
 
-    // Sorted by tokens, not characters.  fastembed pads each batch to its
-    // longest member, and chars-per-token runs from about 2.0 in the LaTeX-heavy
-    // notes to 4.0 in prose, so a character sort leaves batches uneven in the
-    // dimension that actually costs.  The lengths come from the pass that
-    // enforced the token limit, so nothing is tokenized twice.
-    let mut order: Vec<usize> = (0..texts.len()).collect();
-    order.sort_unstable_by_key(|&i| pending_len[i]);
+        // Sorted by tokens, not characters.  fastembed pads each batch to its
+        // longest member, and chars-per-token runs from about 2.0 in the
+        // LaTeX-heavy notes to 4.0 in prose, so a character sort leaves batches
+        // uneven in the dimension that actually costs.  The lengths come from
+        // the pass that enforced the token limit, so nothing is tokenized twice.
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_unstable_by_key(|&i| pending_len[i]);
 
-    const BATCH: usize = 64;
-    let (mut done, mut tokens_done) = (0usize, 0usize);
-    for group in order.chunks(BATCH) {
-        let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
-        let vs = model
-            .embed(&batch, Some(BATCH))
-            .map_err(|e| anyhow!("embedding: {e}"))?;
-        for (&i, mut v) in group.iter().zip(vs) {
-            normalize(&mut v);
-            let slot = pending[i] * DIM;
-            vectors[slot..slot + DIM].copy_from_slice(&v);
+        const BATCH: usize = 64;
+        let (mut done, mut tokens_done) = (0usize, 0usize);
+        for group in order.chunks(BATCH) {
+            let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
+            let vs = model
+                .embed(&batch, Some(BATCH))
+                .map_err(|e| anyhow!("embedding: {e}"))?;
+            for (&i, mut v) in group.iter().zip(vs) {
+                normalize(&mut v);
+                let slot = pending[i] * DIM;
+                vectors[slot..slot + DIM].copy_from_slice(&v);
+            }
+            done += group.len();
+            tokens_done += group.iter().map(|&i| pending_len[i]).sum::<usize>();
+            let el = t2.elapsed().as_secs_f64();
+            // Tokens per second is near flat once padding is gone, so remaining
+            // work divided by it is an estimate rather than an extrapolation.
+            let tps = (tokens_done as f64 / el).max(1.0);
+            eprint!(
+                "\r  embedding {done}/{} · {:.0} chunk/s · {:.1}k tok/s · eta {:.0}s   ",
+                texts.len(),
+                done as f64 / el,
+                tps / 1000.0,
+                (total_tokens - tokens_done) as f64 / tps
+            );
+            io::stderr().flush().ok();
         }
-        done += group.len();
-        tokens_done += group.iter().map(|&i| pending_len[i]).sum::<usize>();
-        let el = t2.elapsed().as_secs_f64();
-        // Tokens per second is near flat once padding is gone, so remaining
-        // work divided by it is an estimate rather than an extrapolation.
-        let tps = (tokens_done as f64 / el).max(1.0);
-        eprint!(
-            "\r  embedding {done}/{} · {:.0} chunk/s · {:.1}k tok/s · eta {:.0}s   ",
+        eprintln!();
+        println!(
+            "embedded {} chunks in {:.1}s ({:.0}/s)",
             texts.len(),
-            done as f64 / el,
-            tps / 1000.0,
-            (total_tokens - tokens_done) as f64 / tps
+            t2.elapsed().as_secs_f64(),
+            texts.len() as f64 / t2.elapsed().as_secs_f64()
         );
-        io::stderr().flush().ok();
     }
-    eprintln!();
-    println!(
-        "embedded {} chunks in {:.1}s ({:.0}/s)",
-        texts.len(),
-        t2.elapsed().as_secs_f64(),
-        texts.len() as f64 / t2.elapsed().as_secs_f64()
-    );
 
     let written = save_index(&dir, &chunks, &vectors, manifest)?;
     println!(
@@ -957,8 +989,9 @@ fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("index") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: index <vault>"))?;
-            let force = args.iter().any(|a| a == "--force");
-            cmd_index(Path::new(vault), force)
+            // `--incremental` is the default; accepted so a script can say so.
+            let full = args.iter().any(|a| a == "--full");
+            cmd_index(Path::new(vault), full)
         }
         Some("search") => {
             let vault = args
@@ -1184,5 +1217,119 @@ mod tests {
         let para = std::iter::repeat("é→ü ").take(400).collect::<String>();
         let pieces = hard_split(&para, &words, 30);
         assert_eq!(pieces.concat(), para);
+    }
+
+    // ------------------------------------------------- index round-trip / prune
+
+    fn scratch(name: &str) -> PathBuf {
+        // No tempfile dependency: a per-test directory under the system temp,
+        // removed first so a previous failed run cannot leak into this one.
+        let d = std::env::temp_dir().join(format!("org-semantic-test-{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn note(dir: &Path, name: &str) -> String {
+        let body = format!(
+            ":PROPERTIES:\n:ID: id-{name}\n:END:\n#+title: {name}\n\n* S\nText about {name}.\n"
+        );
+        let p = dir.join(format!("{name}.org"));
+        fs::write(&p, &body).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    /// Seed an index without embedding anything: vectors are zeros, which is
+    /// all the reuse and prune paths care about.
+    fn seed(dir: &Path, paths: &[&str]) {
+        let mut chunks = Vec::new();
+        let mut files = std::collections::BTreeMap::new();
+        for p in paths {
+            chunks.push(Chunk {
+                path: (*p).into(),
+                id: None,
+                heading: "H".into(),
+                line: 1,
+                text: "body".into(),
+            });
+            files.insert((*p).to_string(), content_hash(&fs::read(p).unwrap()));
+        }
+        let vectors = vec![0.0f32; chunks.len() * DIM];
+        save_index(&state_dir(dir), &chunks, &vectors, files).unwrap();
+    }
+
+    /// Regression: a run whose only change is a deleted note produced nothing to
+    /// embed, hit the early return, and never wrote the pruned index — so the
+    /// note stayed searchable until something unrelated changed.
+    #[test]
+    fn deleting_a_note_is_persisted_even_though_nothing_needs_embedding() {
+        let v = scratch("prune");
+        let a = note(&v, "alpha");
+        let b = note(&v, "beta");
+        seed(&v, &[a.as_str(), b.as_str()]);
+
+        fs::remove_file(&b).unwrap();
+        cmd_index(&v, false).unwrap();
+
+        let ix = load_index(&state_dir(&v)).expect("index should still load");
+        assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
+        assert_eq!(ix.chunks[0].path, a);
+        assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
+        assert_eq!(ix.vectors.len(), ix.chunks.len() * DIM, "halves stay aligned");
+    }
+
+    #[test]
+    fn an_unchanged_vault_is_left_alone() {
+        let v = scratch("unchanged");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
+        cmd_index(&v, false).unwrap();
+        assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let v = scratch("roundtrip");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let ix = load_index(&state_dir(&v)).unwrap();
+        assert_eq!(ix.chunks.len(), 1);
+        assert_eq!(ix.vectors.len(), DIM);
+        assert_eq!(ix.by_path.get(&a).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_truncated_vector_file_is_rejected_rather_than_trusted() {
+        let v = scratch("mismatch");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let f = state_dir(&v).join("vectors.f32");
+        let mut bytes = fs::read(&f).unwrap();
+        bytes.truncate(bytes.len() - 4);
+        fs::write(&f, bytes).unwrap();
+        assert!(
+            load_index(&state_dir(&v)).is_none(),
+            "positional coupling means a mismatch returns wrong answers, not errors"
+        );
+    }
+
+    #[test]
+    fn an_index_from_another_model_is_rejected() {
+        let v = scratch("model");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let f = state_dir(&v).join("manifest.json");
+        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
+        m["model"] = serde_json::Value::String("SomeOtherModel".into());
+        fs::write(&f, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(load_index(&state_dir(&v)).is_none());
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_discriminating() {
+        assert_eq!(content_hash(b"alpha"), content_hash(b"alpha"));
+        assert_ne!(content_hash(b"alpha"), content_hash(b"alphb"));
+        assert_ne!(content_hash(b""), content_hash(b"x"));
     }
 }
