@@ -1,14 +1,14 @@
-//! semnotes — semantic search over a tree of notes.
+//! org-semantic — semantic search over a tree of org-mode notes.
 //!
 //! Prototype.  Commands:
 //!
-//!   semnotes index  <vault> [--full|--rehash] refresh (incremental by default)
-//!   semnotes search <vault> <query> [k]       query it, grouped by note
-//!   semnotes chunks <vault> <path-substring>  show chunking, no embedding
-//!   semnotes tokens <vault> [limit]           token-length distribution
-//!   semnotes bench  <vault> [n] [config]      embedding throughput
+//!   org-semantic index  <vault> [--full|--rehash] refresh (incremental by default)
+//!   org-semantic search <vault> <query> [k]       query it, grouped by note
+//!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
+//!   org-semantic tokens <vault> [limit]           token-length distribution
+//!   org-semantic bench  <vault> [n] [config]      embedding throughput
 //!
-//! The index lives in `<vault>/.semnotes/`: a JSON chunk table and a flat
+//! The index lives in `<vault>/.org-semantic/`: a JSON chunk table and a flat
 //! little-endian f32 array of embeddings.  There is no ANN index and no
 //! database — a vault of a thousand notes is a few megabytes of vectors, and a
 //! brute-force dot product over that is exact and takes under a millisecond.
@@ -32,7 +32,7 @@ const QUERY_PREFIX: &str = "Represent this sentence for searching relevant passa
 /// than at a whole note, large enough to carry its own context.
 const MAX_CHARS: usize = 1500;
 
-const STATE_DIR: &str = ".semnotes";
+const STATE_DIR: &str = ".org-semantic";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Chunk {
@@ -1079,7 +1079,7 @@ fn main() -> Result<()> {
             cmd_bench(Path::new(vault), n, cfg)
         }
         _ => Err(anyhow!(
-            "usage:\n  semnotes index  <vault>\n  semnotes search <vault> <query> [k]\n  semnotes bench  <vault> [n]"
+            "usage:\n  org-semantic index  <vault>\n  org-semantic search <vault> <query> [k]\n  org-semantic bench  <vault> [n]"
         )),
     }
 }
@@ -1283,7 +1283,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         // No tempfile dependency: a per-test directory under the system temp,
         // removed first so a previous failed run cannot leak into this one.
-        let d = std::env::temp_dir().join(format!("semnotes-test-{name}"));
+        let d = std::env::temp_dir().join(format!("org-semantic-test-{name}"));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

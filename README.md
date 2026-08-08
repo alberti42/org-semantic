@@ -1,18 +1,18 @@
-# semnotes
+# org-semantic
 
-Semantic search over a directory of notes. One static binary, no server, no
+Semantic search over a tree of org-mode notes. One static binary, no server, no
 database, no Python.
 
 ```console
-$ semnotes index ~/notes
+$ org-semantic index ~/notes
 951 org files
 6328 chunks · 6328 to embed · scanned in 2.3s
 model loaded in 0.16s
   embedding 6328/6328 · 29 chunk/s · 6.6k tok/s · eta 0s
 embedded 6328 chunks in 220.7s (29/s)
-wrote ~/notes/.semnotes (9.7 MB of vectors) in 223.0s total
+wrote ~/notes/.org-semantic (9.7 MB of vectors) in 223.0s total
 
-$ semnotes search ~/notes "why do the atoms heat up and get lost from the trap"
+$ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
 0.755  2025-06-06 Review - Probing topological matter and fermion dynamics
        03 Literature review/2025-06-06 Review - Probing topological matter.org:677
@@ -35,29 +35,42 @@ No word of that query appears in either note's title. That is the point.
 
 ## Why
 
-Existing options for this either run a Python service — one popular org indexer
-pulls 129 packages including torch, CLIP and the Azure SDK — or are built for
-Markdown and know nothing about org structure.
+Existing options either run a Python service — one popular org indexer pulls 129
+packages including torch, CLIP and the Azure SDK — or are built for Markdown and
+know nothing about org structure.
 
-semnotes is one 34 MB binary. ONNX Runtime is statically linked; the only thing
-it ever downloads is the embedding model (129 MB, once, into your cache).
+org-semantic is one 34 MB binary. ONNX Runtime is statically linked; the only
+thing it ever downloads is the embedding model (129 MB, once, into your cache).
 
-It is also, as far as I know, the only tool of its kind that understands org:
-property drawers stay out of the embedded text, `#+title:` names the note, and
-every chunk carries the enclosing `:ID:` so an editor can jump to a hit through
-`org-id` rather than by file position.
+**It is deliberately org-only.** Covering every markup format converges on the
+least common denominator — headings and paragraphs — which is where the
+generic tools already are, and where a dedicated one will always be better at
+its own format. Knowing it is org buys things a format-agnostic tool cannot
+reach:
+
+- Property drawers stay out of the embedded text, so `:ID:` and `:MODIFIED:`
+  do not dilute a chunk's meaning.
+- `#+title:` names the note, rather than guessing from the filename.
+- Every chunk carries its enclosing `:ID:`, so an editor can jump to a hit
+  through `org-id` instead of by file position — surviving renames and moves.
+- Heading breadcrumbs (`Note > Section > Subsection`) are prepended to each
+  chunk before embedding, so a passage carries the context it sits under.
+
+If you work in Markdown, [markdown-vdb](https://github.com/geckse/markdown-vdb)
+reaches a very similar architecture for that format and you should use it
+instead.
 
 ## Install
 
 ```sh
-cargo install --git https://github.com/alberti42/semnotes
+cargo install --git https://github.com/alberti42/org-semantic
 ```
 
 Or build it:
 
 ```sh
-git clone https://github.com/alberti42/semnotes && cd semnotes
-cargo build --release          # target/release/semnotes
+git clone https://github.com/alberti42/org-semantic && cd org-semantic
+cargo build --release          # target/release/org-semantic
 ```
 
 Requires a Rust toolchain. Nothing else — no Python, no system ONNX Runtime, no
@@ -67,14 +80,14 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-semnotes index  <dir> [--full|--rehash]   refresh the index (incremental by default)
-semnotes search <dir> <query> [k]         query it, results grouped per note
-semnotes chunks <dir> <path-substring>    show chunking decisions, no embedding
-semnotes tokens <dir> [limit]             token-length distribution of the corpus
-semnotes bench  <dir> [n] [config]        embedding throughput
+org-semantic index  <dir> [--full|--rehash]   refresh the index (incremental by default)
+org-semantic search <dir> <query> [k]         query it, results grouped per note
+org-semantic chunks <dir> <path-substring>    show chunking decisions, no embedding
+org-semantic tokens <dir> [limit]             token-length distribution of the corpus
+org-semantic bench  <dir> [n] [config]        embedding throughput
 ```
 
-The index lives in `<dir>/.semnotes/` — three files, about 10 MB for a thousand
+The index lives in `<dir>/.org-semantic/` — three files, about 10 MB for a thousand
 notes. Add it to your `.gitignore`; it is derived data and rebuilds in one pass.
 
 **Indexing is incremental by default.** A file whose modification time and size
@@ -90,7 +103,7 @@ re-embedded only if its content actually differs. Deleted notes are dropped.
 
 `--rehash` is the backstop for a change that left both mtime and size untouched:
 a timestamp-preserving restore, `rsync --times`, `touch -r`. At 0.09 s it is
-cheap enough to run on every editor start.
+cheap enough to run on every Emacs start.
 
 ## Design
 
@@ -109,17 +122,22 @@ cut at a boundary is still embedded whole somewhere.
 **Results are grouped per note.** A note that matches a query tends to match in
 several places, and a flat top-k spends every slot on one document.
 
-**The index belongs to the directory it describes**, so pointing semnotes at
+**The index belongs to the vault it describes**, so pointing org-semantic at
 another vault is a different argument, not a different configuration.
 
 ## Status
 
-Early. It indexes org files; Markdown, typst and LaTeX need a chunker each and
-nothing else, since the tokenizer and everything downstream are format-blind.
+Early, and useful. It indexes an org tree, searches it, and updates
+incrementally.
 
-Known gaps: no hybrid keyword search (embeddings are weak on exact identifiers),
-no editor integration yet, and re-split pieces of a long section share their
-section's line number.
+The roadmap is org depth rather than more formats: filtering by tag, TODO state
+and `#+filetags:`; honouring `:noexport:` and archived subtrees; treating
+`#+begin_src` blocks distinctly, since code embedded as prose pollutes results;
+and an Emacs command that jumps to a hit.
+
+Known gaps: no hybrid keyword search yet — embeddings are weak on exact
+identifiers, and a technical vault is full of them — and re-split pieces of a
+long section share their section's line number.
 
 ## Prior art
 
@@ -127,8 +145,8 @@ section's line number.
 architecture for Markdown — filesystem-native, CLI-first, no server.
 [mdvault](https://pypi.org/project/mdvault/) and
 [markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) add hybrid
-BM25/FTS5 search, which semnotes does not have. If you work in Markdown rather
-than org, look at those first.
+BM25/FTS5 search, which org-semantic does not have yet. All three are
+Markdown-first; org-semantic exists because none of them parse org.
 
 ## Licence
 

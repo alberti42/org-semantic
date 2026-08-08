@@ -1,12 +1,12 @@
 [package]
-name = "semnotes"
+name = "org-semantic"
 version = "0.1.0"
 edition = "2021"
-description = "Semantic search over a directory of notes. One static binary, no server, no database, no Python."
+description = "Semantic search over a tree of org-mode notes. One static binary, no server, no database, no Python."
 license = "MIT"
-repository = "https://github.com/alberti42/semnotes"
+repository = "https://github.com/alberti42/org-semantic"
 authors = ["Andrea Alberti <a.alberti82@gmail.com>"]
-keywords = ["semantic-search", "embeddings", "org-mode", "notes", "cli"]
+keywords = ["org-mode", "semantic-search", "embeddings", "notes", "emacs"]
 categories = ["command-line-utilities", "text-processing"]
 readme = "README.md"
 
