@@ -82,7 +82,8 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--lexical|--both] [--full|--rehash]
+org-semantic index   <dir> [--full|--rehash]           the semantic index
+org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k]        ranked by meaning; --lexical by words
 org-semantic search  <dir> <query> [k] [--lexical [--any] [--fold]]
@@ -102,6 +103,10 @@ org-semantic index ~/notes                 # embeddings      ~10 min / 951 notes
 org-semantic index ~/notes --lexical       # BM25             1.3 s
 org-semantic index ~/notes --both          # both
 ```
+
+`--lang` and `--fold` belong to the lexical index, which is the only one that has
+a use for a language: they choose the stemmer. Passing them to a semantic build
+is an error rather than a setting that does nothing.
 
 They are separate artifacts with separate records of what they have seen, so each
 re-run only reads the notes *that* index is behind on. Both are incremental by
@@ -158,7 +163,7 @@ org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 | `-tag:x` | chunk does not carry it |
 | `dir:x` | note lives under directory `x`; repeating widens (any may match) |
 | `todo:x` | nearest enclosing heading has TODO keyword `x` |
-| `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT` |
+| `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT`. **`--lexical` only** |
 
 ### Languages
 
@@ -172,6 +177,13 @@ That takes effect from its own line onward, as ltex does, so a note may switch
 part-way — the marker forces a chunk boundary, since a chunk carries exactly one
 language. Placed between sections it costs nothing; placed mid-section it splits
 that section in two. The keyword is configurable if you don't use ltex.
+
+**Language is a lexical concern.** It selects the stemmer that makes `Sprachen`
+find `Sprache`, and an embedding is not stemmed — so only `index --lexical`
+takes `--lang`, and `lang:` narrows only `search --lexical`. Both say so rather
+than accepting a setting that would do nothing. Multilingual *semantic* search is
+a question about the embedding model, not about labels, and is answered by
+using a multilingual model.
 
 Otherwise `--lang` names the languages the vault is written in, and **how many
 you name decides everything else**:

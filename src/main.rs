@@ -2,7 +2,8 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US,de-DE|auto] [--fold]
+//!   org-semantic index  <vault> [--lexical|--both] [--full|--rehash]
+//!                           [--lang en-US,de-DE|auto] [--fold]   (lexical only)
 //!   org-semantic search  <vault> <query> [k] [--lexical]  ranked by meaning, or
 //!                                                          by words with --lexical
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
@@ -405,7 +406,13 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 /// Deliberately not a full org parser: for deciding where one passage ends and
 /// the next begins, headings, property drawers and tags are the whole of what
 /// matters, and the available Rust org parsers are alpha-stage.
-fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chunk> {
+/// Chunk one note.
+///
+/// LANG is `None` for the semantic index, which has no use for a language: an
+/// embedding is not stemmed, so classifying a note there would be labelling for
+/// its own sake.  Language belongs to the lexical index, which needs it to pick
+/// a stemmer.
+fn chunk_file(path: &Path, rel: &str, text: &str, lang: Option<&LangConfig>) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     // Tags of each open heading, so a chunk can inherit from every ancestor.
@@ -425,7 +432,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     let mut buf = String::new();
     let mut in_drawer = false;
     let mut seen_heading = false;
-    let mut cur_lang = lang.undeclared().to_string();
+    let mut cur_lang = lang.map(|l| l.undeclared().to_string()).unwrap_or_default();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
     // they apply to the whole file either way.
@@ -538,11 +545,11 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
             continue;
         }
         // Takes effect from here on, so a note may switch language part-way.
-        if let Some(l) = ltex_language(line, &lang.keyword) {
+        if let Some((cfg, l)) = lang.zip(ltex_language(line, lang.map_or("", |l| &l.keyword))) {
             flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
                   &title, &file_tags, &cur_id, cur_line, &cur_lang);
             buf.clear();
-            cur_lang = lang.accept_declared(&l, rel);
+            cur_lang = cfg.accept_declared(&l, rel);
             continue;
         }
         // Other keywords, drawer ends and comments are markup, not prose.
@@ -560,7 +567,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
     // would pull every note towards English.  Only chunks that took the default
     // are replaced — an explicit `# ltex: language=…` always wins.
-    if lang.detects() {
+    if let Some(lang) = lang.filter(|l| l.detects()) {
         let undeclared = lang.undeclared();
         let prose: Vec<&str> = chunks
             .iter()
@@ -875,11 +882,6 @@ impl Filters {
         if !self.dirs.is_empty() && !self.dirs.iter().any(|d| under(&c.path, d)) {
             return false;
         }
-        if !self.langs.is_empty()
-            && !self.langs.iter().any(|l| lang_matches(&c.lang, l))
-        {
-            return false;
-        }
         true
     }
 }
@@ -1019,18 +1021,6 @@ mod lexical {
     }
 
     impl Analyzer {
-        /// Derived from the corpus, so indexing and searching always agree.
-        pub fn from_chunks(chunks: &[Chunk], fold: bool) -> Self {
-            let mut langs: Vec<String> =
-                chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
-            langs.sort();
-            langs.dedup();
-            if langs.is_empty() {
-                langs.push("en".into());
-            }
-            Analyzer { langs, fold }
-        }
-
         /// The analyzer an incremental update needs: everything PREVIOUS knew,
         /// plus any language the new chunks introduce.
         ///
@@ -1289,7 +1279,9 @@ mod lexical {
         Ok(())
     }
 
-    /// Number of live documents, for the consistency check.
+    /// Number of live documents.  Used by the tests to assert that a note's
+    /// old documents really went away.
+    #[cfg(test)]
     pub fn doc_count(state: &Path, a: &Analyzer) -> Result<u64> {
         let (index, _) = open_or_create(state, a)?;
         Ok(index.reader()?.searcher().num_docs())
@@ -1663,7 +1655,7 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
     let mut chunks: Vec<Chunk> = Vec::new();
     for st in &scan.stale {
         let f = vault.join(&st.path);
-        chunks.extend(chunk_file(&f, &st.path, &st.text, lang));
+        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang)));
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -1676,7 +1668,7 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
         for f in &files {
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
-                Ok(text) => chunks.extend(chunk_file(f, &path, &text, lang)),
+                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang))),
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
         }
@@ -1722,7 +1714,7 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
     Ok(())
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -1774,7 +1766,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, lang: &LangConfig) -> Resul
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, &path, text, lang), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, &path, text, None), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -1977,6 +1969,12 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
     let f = parse_query(query);
+    // A language is a stemmer's business, and an embedding is not stemmed.  The
+    // semantic index therefore records no language, so this predicate could only
+    // ever match nothing — better said than silently returned.
+    if !f.langs.is_empty() {
+        return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
+    }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&chunks[i])).collect();
     if !f.is_empty() {
         println!(
@@ -2037,7 +2035,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None));
         }
         if chunks.len() >= n {
             break;
@@ -2115,7 +2113,7 @@ fn cmd_tokens(vault: &Path, limit: usize) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, &LangConfig::default()));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -2176,7 +2174,7 @@ fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig) -> Result<()> {
         let measure = |s: &str| n_tokens(&tok, s);
         let (chunks, _, _) =
             enforce_token_limit(
-                chunk_file(f, &rel_path(vault, f), &text, lang),
+                chunk_file(f, &rel_path(vault, f), &text, Some(lang)),
                 &measure,
                 TOKEN_LIMIT,
             );
@@ -2284,12 +2282,24 @@ fn main() -> Result<()> {
             // `--both` is one command for the Emacs side to call.
             let lexical = args.iter().skip(3).any(|a| a == "--lexical");
             let both = args.iter().skip(3).any(|a| a == "--both");
-            prepare_lang(&lang)?;
+            // Language and folding configure stemming, which only the lexical
+            // index has.  Accepting them for a semantic build would be accepting
+            // settings that do nothing.
+            if !lexical && !both {
+                for a in args.iter().skip(3) {
+                    if a == "--lang" || a == "--fold" || a == "--lang-keyword" {
+                        return Err(anyhow!(
+                            "{a} configures the lexical index; pass --lexical or --both"
+                        ));
+                    }
+                }
+            }
             let vault = Path::new(vault);
             if both || !lexical {
-                cmd_index(vault, full, rehash, &lang)?;
+                cmd_index(vault, full, rehash)?;
             }
             if both || lexical {
+                prepare_lang(&lang)?;
                 cmd_index_lexical(vault, full, rehash, &lang, fold)?;
             }
             Ok(())
@@ -2341,7 +2351,8 @@ fn main() -> Result<()> {
         }
         _ => Err(anyhow!(
             "usage:\n\
-             \x20 org-semantic index   <vault> [--lexical|--both] [--full|--rehash]\n\
+             \x20 org-semantic index   <vault> [--full|--rehash]          semantic\n\
+             \x20 org-semantic index   <vault> --lexical|--both [--full|--rehash]\n\
              \x20                             [--lang en-US[,de-DE,…] | auto] [--fold]\n\
              \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
@@ -2393,7 +2404,7 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, &LangConfig::default())
+        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None)
     }
 
     #[test]
@@ -2613,7 +2624,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -2628,7 +2639,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -2693,7 +2704,7 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, &LangConfig::default()).unwrap();
+        cmd_index(&v, false, false).unwrap();
 
         let ix = load_index(&state_dir(&v)).unwrap();
         assert_eq!(
@@ -2772,7 +2783,7 @@ mod tests {
 
     #[test]
     fn chunks_store_a_vault_relative_path() {
-        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", &LangConfig::default());
+        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None);
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
 
@@ -2873,7 +2884,7 @@ mod tests {
         ];
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
-        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        let an = lexical::Analyzer::widen(None, &chunks, false);
         lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
         assert_eq!(lexical::doc_count(&dir, &an).unwrap(), 2);
 
@@ -2905,7 +2916,7 @@ mod tests {
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
         let chunks = vec![mk(&a, "brown fox"), mk(&b, "brown bear")];
-        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        let an = lexical::Analyzer::widen(None, &chunks, false);
         lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
         assert_eq!(lexical::search(&dir, &parse_query("brown"), 10, true, &an).unwrap().len(), 2);
 
@@ -2944,8 +2955,12 @@ mod tests {
     /// switch part-way; chunks before it keep the default.
     #[test]
     fn language_applies_from_its_line_onward() {
-        let c = chunks_of(
+        let cfg = LangConfig::default();
+        let c = chunk_file(
+            Path::new("/v/N.org"),
+            "N.org",
             "#+title: T\n* English part\nalpha\n\n# ltex: language=de-DE\n* Deutscher Teil\nbeta\n",
+            Some(&cfg),
         );
         let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
         assert_eq!(by("alpha").lang, "en-US", "the configured default");
@@ -2955,7 +2970,7 @@ mod tests {
     #[test]
     fn the_default_language_is_configurable() {
         let cfg = LangConfig::parse("it-IT");
-        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", &cfg);
+        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg));
         assert_eq!(c[0].lang, "it-IT");
     }
 
@@ -2969,14 +2984,16 @@ mod tests {
     }
 
     #[test]
-    fn lang_filters_the_candidate_set() {
-        let mut de = chunk_with("a.org", &[], None);
-        de.lang = "de-DE".into();
+    fn lang_is_a_lexical_predicate_only() {
+        // A language picks a stemmer, and an embedding is not stemmed, so the
+        // semantic index records none.  `matches` — which is the semantic-side
+        // filter — therefore ignores `langs`, and `cmd_search` rejects the query
+        // outright rather than quietly returning nothing.
         let mut en = chunk_with("b.org", &[], None);
         en.lang = "en-US".into();
         let f = parse_query("lang:de Wörter");
-        assert!(f.matches(&de));
-        assert!(!f.matches(&en));
+        assert_eq!(f.langs, vec!["de"], "still parsed, for the lexical side");
+        assert!(f.matches(&en), "and not applied on the semantic side");
         assert_eq!(f.text, "Wörter", "the predicate does not reach the embedder");
     }
 
@@ -3002,7 +3019,7 @@ mod tests {
         ];
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
-        let an = lexical::Analyzer::from_chunks(&chunks, false);
+        let an = lexical::Analyzer::widen(None, &chunks, false);
         assert_eq!(an.langs, vec!["de", "en"], "derived from the corpus");
         lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
 
@@ -3094,14 +3111,14 @@ mod tests {
             Path::new("/v/de.org"),
             "de.org",
             "#+title: Notiz\n* Abschnitt\nDie Wörter der deutschen Sprache sind manchmal sehr lang\n",
-            &cfg,
+            Some(&cfg),
         );
         assert_eq!(de[0].lang, "de");
         let en = chunk_file(
             Path::new("/v/en.org"),
             "en.org",
             "#+title: Note\n* Section\nThe damped oscillations of a trapped atom in the tweezer\n",
-            &cfg,
+            Some(&cfg),
         );
         assert_eq!(en[0].lang, "en");
     }
@@ -3115,7 +3132,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n             # ltex: language=it-IT\n* Two\nThe text here is still English but declared Italian\n",
-            &cfg,
+            Some(&cfg),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
@@ -3132,7 +3149,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n# ltex: language=it-IT\n* Two\nQuesto paragrafo dichiara la propria lingua\n",
-            &cfg,
+            Some(&cfg),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
@@ -3147,7 +3164,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nPlain English body text here\n\n# ltex: language=de-DE\n* Two\nDieser Abschnitt ist auf Deutsch geschrieben\n",
-            &cfg,
+            Some(&cfg),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("Plain").lang, "en-US");
@@ -3160,14 +3177,14 @@ mod tests {
         // would file the chunk under a language nothing ever searches.  The
         // first configured language is the vault's default and takes over.
         let body = "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
-        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("de-DE,en-US"));
+        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")));
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
-        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("en-US"));
+        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")));
         assert_eq!(single[0].lang, "en-US");
 
         // Under `auto` there is no configured default, so it is classified.
-        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, &LangConfig::parse("auto"));
+        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")));
         assert_eq!(auto[0].lang, "en");
     }
 }
