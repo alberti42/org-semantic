@@ -25,12 +25,57 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-/// BGE-small-en-v1.5.
-const DIM: usize = 384;
+/// An embedding model, with the prefixes it was trained to see.
+///
+/// The prefixes are part of choosing a model, not a detail: BGE prefixes only
+/// the query, E5 prefixes both sides, and using one model's convention with
+/// another costs retrieval quality **silently** — no error, no warning, just
+/// worse answers.  That is why this is a curated table rather than a pass-through
+/// to all 40 of fastembed's models: an entry here is a claim that its prefixes
+/// have been checked.  Adding one is four lines.
+struct Model {
+    /// What `--model` accepts and the manifest records.
+    name: &'static str,
+    which: EmbeddingModel,
+    dim: usize,
+    /// Prepended when embedding a query.
+    query: &'static str,
+    /// Prepended when embedding an indexed passage.
+    passage: &'static str,
+    /// Languages it was trained on, for `--model list`.
+    about: &'static str,
+}
 
-/// What BGE was trained to see in front of a query, and only a query — the
-/// indexed side is embedded bare.  Leaving it off costs retrieval quality.
-const QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+/// BGE's query prefix, shared by the whole v1.5 English family.
+const BGE_QUERY: &str = "Represent this sentence for searching relevant passages: ";
+
+const MODELS: &[Model] = &[
+    Model { name: "bge-small-en", which: EmbeddingModel::BGESmallENV15, dim: 384,
+            query: BGE_QUERY, passage: "", about: "English" },
+    Model { name: "bge-base-en", which: EmbeddingModel::BGEBaseENV15, dim: 768,
+            query: BGE_QUERY, passage: "", about: "English" },
+    Model { name: "bge-large-en", which: EmbeddingModel::BGELargeENV15, dim: 1024,
+            query: BGE_QUERY, passage: "", about: "English" },
+    // E5 is asymmetric: both sides carry a prefix, and omitting the passage one
+    // is the quiet mistake this table exists to prevent.
+    Model { name: "e5-small", which: EmbeddingModel::MultilingualE5Small, dim: 384,
+            query: "query: ", passage: "passage: ", about: "100 languages" },
+    Model { name: "e5-base", which: EmbeddingModel::MultilingualE5Base, dim: 768,
+            query: "query: ", passage: "passage: ", about: "100 languages" },
+    Model { name: "e5-large", which: EmbeddingModel::MultilingualE5Large, dim: 1024,
+            query: "query: ", passage: "passage: ", about: "100 languages" },
+];
+
+const DEFAULT_MODEL: &str = "bge-small-en";
+
+fn model_named(name: &str) -> Result<&'static Model> {
+    MODELS.iter().find(|m| m.name.eq_ignore_ascii_case(name)).ok_or_else(|| {
+        anyhow!(
+            "unknown model `{name}`; known: {}",
+            MODELS.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
+        )
+    })
+}
 
 /// Roughly a screenful.  Small enough that a hit points at a passage rather
 /// than at a whole note, large enough to carry its own context.
@@ -799,10 +844,6 @@ fn cache_dir() -> PathBuf {
     xdg_cache().join("fastembed")
 }
 
-fn model() -> Result<TextEmbedding> {
-    model_with(EmbeddingModel::BGESmallENV15, None, false)
-}
-
 fn model_with(
     which: EmbeddingModel,
     max_length: Option<usize>,
@@ -1389,7 +1430,7 @@ const INDEX_VERSION: u32 = 3;
 /// Recorded so that changing the embedding model invalidates every vector.
 /// Vectors from two different models are not comparable, and mixing them
 /// silently degrades every search rather than failing.
-const MODEL_NAME: &str = "BGESmallENV15";
+
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -1450,19 +1491,24 @@ struct LoadedIndex {
 /// The last case is the one worth being strict about: `chunks.json` and
 /// `vectors.f32` are positionally coupled, so a mismatch does not fail loudly —
 /// it silently returns the wrong note for every query.
-fn load_index(dir: &Path) -> Option<LoadedIndex> {
+fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
-    if manifest.version != INDEX_VERSION || manifest.model != MODEL_NAME || manifest.dim != DIM {
-        eprintln!("  existing index was built differently; rebuilding from scratch");
+    // A different model's vectors are not comparable with this one's, and a
+    // different dimension cannot even be read, so either means a full rebuild.
+    if manifest.version != INDEX_VERSION || manifest.model != m.name || manifest.dim != m.dim {
+        eprintln!(
+            "  existing index was built with {} ({}d); rebuilding for {} ({}d)",
+            manifest.model, manifest.dim, m.name, m.dim
+        );
         return None;
     }
     let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json")).ok()?).ok()?;
     let raw = fs::read(dir.join("vectors.f32")).ok()?;
-    if raw.len() != chunks.len() * DIM * 4 {
+    if raw.len() != chunks.len() * m.dim * 4 {
         eprintln!(
             "  index is inconsistent ({} chunks, {} vectors); rebuilding from scratch",
             chunks.len(),
-            raw.len() / (DIM * 4)
+            raw.len() / (m.dim * 4)
         );
         return None;
     }
@@ -1479,6 +1525,7 @@ fn load_index(dir: &Path) -> Option<LoadedIndex> {
 
 fn save_index(
     dir: &Path,
+    m: &Model,
     chunks: &[Chunk],
     vectors: &[f32],
     files: std::collections::BTreeMap<String, u64>,
@@ -1495,8 +1542,8 @@ fn save_index(
         dir.join("manifest.json"),
         serde_json::to_vec(&Manifest {
             version: INDEX_VERSION,
-            model: MODEL_NAME.into(),
-            dim: DIM,
+            model: m.name.into(),
+            dim: m.dim,
             files,
             stamps,
         })?,
@@ -1714,14 +1761,14 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
     Ok(())
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
 
     let dir = state_dir(vault);
-    let old = if full { None } else { load_index(&dir) };
+    let old = if full { None } else { load_index(&dir, m) };
 
     let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
     let Scan { hashes, stamps, reuse, stale, dropped, by_stamp, by_hash, changed: changed_files, new: new_files } =
@@ -1757,7 +1804,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
             if let Some(ix) = &old {
                 for &j in ix.by_path.get(&path).map(Vec::as_slice).unwrap_or(&[]) {
                     chunks.push(ix.chunks[j].clone());
-                    vectors.extend_from_slice(&ix.vectors[j * DIM..(j + 1) * DIM]);
+                    vectors.extend_from_slice(&ix.vectors[j * m.dim..(j + 1) * m.dim]);
                 }
             }
             continue;
@@ -1772,7 +1819,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
             pending.push(chunks.len());
             pending_len.push(len);
             chunks.push(c);
-            vectors.extend(std::iter::repeat(0.0).take(DIM));
+            vectors.extend(std::iter::repeat(0.0).take(m.dim));
         }
     }
 
@@ -1808,14 +1855,14 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         println!("no new text to embed; rewriting the manifest");
     } else {
         let t1 = Instant::now();
-        let mut model = model()?;
+        let mut model = model_with(m.which.clone(), None, false)?;
         println!("model loaded in {:.2}s", t1.elapsed().as_secs_f64());
 
         let t2 = Instant::now();
         // Heading path prepended so a passage carries the context it sits under.
         let texts: Vec<String> = pending
             .iter()
-            .map(|&i| format!("{}\n{}", chunks[i].heading, chunks[i].text))
+            .map(|&i| format!("{}{}\n{}", m.passage, chunks[i].heading, chunks[i].text))
             .collect();
         let total_tokens: usize = pending_len.iter().sum();
 
@@ -1836,8 +1883,8 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
                 .map_err(|e| anyhow!("embedding: {e}"))?;
             for (&i, mut v) in group.iter().zip(vs) {
                 normalize(&mut v);
-                let slot = pending[i] * DIM;
-                vectors[slot..slot + DIM].copy_from_slice(&v);
+                let slot = pending[i] * m.dim;
+                vectors[slot..slot + m.dim].copy_from_slice(&v);
             }
             done += group.len();
             tokens_done += group.iter().map(|&i| pending_len[i]).sum::<usize>();
@@ -1863,7 +1910,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
         );
     }
 
-    let written = save_index(&dir, &chunks, &vectors, hashes, stamps)?;
+    let written = save_index(&dir, m, &chunks, &vectors, hashes, stamps)?;
     println!(
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
@@ -1949,12 +1996,19 @@ fn describe_filters(f: &Filters) -> String {
 
 fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     let dir = state_dir(vault);
+    // Which model to use is not a choice here: a query must be embedded by the
+    // same model as the corpus, so it is read from the manifest.
+    let manifest: Manifest = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
+    )?;
+    let m = model_named(&manifest.model)?;
     let chunks: Vec<Chunk> = serde_json::from_slice(
         &fs::read(dir.join("chunks.json"))
             .with_context(|| format!("no index in {} — run `index` first", dir.display()))?,
     )?;
     let raw = fs::read(dir.join("vectors.f32"))?;
-    let n = raw.len() / (DIM * 4);
+    let n = raw.len() / (m.dim * 4);
     if n != chunks.len() {
         return Err(anyhow!(
             "index is inconsistent: {n} vectors for {} chunks",
@@ -1992,12 +2046,12 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     }
 
     let t0 = Instant::now();
-    let mut model = model()?;
+    let mut model = model_with(m.which.clone(), None, false)?;
     let load = t0.elapsed();
 
     let t1 = Instant::now();
     let mut q = model
-        .embed(&[format!("{QUERY_PREFIX}{}", f.text)], None)
+        .embed(&[format!("{}{}", m.query, f.text)], None)
         .map_err(|e| anyhow!("embedding query: {e}"))?
         .remove(0);
     normalize(&mut q);
@@ -2007,7 +2061,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize) -> Result<()> {
     let mut scored: Vec<(f32, usize)> = candidates
         .iter()
         .map(|&i| {
-            let s = &vectors[i * DIM..(i + 1) * DIM];
+            let s = &vectors[i * m.dim..(i + 1) * m.dim];
             (s.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i)
         })
         .collect();
@@ -2294,9 +2348,13 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            let model = match args.iter().skip(3).position(|a| a == "--model") {
+                Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
+                None => model_named(DEFAULT_MODEL)?,
+            };
             let vault = Path::new(vault);
             if both || !lexical {
-                cmd_index(vault, full, rehash)?;
+                cmd_index(vault, full, rehash, model)?;
             }
             if both || lexical {
                 prepare_lang(&lang)?;
@@ -2338,6 +2396,18 @@ fn main() -> Result<()> {
             prepare_lang(&lang)?;
             cmd_chunks(Path::new(vault), needle, &lang)
         }
+        Some("models") => {
+            println!("{:<14} {:>5}  {}", "name", "dim", "trained on");
+            for m in MODELS {
+                let dflt = if m.name == DEFAULT_MODEL { "  (default)" } else { "" };
+                println!("{:<14} {:>5}  {}{dflt}", m.name, m.dim, m.about);
+            }
+            println!(
+                "\nA model is chosen at `index` time and recorded; `search` reads it back, \n\
+                 since a query must be embedded by the same model as the corpus."
+            );
+            Ok(())
+        }
         Some("tokens") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: tokens <vault> [limit]"))?;
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
@@ -2351,12 +2421,13 @@ fn main() -> Result<()> {
         }
         _ => Err(anyhow!(
             "usage:\n\
-             \x20 org-semantic index   <vault> [--full|--rehash]          semantic\n\
+             \x20 org-semantic index   <vault> [--full|--rehash] [--model NAME]  semantic\n\
              \x20 org-semantic index   <vault> --lexical|--both [--full|--rehash]\n\
              \x20                             [--lang en-US[,de-DE,…] | auto] [--fold]\n\
              \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
+             \x20 org-semantic models                          embedding models available\n\
              \x20 org-semantic bench   <vault> [n] [config]"
         )),
     }
@@ -2609,8 +2680,9 @@ mod tests {
             .iter()
             .map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap()))
             .collect();
-        let vectors = vec![0.0f32; chunks.len() * DIM];
-        save_index(&state_dir(dir), &chunks, &vectors, files, stamps).unwrap();
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let vectors = vec![0.0f32; chunks.len() * m.dim];
+        save_index(&state_dir(dir), m, &chunks, &vectors, files, stamps).unwrap();
     }
 
     /// Regression: a run whose only change is a deleted note produced nothing to
@@ -2624,13 +2696,17 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
 
-        let ix = load_index(&state_dir(&v)).expect("index should still load");
+        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
         assert_eq!(ix.chunks[0].path, a);
         assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
-        assert_eq!(ix.vectors.len(), ix.chunks.len() * DIM, "halves stay aligned");
+        assert_eq!(
+            ix.vectors.len(),
+            ix.chunks.len() * model_named(DEFAULT_MODEL).unwrap().dim,
+            "halves stay aligned"
+        );
     }
 
     #[test]
@@ -2639,8 +2715,31 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
+    }
+
+    /// Regression: `cmd_search` embedded the query with a hardcoded BGE while the
+    /// corpus had been embedded with another model.  Nothing failed — the
+    /// vectors were simply near-orthogonal, so every score collapsed and the
+    /// ranking was noise.  A model belongs to an index, and the manifest is
+    /// where that is written down.
+    #[test]
+    fn an_index_belongs_to_the_model_that_built_it() {
+        let v = scratch("model-identity");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(state_dir(&v).join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest.model, DEFAULT_MODEL, "the index records its model");
+        assert!(model_named(&manifest.model).is_ok(), "and search can resolve it back");
+
+        // Asked for under a different model, the index must be refused rather
+        // than read: its vectors answer a different question.
+        let other = model_named("e5-large").unwrap();
+        assert_ne!(other.dim, model_named(DEFAULT_MODEL).unwrap().dim);
+        assert!(load_index(&state_dir(&v), other).is_none());
     }
 
     #[test]
@@ -2648,9 +2747,9 @@ mod tests {
         let v = scratch("roundtrip");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let ix = load_index(&state_dir(&v)).unwrap();
+        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(ix.chunks.len(), 1);
-        assert_eq!(ix.vectors.len(), DIM);
+        assert_eq!(ix.vectors.len(), model_named(DEFAULT_MODEL).unwrap().dim);
         assert_eq!(ix.by_path.get(&a).map(Vec::len), Some(1));
     }
 
@@ -2664,7 +2763,7 @@ mod tests {
         bytes.truncate(bytes.len() - 4);
         fs::write(&f, bytes).unwrap();
         assert!(
-            load_index(&state_dir(&v)).is_none(),
+            load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
             "positional coupling means a mismatch returns wrong answers, not errors"
         );
     }
@@ -2678,7 +2777,7 @@ mod tests {
         let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
         m["model"] = serde_json::Value::String("SomeOtherModel".into());
         fs::write(&f, serde_json::to_vec(&m).unwrap()).unwrap();
-        assert!(load_index(&state_dir(&v)).is_none());
+        assert!(load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).is_none());
     }
 
     #[test]
@@ -2696,7 +2795,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        let old_stamp = load_index(&state_dir(&v)).unwrap().stamps[&a];
+        let old_stamp = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
         let abs = v.join(&a);
 
         // Move mtime without touching content.
@@ -2704,9 +2803,9 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
 
-        let ix = load_index(&state_dir(&v)).unwrap();
+        let ix = load_index(&state_dir(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(
             fs::read(state_dir(&v).join("vectors.f32")).unwrap(),
             before,
@@ -3188,3 +3287,4 @@ mod tests {
         assert_eq!(auto[0].lang, "en");
     }
 }
+

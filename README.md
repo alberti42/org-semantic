@@ -82,7 +82,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash]           the semantic index
+org-semantic index   <dir> [--full|--rehash] [--model NAME]   semantic index
 org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k]        ranked by meaning; --lexical by words
@@ -90,7 +90,50 @@ org-semantic search  <dir> <query> [k] [--lexical [--any] [--fold]]
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
+org-semantic models                            embedding models available
 ```
+
+### Choosing an embedding model
+
+```console
+$ org-semantic models
+name             dim  trained on
+bge-small-en     384  English  (default)
+bge-base-en      768  English
+bge-large-en    1024  English
+e5-small         384  100 languages
+e5-base          768  100 languages
+e5-large        1024  100 languages
+```
+
+```sh
+org-semantic index ~/notes --model e5-small --full
+```
+
+Pick a multilingual model if your notes are not all in one language. With
+`e5-small`, an English query finds the German note it never mentions:
+
+```console
+$ org-semantic search ~/notes "why do atoms get lost from the trap"
+0.891  Trap physics            ← English
+0.838  Atome in der Falle      ← German, never using those words
+0.736  Ricetta                 ← unrelated
+```
+
+The model is recorded in the manifest and `search` reads it back — a query has to
+be embedded by the same model as the corpus, so it is not something you can
+choose per search. Asking to index with a different model rebuilds from scratch,
+since vectors from two models are not comparable.
+
+**Scores are only comparable within one model.** BGE spreads its cosines widely
+(0.37–0.74 above); E5 compresses everything into roughly 0.73–0.93. Only the
+ranking carries meaning, never the absolute number.
+
+The list is deliberately short. fastembed offers forty models, but each family
+expects its own prefixes — BGE prefixes only the query, E5 prefixes the indexed
+passage too — and using the wrong convention costs retrieval quality with no
+error and no warning. An entry in that table is a claim that its prefixes have
+been checked; adding one is four lines.
 
 ### Two indexes, built separately
 
