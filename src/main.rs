@@ -4,7 +4,7 @@
 //!
 //!   org-semantic index  <vault> [--full|--rehash] refresh (incremental by default)
 //!   org-semantic search  <vault> <query> [k]      semantic search, grouped by note
-//!   org-semantic keyword <vault> <query> [k]      lexical search, same predicates
+//!   org-semantic keyword <vault> <query> [k] [--any]  lexical search, same predicates
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
 //!   org-semantic bench  <vault> [n] [config]      embedding throughput
@@ -821,6 +821,7 @@ mod lexical {
         chunks: &[Chunk],
         f: &Filters,
         limit: usize,
+        conjunction: bool,
     ) -> Result<Vec<(f32, usize)>> {
         let (index, fl) = open_or_create(state)?;
         let searcher = index.reader()?.searcher();
@@ -852,10 +853,13 @@ mod lexical {
         if !f.text.trim().is_empty() {
             let mut qp = QueryParser::for_index(&index, vec![fl.body, fl.title]);
             qp.set_field_boost(fl.title, 2.0);
-            // All terms required unless the query says otherwise.  tantivy
-            // defaults to OR, which for "Rabi oscillations" would rank anything
-            // merely containing "oscillations".
-            qp.set_conjunction_by_default();
+            // All terms required by default.  tantivy's own default is OR,
+            // which for "Rabi oscillations" ranks anything merely containing
+            // "oscillations"; `--any` restores it.  There is no unset, so this
+            // is a branch rather than an assignment.
+            if conjunction {
+                qp.set_conjunction_by_default();
+            }
             clauses.push((Occur::Must, qp.parse_query(&f.text)?));
         }
         if clauses.is_empty() {
@@ -1588,7 +1592,7 @@ fn cmd_chunks(vault: &Path, needle: &str) -> Result<()> {
 /// means nothing to an embedding, so a fused ranking would mix results that
 /// honoured the query with results that could not.  Fusing them is a later
 /// decision, to be made once there is evidence it helps.
-fn cmd_keyword(vault: &Path, query: &str, k: usize) -> Result<()> {
+fn cmd_keyword(vault: &Path, query: &str, k: usize, conjunction: bool) -> Result<()> {
     let dir = state_dir(vault);
     let chunks: Vec<Chunk> = serde_json::from_slice(
         &fs::read(dir.join("chunks.json"))
@@ -1618,7 +1622,7 @@ fn cmd_keyword(vault: &Path, query: &str, k: usize) -> Result<()> {
     // Generous, because grouping collapses many chunks into one note: a single
     // well-matching note can otherwise fill the whole candidate pool and hide
     // every other note.
-    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100))?;
+    let hits = lexical::search(&dir, &chunks, &f, (k * 25).max(100), conjunction)?;
     let el = t.elapsed();
     if hits.is_empty() {
         println!("no match");
@@ -1663,7 +1667,10 @@ fn main() -> Result<()> {
                 .get(3)
                 .ok_or_else(|| anyhow!("usage: keyword <vault> <query> [k]"))?;
             let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
-            cmd_keyword(Path::new(vault), query, k)
+            // `--any`: any term may match, tantivy's own default.  The opposite,
+            // `--all`, is accepted so a caller can be explicit.
+            let conjunction = !args.iter().any(|a| a == "--any");
+            cmd_keyword(Path::new(vault), query, k, conjunction)
         }
         Some("chunks") => {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
@@ -2208,16 +2215,16 @@ mod tests {
         lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
         assert_eq!(lexical::doc_count(&dir).unwrap(), 2);
 
-        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(chunks[hits[0].1].path, a, "resolves back to the right chunk");
 
         // A predicate must constrain the lexical side exactly as it does the
         // semantic one, or the two modes disagree about what was searched.
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:german Fuchs"), 10, true).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(chunks[hits[0].1].path, b);
-        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10).unwrap();
+        let hits = lexical::search(&dir, &chunks, &parse_query("tag:physics Fuchs"), 10, true).unwrap();
         assert!(hits.is_empty(), "predicate excludes the only textual match");
     }
 
@@ -2234,13 +2241,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let chunks = vec![mk(&a, "brown fox"), mk(&b, "brown bear")];
         lexical::sync(&dir, &chunks, &[], &[], true).unwrap();
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap().len(), 2);
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap().len(), 2);
 
         // beta changes, alpha is deleted.
         let chunks = vec![mk(&b, "crimson bear")];
         lexical::sync(&dir, &chunks, &[b.clone()], &[a.clone()], false).unwrap();
-        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10).unwrap().is_empty());
-        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10).unwrap().len(), 1);
+        assert!(lexical::search(&dir, &chunks, &parse_query("brown"), 10, true).unwrap().is_empty());
+        assert_eq!(lexical::search(&dir, &chunks, &parse_query("crimson"), 10, true).unwrap().len(), 1);
         assert_eq!(lexical::doc_count(&dir).unwrap(), 1);
     }
 }

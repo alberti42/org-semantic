@@ -84,7 +84,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ```
 org-semantic index   <dir> [--full|--rehash]  refresh the index (incremental by default)
 org-semantic search  <dir> <query> [k]        semantic search, grouped per note
-org-semantic keyword <dir> <query> [k]        lexical search, same predicates
+org-semantic keyword <dir> <query> [k] [--any] lexical search, same predicates
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
 org-semantic bench   <dir> [n] [config]        embedding throughput
@@ -93,7 +93,9 @@ org-semantic bench   <dir> [n] [config]        embedding throughput
 ### Two modes, deliberately separate
 
 `search` ranks by meaning; `keyword` ranks by words, with tantivy's query
-language — phrases, boolean operators, field boosts. They are separate commands
+language — phrases, boolean operators, field boosts. Terms are ANDed by default,
+since OR would rank anything merely containing "oscillations" for the query
+"Rabi oscillations"; `--any` restores OR. They are separate commands
 rather than one fused ranking because a phrase or a boolean means nothing to an
 embedding: fusing them would mix results that honoured your query with results
 that could not.
