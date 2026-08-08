@@ -2,6 +2,13 @@
 name = "semnotes"
 version = "0.1.0"
 edition = "2021"
+description = "Semantic search over a directory of notes. One static binary, no server, no database, no Python."
+license = "MIT"
+repository = "https://github.com/alberti42/semnotes"
+authors = ["Andrea Alberti <a.alberti82@gmail.com>"]
+keywords = ["semantic-search", "embeddings", "org-mode", "notes", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+readme = "README.md"
 
 [dependencies]
 # `default-features = false` drops `image-models`, which pulls the whole image
