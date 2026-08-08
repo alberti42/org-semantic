@@ -2,7 +2,7 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full]          refresh (incremental by default)
+//!   org-semantic index  <vault> [--full|--rehash] refresh (incremental by default)
 //!   org-semantic search <vault> <query> [k]       query it, grouped by note
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
 //!   org-semantic tokens <vault> [limit]           token-length distribution
@@ -441,6 +441,23 @@ const INDEX_VERSION: u32 = 1;
 /// silently degrades every search rather than failing.
 const MODEL_NAME: &str = "BGESmallENV15";
 
+/// Modification time and size, as a cheap pre-filter.  Deliberately not the
+/// authority on whether a note changed: `git checkout`, a sync or `touch` all
+/// move mtime without touching content, and re-embedding on that would be
+/// wasted work.  A stamp that *matches* is trusted to mean unchanged; a stamp
+/// that differs only means "read this one and hash it".
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+struct Stamp {
+    mtime_ns: u64,
+    size: u64,
+}
+
+fn stamp_of(p: &Path) -> Option<Stamp> {
+    let m = fs::metadata(p).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(Stamp { mtime_ns: t.as_nanos() as u64, size: m.len() })
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,
@@ -450,6 +467,11 @@ struct Manifest {
     /// this tree lives in Google Drive and under git, both of which rewrite
     /// timestamps on files whose content never changed.
     files: std::collections::BTreeMap<String, u64>,
+    /// Absent from indexes written before stamps existed, in which case every
+    /// file is verified by hash once and stamped on the way through — so the
+    /// upgrade costs one scan rather than a rebuild.
+    #[serde(default)]
+    stamps: std::collections::BTreeMap<String, Stamp>,
 }
 
 /// FNV-1a. Written out rather than taken from `DefaultHasher`, whose values are
@@ -468,6 +490,7 @@ struct LoadedIndex {
     chunks: Vec<Chunk>,
     vectors: Vec<f32>,
     files: std::collections::BTreeMap<String, u64>,
+    stamps: std::collections::BTreeMap<String, Stamp>,
     by_path: std::collections::HashMap<String, Vec<usize>>,
 }
 
@@ -501,7 +524,7 @@ fn load_index(dir: &Path) -> Option<LoadedIndex> {
     for (i, c) in chunks.iter().enumerate() {
         by_path.entry(c.path.clone()).or_default().push(i);
     }
-    Some(LoadedIndex { chunks, vectors, files: manifest.files, by_path })
+    Some(LoadedIndex { chunks, vectors, files: manifest.files, stamps: manifest.stamps, by_path })
 }
 
 fn save_index(
@@ -509,6 +532,7 @@ fn save_index(
     chunks: &[Chunk],
     vectors: &[f32],
     files: std::collections::BTreeMap<String, u64>,
+    stamps: std::collections::BTreeMap<String, Stamp>,
 ) -> Result<usize> {
     fs::create_dir_all(dir)?;
     let mut bytes = Vec::with_capacity(vectors.len() * 4);
@@ -524,6 +548,7 @@ fn save_index(
             model: MODEL_NAME.into(),
             dim: DIM,
             files,
+            stamps,
         })?,
     )?;
     Ok(bytes.len())
@@ -533,7 +558,7 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-fn cmd_index(vault: &Path, full: bool) -> Result<()> {
+fn cmd_index(vault: &Path, full: bool, rehash: bool) -> Result<()> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -542,82 +567,112 @@ fn cmd_index(vault: &Path, full: bool) -> Result<()> {
     let dir = state_dir(vault);
     let old = if full { None } else { load_index(&dir) };
 
-    // Read and hash everything first.  Deciding what is stale before touching
-    // the tokenizer means a run that only drops deleted notes loads neither the
-    // tokenizer nor the model.  The whole corpus is a few megabytes of text.
-    struct Seen {
+    // Three outcomes per note, cheapest first: its stamp matches, so it is not
+    // even read; its stamp moved but its bytes hash the same, so it is read and
+    // reused; or it is genuinely new or changed, and must be re-embedded.
+    struct Stale {
         path: String,
         text: String,
-        hash: u64,
     }
-    let mut seen: Vec<Seen> = Vec::with_capacity(files.len());
+    let mut hashes: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut stamps: std::collections::BTreeMap<String, Stamp> = Default::default();
+    let mut reuse: Vec<String> = Vec::new();
+    let mut stale: Vec<Stale> = Vec::new();
+    let (mut by_stamp, mut by_hash, mut changed_files, mut new_files) = (0usize, 0, 0, 0);
+
     for f in &files {
-        match fs::read_to_string(f) {
-            Ok(text) => {
-                let hash = content_hash(text.as_bytes());
-                seen.push(Seen { path: f.to_string_lossy().into_owned(), text, hash });
+        let path = f.to_string_lossy().into_owned();
+        let stamp = stamp_of(f);
+
+        // Fast path: same mtime and size as when we last looked.
+        if !rehash {
+            if let (Some(ix), Some(st)) = (&old, stamp) {
+                if ix.stamps.get(&path) == Some(&st) {
+                    if let Some(h) = ix.files.get(&path) {
+                        hashes.insert(path.clone(), *h);
+                        stamps.insert(path.clone(), st);
+                        reuse.push(path);
+                        by_stamp += 1;
+                        continue;
+                    }
+                }
             }
-            Err(e) => eprintln!("skipping {}: {e}", f.display()),
         }
-    }
 
-    let manifest: std::collections::BTreeMap<String, u64> =
-        seen.iter().map(|s| (s.path.clone(), s.hash)).collect();
-    let dropped = old
-        .as_ref()
-        .map(|ix| ix.files.keys().filter(|p| !manifest.contains_key(*p)).count())
-        .unwrap_or(0);
+        let text = match fs::read_to_string(f) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping {}: {e}", f.display());
+                continue;
+            }
+        };
+        let hash = content_hash(text.as_bytes());
+        hashes.insert(path.clone(), hash);
+        if let Some(st) = stamp {
+            stamps.insert(path.clone(), st);
+        }
 
-    let mut stale = vec![false; seen.len()];
-    let (mut reused_files, mut changed_files, mut new_files) = (0usize, 0usize, 0usize);
-    for (i, s) in seen.iter().enumerate() {
-        match old.as_ref().and_then(|ix| ix.files.get(&s.path)) {
-            Some(h) if *h == s.hash => reused_files += 1,
+        match old.as_ref().and_then(|ix| ix.files.get(&path)) {
+            // Timestamp moved, content did not: restamp and reuse the vectors.
+            Some(h) if *h == hash => {
+                by_hash += 1;
+                reuse.push(path);
+            }
             Some(_) => {
                 changed_files += 1;
-                stale[i] = true;
+                stale.push(Stale { path, text });
             }
             None => {
                 new_files += 1;
-                stale[i] = true;
+                stale.push(Stale { path, text });
             }
         }
     }
 
+    let dropped = old
+        .as_ref()
+        .map(|ix| ix.files.keys().filter(|p| !hashes.contains_key(*p)).count())
+        .unwrap_or(0);
+
     // Loaded only if something actually needs chunking.
-    let tok = if stale.iter().any(|&b| b) {
+    let tok = if stale.is_empty() {
+        None
+    } else {
         Some(
             tokenizers::Tokenizer::from_file(find_tokenizer()?)
                 .map_err(|e| anyhow!("loading tokenizer: {e}"))?,
         )
-    } else {
-        None
     };
 
-    // Assembled in file order with a slot per chunk.  Unchanged files copy their
+    // Assembled in file order with a slot per chunk.  Reused notes copy their
     // vectors straight across; stale ones leave zeroed slots that the embedding
     // pass fills, so chunks and vectors stay positionally aligned however much
-    // of the corpus is reused.
+    // of the corpus is carried over.
+    let reused: std::collections::HashSet<&str> = reuse.iter().map(String::as_str).collect();
+    let stale_text: std::collections::HashMap<&str, &str> =
+        stale.iter().map(|s| (s.path.as_str(), s.text.as_str())).collect();
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut vectors: Vec<f32> = Vec::new();
     let mut pending: Vec<usize> = Vec::new();
     let mut pending_len: Vec<usize> = Vec::new();
     let mut resplit = 0usize;
 
-    for (i, s) in seen.iter().enumerate() {
-        if !stale[i] {
+    for f in &files {
+        let path = f.to_string_lossy().into_owned();
+        if reused.contains(path.as_str()) {
             if let Some(ix) = &old {
-                for &j in ix.by_path.get(&s.path).map(Vec::as_slice).unwrap_or(&[]) {
+                for &j in ix.by_path.get(&path).map(Vec::as_slice).unwrap_or(&[]) {
                     chunks.push(ix.chunks[j].clone());
                     vectors.extend_from_slice(&ix.vectors[j * DIM..(j + 1) * DIM]);
                 }
             }
             continue;
         }
+        let Some(text) = stale_text.get(path.as_str()) else { continue };
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(Path::new(&s.path), &s.text), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, text), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -629,8 +684,8 @@ fn cmd_index(vault: &Path, full: bool) -> Result<()> {
 
     if old.is_some() {
         println!(
-            "{} org files · {reused_files} unchanged · {changed_files} changed · \
-             {new_files} new · {dropped} removed",
+            "{} org files · {by_stamp} by stamp · {by_hash} restamped · \
+             {changed_files} changed · {new_files} new · {dropped} removed",
             files.len()
         );
     } else {
@@ -640,22 +695,23 @@ fn cmd_index(vault: &Path, full: bool) -> Result<()> {
         eprintln!("  {resplit} sections ran past {TOKEN_LIMIT} tokens and were divided");
     }
     println!(
-        "{} chunks · {} to embed · scanned in {:.1}s",
+        "{} chunks · {} to embed · scanned in {:.2}s",
         chunks.len(),
         pending.len(),
         t0.elapsed().as_secs_f64()
     );
 
     // Only a run that changes nothing at all may skip the write.  Dropping a
-    // deleted note produces no work to embed but must still be persisted, or
-    // the note stays searchable until something unrelated happens to change.
-    if pending.is_empty() && dropped == 0 && old.is_some() {
+    // deleted note, or merely refreshing stamps, produces no work to embed but
+    // must still be persisted.
+    let restamped = by_hash > 0 || old.as_ref().is_some_and(|ix| ix.stamps.len() != stamps.len());
+    if pending.is_empty() && dropped == 0 && !restamped && old.is_some() {
         println!("nothing changed; index left as it is");
         return Ok(());
     }
 
     if pending.is_empty() {
-        println!("no new text to embed; pruning {dropped} removed note(s)");
+        println!("no new text to embed; rewriting the manifest");
     } else {
         let t1 = Instant::now();
         let mut model = model()?;
@@ -713,9 +769,9 @@ fn cmd_index(vault: &Path, full: bool) -> Result<()> {
         );
     }
 
-    let written = save_index(&dir, &chunks, &vectors, manifest)?;
+    let written = save_index(&dir, &chunks, &vectors, hashes, stamps)?;
     println!(
-        "wrote {} ({:.1} MB of vectors) in {:.1}s total",
+        "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
         written as f64 / 1e6,
         t0.elapsed().as_secs_f64()
@@ -991,7 +1047,10 @@ fn main() -> Result<()> {
             let vault = args.get(2).ok_or_else(|| anyhow!("usage: index <vault>"))?;
             // `--incremental` is the default; accepted so a script can say so.
             let full = args.iter().any(|a| a == "--full");
-            cmd_index(Path::new(vault), full)
+            // `--rehash` reads and hashes every note, ignoring stamps: the
+            // backstop for a change that left mtime untouched.
+            let rehash = args.iter().any(|a| a == "--rehash");
+            cmd_index(Path::new(vault), full, rehash)
         }
         Some("search") => {
             let vault = args
@@ -1254,8 +1313,12 @@ mod tests {
             });
             files.insert((*p).to_string(), content_hash(&fs::read(p).unwrap()));
         }
+        let stamps = paths
+            .iter()
+            .map(|p| ((*p).to_string(), stamp_of(Path::new(p)).unwrap()))
+            .collect();
         let vectors = vec![0.0f32; chunks.len() * DIM];
-        save_index(&state_dir(dir), &chunks, &vectors, files).unwrap();
+        save_index(&state_dir(dir), &chunks, &vectors, files, stamps).unwrap();
     }
 
     /// Regression: a run whose only change is a deleted note produced nothing to
@@ -1269,7 +1332,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(&b).unwrap();
-        cmd_index(&v, false).unwrap();
+        cmd_index(&v, false, false).unwrap();
 
         let ix = load_index(&state_dir(&v)).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -1284,7 +1347,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false).unwrap();
+        cmd_index(&v, false, false).unwrap();
         assert_eq!(fs::read(state_dir(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -1331,5 +1394,31 @@ mod tests {
         assert_eq!(content_hash(b"alpha"), content_hash(b"alpha"));
         assert_ne!(content_hash(b"alpha"), content_hash(b"alphb"));
         assert_ne!(content_hash(b""), content_hash(b"x"));
+    }
+
+    /// mtime is a filter, not the answer: a note whose timestamp moved but whose
+    /// bytes are identical must be restamped and reused, never re-embedded.
+    #[test]
+    fn a_touched_note_is_restamped_without_re_embedding() {
+        let v = scratch("restamp");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let before = fs::read(state_dir(&v).join("vectors.f32")).unwrap();
+        let old_stamp = load_index(&state_dir(&v)).unwrap().stamps[&a];
+
+        // Move mtime without touching content.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let body = fs::read(&a).unwrap();
+        fs::write(&a, &body).unwrap();
+
+        cmd_index(&v, false, false).unwrap();
+
+        let ix = load_index(&state_dir(&v)).unwrap();
+        assert_eq!(
+            fs::read(state_dir(&v).join("vectors.f32")).unwrap(),
+            before,
+            "identical content must not be re-embedded"
+        );
+        assert_ne!(ix.stamps[&a], old_stamp, "the new stamp must be recorded");
     }
 }
