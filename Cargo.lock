@@ -1211,18 +1211,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "org-semantic"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fastembed",
- "ort",
- "serde",
- "serde_json",
- "tokenizers",
-]
-
-[[package]]
 name = "ort"
 version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,6 +1608,18 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "semnotes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fastembed",
+ "ort",
+ "serde",
+ "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
