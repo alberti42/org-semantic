@@ -66,6 +66,21 @@ const MODELS: &[Model] = &[
             query: "query: ", passage: "passage: ", about: "100 languages" },
 ];
 
+const USAGE: &str = "\
+usage:
+  org-semantic index   <vault> [--full|--rehash] [--model NAME]
+  org-semantic index   <vault> --lexical|--both [--full|--rehash]
+                              [--lang en-US[,de-DE,…]|auto] [--fold]
+  org-semantic search  <vault> <query> [k] [--model NAME]
+  org-semantic search  <vault> <query> [k] --lexical [--any]
+  org-semantic chunks  <vault> <path-substring> [--lang …] [--model NAME]
+  org-semantic tokens  <vault> [limit] [--model NAME]
+  org-semantic models  [vault]
+  org-semantic bench   <vault> [n] [config]
+
+Bare `index` builds the semantic index, `--lexical` the word index, `--both` both.
+Each model keeps its own semantic index; `models <vault>` shows which are built.";
+
 const DEFAULT_MODEL: &str = "bge-small-en";
 
 fn model_named(name: &str) -> Result<&'static Model> {
@@ -1802,8 +1817,7 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
         None
     } else {
         Some(
-            tokenizers::Tokenizer::from_file(find_tokenizer()?)
-                .map_err(|e| anyhow!("loading tokenizer: {e}"))?,
+            tokenizer_for(m)?,
         )
     };
 
@@ -2197,10 +2211,8 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
 /// silently truncated.  fastembed sets `TruncationParams { max_length }` on the
 /// tokenizer, so a chunk over the limit loses its tail with no error — and
 /// characters are a poor proxy for tokens in notes full of LaTeX and German.
-fn cmd_tokens(vault: &Path, limit: usize) -> Result<()> {
-    let tok_path = find_tokenizer()?;
-    let tok = tokenizers::Tokenizer::from_file(&tok_path)
-        .map_err(|e| anyhow!("loading tokenizer {}: {e}", tok_path.display()))?;
+fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
+    let tok = tokenizer_for(m)?;
 
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -2244,9 +2256,18 @@ fn cmd_tokens(vault: &Path, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn find_tokenizer() -> Result<PathBuf> {
-    let root = cache_dir().join("models--Xenova--bge-small-en-v1.5");
-    let snaps = root.join("snapshots");
+/// Where fastembed caches a model's files.
+fn model_cache_root(m: &Model) -> Result<PathBuf> {
+    let code = TextEmbedding::list_supported_models()
+        .into_iter()
+        .find(|i| i.model == m.which)
+        .map(|i| i.model_code)
+        .ok_or_else(|| anyhow!("fastembed does not know {}", m.name))?;
+    Ok(cache_dir().join(format!("models--{}", code.replace('/', "--"))))
+}
+
+fn find_tokenizer(m: &Model) -> Result<PathBuf> {
+    let snaps = model_cache_root(m)?.join("snapshots");
     for e in fs::read_dir(&snaps).with_context(|| format!("reading {}", snaps.display()))? {
         let p = e?.path().join("tokenizer.json");
         if p.exists() {
@@ -2256,11 +2277,53 @@ fn find_tokenizer() -> Result<PathBuf> {
     Err(anyhow!("no tokenizer.json under {}", snaps.display()))
 }
 
+/// The tokenizer belonging to M, fetching the model if it is not cached yet.
+///
+/// It must be **that** model's tokenizer: the 512-token limit is enforced with
+/// it, and BGE's WordPiece and E5's XLM-RoBERTa disagree wildly on how many
+/// tokens a German sentence is.  This used to be hardcoded to BGE, which counted
+/// every other model's text with the wrong vocabulary and never said so.
+fn tokenizer_for(m: &Model) -> Result<tokenizers::Tokenizer> {
+    let path = match find_tokenizer(m) {
+        Ok(p) => p,
+        // Not cached: chunking runs before embedding, so the download that would
+        // have happened later has to happen now.
+        Err(_) => {
+            eprintln!("  fetching {} …", m.name);
+            let _ = model_with(m.which.clone(), None, false)?;
+            find_tokenizer(m)?
+        }
+    };
+    tokenizers::Tokenizer::from_file(&path)
+        .map_err(|e| anyhow!("loading tokenizer {}: {e}", path.display()))
+}
+
+/// The vault argument, rejecting a flag standing in its place.
+///
+/// Without this a forgotten path makes the *flag* the vault: `index --model
+/// e5-small` walked a directory called `--model` and failed several layers down
+/// with "No such file or directory".
+/// `--model NAME` from the arguments, or the default.  FROM is where this
+/// subcommand's flags start.
+fn model_arg(args: &[String], from: usize) -> Result<&'static Model> {
+    match args.iter().skip(from).position(|a| a == "--model") {
+        Some(i) => model_named(args.get(from + i + 1).map(String::as_str).unwrap_or("")),
+        None => model_named(DEFAULT_MODEL),
+    }
+}
+
+fn vault_arg<'a>(args: &'a [String], usage: &str) -> Result<&'a Path> {
+    match args.get(2).map(String::as_str) {
+        Some(v) if !v.starts_with('-') => Ok(Path::new(v)),
+        Some(v) => Err(anyhow!("expected a vault directory, got `{v}`\nusage: {usage}")),
+        None => Err(anyhow!("usage: {usage}")),
+    }
+}
+
 /// Print the chunks a file produces, without embedding — for checking chunking
 /// decisions (boundaries, overlap, headings) without paying for a full index.
-fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig) -> Result<()> {
-    let tok = tokenizers::Tokenizer::from_file(find_tokenizer()?)
-        .map_err(|e| anyhow!("loading tokenizer: {e}"))?;
+fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model) -> Result<()> {
+    let tok = tokenizer_for(m)?;
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
@@ -2346,7 +2409,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("index") => {
-            let vault = args.get(2).ok_or_else(|| anyhow!("usage: index <vault>"))?;
+            let vault = vault_arg(&args, "index <vault> [--lexical|--both] [--model NAME]")?;
             // `--incremental` is the default; accepted so a script can say so.
             let full = args.iter().skip(3).any(|a| a == "--full");
             // `--rehash` reads and hashes every note, ignoring stamps: the
@@ -2393,7 +2456,6 @@ fn main() -> Result<()> {
                 Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
                 None => model_named(DEFAULT_MODEL)?,
             };
-            let vault = Path::new(vault);
             if both || !lexical {
                 cmd_index(vault, full, rehash, model)?;
             }
@@ -2429,7 +2491,7 @@ fn main() -> Result<()> {
             }
         }
         Some("chunks") => {
-            let vault = args.get(2).ok_or_else(|| anyhow!("usage: chunks <vault> <path-substring>"))?;
+            let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
             let mut lang = LangConfig::default();
             for (i, a) in args.iter().enumerate().skip(3) {
@@ -2440,7 +2502,7 @@ fn main() -> Result<()> {
                 }
             }
             prepare_lang(&lang)?;
-            cmd_chunks(Path::new(vault), needle, &lang)
+            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?)
         }
         Some("models") => {
             // With a vault, say which of them are actually built for it.
@@ -2471,28 +2533,22 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("tokens") => {
-            let vault = args.get(2).ok_or_else(|| anyhow!("usage: tokens <vault> [limit]"))?;
+            let vault = vault_arg(&args, "tokens <vault> [limit]")?;
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
-            cmd_tokens(Path::new(vault), limit)
+            cmd_tokens(vault, limit, model_arg(&args, 3)?)
         }
         Some("bench") => {
-            let vault = args.get(2).ok_or_else(|| anyhow!("usage: bench <vault> [n]"))?;
+            let vault = vault_arg(&args, "bench <vault> [n] [config]")?;
             let n = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(500);
             let cfg = args.get(4).map(String::as_str).unwrap_or("cpu512");
             cmd_bench(Path::new(vault), n, cfg)
         }
-        _ => Err(anyhow!(
-            "usage:\n\
-             \x20 org-semantic index   <vault> [--full|--rehash] [--model NAME]  semantic\n\
-             \x20 org-semantic index   <vault> --lexical|--both [--full|--rehash]\n\
-             \x20                             [--lang en-US[,de-DE,…] | auto] [--fold]\n\
-             \x20 org-semantic search  <vault> <query> [k] [--model NAME]\n\
-             \x20 org-semantic search  <vault> <query> [k] --lexical [--any]\n\
-             \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
-             \x20 org-semantic tokens  <vault> [limit]\n\
-             \x20 org-semantic models  [vault]                 embedding models\n\
-             \x20 org-semantic bench   <vault> [n] [config]"
-        )),
+        // Asking for help is not an error: it goes to stdout and exits 0.
+        Some("-h") | Some("--help") | Some("help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        _ => Err(anyhow!("{USAGE}")),
     }
 }
 
@@ -2809,6 +2865,34 @@ mod tests {
         let other = model_named("e5-large").unwrap();
         assert_ne!(other.dim, model_named(DEFAULT_MODEL).unwrap().dim);
         assert!(load_index(&state_dir(&v), other).is_none());
+    }
+
+    #[test]
+    fn a_flag_is_not_a_vault() {
+        // `index --model e5-small` used to take `--model` as the vault and fail
+        // several layers down with "No such file or directory".
+        let args: Vec<String> =
+            ["org-semantic", "index", "--model", "e5-small"].iter().map(|s| s.to_string()).collect();
+        let err = vault_arg(&args, "index <vault>").unwrap_err().to_string();
+        assert!(err.contains("--model"), "names what it got: {err}");
+        assert!(err.contains("usage"), "and how to fix it: {err}");
+
+        let ok: Vec<String> =
+            ["org-semantic", "index", "/tmp/v"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(vault_arg(&ok, "index <vault>").unwrap(), Path::new("/tmp/v"));
+    }
+
+    /// Each model's tokenizer must be its own: the 512-token limit is enforced
+    /// with it, and BGE's WordPiece counts a German sentence ~50% higher than
+    /// E5's XLM-RoBERTa (66 tokens against 44 on the same paragraph).  This was
+    /// hardcoded to BGE and silently mismeasured every other model.
+    #[test]
+    fn a_tokenizer_belongs_to_its_model() {
+        let bge = model_cache_root(model_named("bge-small-en").unwrap()).unwrap();
+        let e5 = model_cache_root(model_named("e5-small").unwrap()).unwrap();
+        assert_ne!(bge, e5);
+        assert!(bge.ends_with("models--Xenova--bge-small-en-v1.5"), "{bge:?}");
+        assert!(e5.ends_with("models--intfloat--multilingual-e5-small"), "{e5:?}");
     }
 
     #[test]
