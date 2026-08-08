@@ -157,11 +157,25 @@ It uses fastText's `lid.176` (176 languages, 917 kB), downloaded to
 
 **Auto-detection is accurate on prose and guesses when there is no prose.**
 Measured across a 951-note vault it placed English, German and Italian correctly;
-the 0.4% it got wrong are notes that are almost entirely attachment links or
-shell snippets, where it is classifying filenames. A misclassified chunk is
-stemmed wrongly and becomes harder to find, with nothing to indicate why. An
-explicit `# ltex: language=…` overrides the classifier, and it is a line such
-notes want anyway so ltex doesn't grammar-check your shell commands.
+the 0.4% it got wrong were notes that are almost entirely attachment links or
+shell snippets, where it is classifying filenames.
+
+Naming the languages your vault is actually written in removes those:
+
+```
+org-semantic index ~/notes --full --lang auto:en-US,de-DE,it-IT
+```
+
+The answer is then the highest-ranked language among the ones you listed, so a
+note cannot come back Portuguese because a screenshot filename looked like it.
+On the same vault that takes the misclassifications to zero. Candidates are
+matched on their primary subtag but stored as you wrote them, so `de-DE` stays
+`de-DE` rather than becoming fastText's bare `de`.
+
+A misclassified chunk is stemmed wrongly and becomes harder to find, with nothing
+to indicate why. An explicit `# ltex: language=…` overrides the classifier, and
+it is a line such notes want anyway so ltex doesn't grammar-check your shell
+commands.
 
 Lexical search stems each note in its own language: `oscillation` finds
 `oscillations` in English notes, `Sprachen` finds `Sprache` in German ones, and

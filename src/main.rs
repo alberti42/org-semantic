@@ -2,7 +2,7 @@
 //!
 //! Prototype.  Commands:
 //!
-//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US] [--fold]
+//!   org-semantic index  <vault> [--full|--rehash] [--lang en-US|auto:en,de] [--fold]
 //!   org-semantic search  <vault> <query> [k] [--lexical]  ranked by meaning, or
 //!                                                          by words with --lexical
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
@@ -130,29 +130,45 @@ fn classifier() -> Result<&'static FastText> {
 /// Load the classifier before indexing starts, so a failed download is an error
 /// on the way in rather than a panic part-way through a long run.
 fn prepare_lang(lang: &LangConfig) -> Result<()> {
-    if lang.default.eq_ignore_ascii_case(LANG_AUTO) {
+    if lang.auto_candidates().is_some() {
         classifier()?;
     }
     Ok(())
 }
+
+/// How many labels to ask for when the answer is restricted: all of them, so
+/// the best *allowed* language is found even when it ranks last.
+const LID_LABELS: i32 = 176;
 
 /// Classify prose, returning the code fastText emits — two letters for most of
 /// its 176 languages, which is what ltex and the rest of this speak.
 ///
 /// Applied per note rather than per chunk: a chunk can be a two-line heading,
 /// and a classifier given two lines guesses.  A whole note is usually enough.
-fn detect_lang(prose: &str) -> String {
+///
+/// With a non-empty CANDIDATES the answer is the highest-ranked language in that
+/// set, which is the cure for confident nonsense on notes that are mostly
+/// attachment links or shell snippets: a vault written in English and German
+/// cannot be told one of its notes is Portuguese.  The winning candidate is
+/// returned as the caller spelled it, so a regional variant survives.
+fn detect_lang(prose: &str, candidates: &[&str]) -> String {
     // Newlines separate documents for fastText, so a multi-line note would be
     // classified by its first line alone.
     let text = prose.replace('\n', " ");
+    let k = if candidates.is_empty() { 1 } else { LID_LABELS };
     let preds = classifier()
         .expect("classifier loaded by prepare_lang")
-        .predict(&text, 1, 0.0)
+        .predict(&text, k, 0.0)
         .unwrap_or_default();
-    preds
-        .first()
-        .map(|p| p.label.trim_start_matches("__label__").to_string())
-        .unwrap_or_else(|| "en".into())
+    let mut ranked = preds.iter().map(|p| p.label.trim_start_matches("__label__"));
+    if candidates.is_empty() {
+        return ranked.next().unwrap_or("en").to_string();
+    }
+    ranked
+        .find_map(|code| candidates.iter().find(|c| lang_matches(c, code)))
+        // Only reachable if a candidate is not one of the 176, e.g. a typo.
+        .unwrap_or(&candidates[0])
+        .to_string()
 }
 
 /// The value that stands for "classify this note", accepted by `--lang` and
@@ -201,6 +217,27 @@ struct LangConfig {
 impl Default for LangConfig {
     fn default() -> Self {
         LangConfig { default: "en-US".into(), keyword: "ltex".into() }
+    }
+}
+
+impl LangConfig {
+    /// The candidate set for classification: `None` when the default names a
+    /// fixed language, otherwise the languages `auto` may answer with — empty
+    /// for a bare `auto`, meaning all 176.
+    ///
+    /// Spelled `auto:en-US,de-DE`.  The entries are returned as written, so a
+    /// vault that thinks in `en-US` gets `en-US` back rather than fastText's
+    /// bare `en`.
+    fn auto_candidates(&self) -> Option<Vec<&str>> {
+        let rest = strip_prefix_ci(self.default.trim(), LANG_AUTO)?;
+        match rest.strip_prefix(':') {
+            Some(list) => Some(
+                list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
+            ),
+            None if rest.is_empty() => Some(Vec::new()),
+            // `auto-something` is not `auto`.
+            None => None,
+        }
     }
 }
 
@@ -446,15 +483,15 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: &LangConfig) -> Vec<Chun
     // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
     // would pull every note towards English.  Only chunks that took the default
     // are replaced — an explicit `# ltex: language=…` always wins.
-    if lang.default.eq_ignore_ascii_case(LANG_AUTO) {
+    if let Some(candidates) = lang.auto_candidates() {
         let prose: Vec<&str> = chunks
             .iter()
-            .filter(|c| c.lang.eq_ignore_ascii_case(LANG_AUTO))
+            .filter(|c| c.lang.eq_ignore_ascii_case(&lang.default))
             .map(|c| c.text.as_str())
             .collect();
         if !prose.is_empty() {
-            let detected = detect_lang(&prose.join("\n"));
-            for c in chunks.iter_mut().filter(|c| c.lang.eq_ignore_ascii_case(LANG_AUTO)) {
+            let detected = detect_lang(&prose.join("\n"), &candidates);
+            for c in chunks.iter_mut().filter(|c| c.lang.eq_ignore_ascii_case(&lang.default)) {
                 c.lang = detected.clone();
             }
         }
@@ -2080,7 +2117,8 @@ fn main() -> Result<()> {
         }
         _ => Err(anyhow!(
             "usage:\n\
-             \x20 org-semantic index   <vault> [--full|--rehash] [--lang en-US|auto] [--fold]\n\
+             \x20 org-semantic index   <vault> [--full|--rehash] [--fold]\n\
+             \x20                             [--lang en-US|auto|auto:en-US,de-DE]\n\
              \x20 org-semantic search  <vault> <query> [k] [--lexical [--any] [--fold]]\n\
              \x20 org-semantic chunks  <vault> <path-substring> [--lang …]\n\
              \x20 org-semantic tokens  <vault> [limit]\n\
@@ -2755,13 +2793,13 @@ mod tests {
 
     #[test]
     fn detect_lang_returns_two_letter_codes() {
-        assert_eq!(detect_lang("The quick brown fox jumps over the lazy dog again and again"), "en");
+        assert_eq!(detect_lang("The quick brown fox jumps over the lazy dog again and again", &[]), "en");
         assert_eq!(
-            detect_lang("Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert"),
+            detect_lang("Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert", &[]),
             "de"
         );
         assert_eq!(
-            detect_lang("Les élèves de la classe ont étudié la théorie pendant toute la semaine"),
+            detect_lang("Les élèves de la classe ont étudié la théorie pendant toute la semaine", &[]),
             "fr"
         );
     }
@@ -2775,10 +2813,41 @@ mod tests {
         assert_eq!(
             detect_lang(
                 "Die Wörter der deutschen Sprache sind manchmal sehr lang\n\
-                 und kompliziert, aber man gewöhnt sich daran mit der Zeit."
+                 und kompliziert, aber man gewöhnt sich daran mit der Zeit.",
+                &[]
             ),
             "de"
         );
+    }
+
+    #[test]
+    fn candidates_confine_the_answer_and_keep_their_own_spelling() {
+        // Unrestricted this is Portuguese; the vault says it is written in
+        // English and German, so the best allowed language wins instead.
+        let prose = "[[attachment:Bildschirmfoto 2024-07-08 um 14.43.48.jpg]]";
+        assert_eq!(detect_lang(prose, &[]), "pt");
+        assert!(matches!(detect_lang(prose, &["en-US", "de-DE"]).as_str(), "en-US" | "de-DE"));
+
+        // A candidate is matched on its primary subtag but returned as written,
+        // so the vault keeps the regional variant it thinks in.
+        assert_eq!(
+            detect_lang("Die Wörter der deutschen Sprache sind sehr lang", &["en-US", "de-DE"]),
+            "de-DE"
+        );
+    }
+
+    #[test]
+    fn auto_candidates_are_parsed_from_the_default() {
+        let auto = |s: &str| {
+            let cfg = LangConfig { default: s.into(), keyword: "ltex".into() };
+            cfg.auto_candidates().map(|v| v.join(","))
+        };
+        assert_eq!(auto("en-US"), None);
+        assert_eq!(auto("auto").as_deref(), Some(""));
+        assert_eq!(auto("AUTO").as_deref(), Some(""));
+        assert_eq!(auto("auto:en-US, de-DE").as_deref(), Some("en-US,de-DE"));
+        // Not `auto`, and must not be read as an unrestricted one.
+        assert_eq!(auto("autopilot"), None);
     }
 
     #[test]
