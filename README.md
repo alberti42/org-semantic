@@ -38,9 +38,10 @@ whole point of org-semantic.
 
 ## Why
 
-Existing options either run a Python service — one popular org indexer pulls 129
-packages including torch, CLIP and the Azure SDK — or are built for Markdown and
-know nothing about org structure.
+Existing packages either run a Python service — one popular org indexer pulls in
+129 dependencies including torch, CLIP and the Azure SDK — or are built for
+Markdown and know nothing about org structure. [Related work](#related-work)
+compares them one by one.
 
 org-semantic is one 34 MB binary. ONNX Runtime is statically linked; the only
 thing it ever downloads is the embedding model (129 MB, once, into your cache).
