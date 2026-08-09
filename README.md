@@ -32,7 +32,9 @@ $ org-semantic search ~/notes "why do the atoms heat up and get lost from the tr
 [model load 120ms · query embed 7ms · search over 6328 vectors 1.4ms]
 ```
 
-No word of that query appears in either note's title. That is the point.
+Not one word of that query appears in the top note's title, and the passage it
+points at is 677 lines in. Finding what you can describe but cannot name is the
+whole point of org-semantic.
 
 ## Why
 
