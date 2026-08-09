@@ -74,7 +74,7 @@ impl Server {
     /// The analyzer the lexical index was built with, read from beside it.
     ///
     /// Read per query rather than cached: it costs a 30-byte file read, and
-    /// reading it fresh means a rebuild under a different `--lang` or `--fold`
+    /// reading it fresh means a rebuild under different languages or folding
     /// can never be answered with the previous one.
     fn analyzer(vault: &Path) -> Result<lexical::Analyzer> {
         let stored = lexical::stored_key(&state_dir(vault))
@@ -205,11 +205,10 @@ impl Server {
         }
 
         if mode == "lexical" || mode == "both" {
-            let lang = match p.get("lang").and_then(|v| v.as_str()) {
-                Some(spec) => LangConfig::parse(spec),
-                None => LangConfig::default(),
-            };
-            let fold = p.get("fold").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Languages and folding come from the policy, not from separate
+            // parameters: they are part of what the index *is*, and a second
+            // channel for them is a second thing that can disagree.
+            let lang = LangConfig { languages: cfg.languages.clone() };
             prepare_lang(&lang)?;
             if !full {
                 check_config(
@@ -220,7 +219,8 @@ impl Server {
                     Target::Lexical,
                 )?;
             }
-            let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &cfg, &mut out)?;
+            let report =
+                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut out)?;
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 

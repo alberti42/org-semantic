@@ -85,7 +85,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ```
 org-semantic index   <dir> [--full|--rehash] [--model NAME] [--config FILE]
 org-semantic index   <dir> --lexical|--both [--full|--rehash]
-                           [--lang en-US[,de-DE,…]|auto] [--fold]
+                           [--lang en-US[,de-DE,…]|auto] [--fold-diacritics]
 org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
 org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
 org-semantic chunks  <dir> <path-substring> [--lexical] [--lang …]
@@ -246,9 +246,9 @@ org-semantic index ~/notes --lexical       # BM25             1.3 s
 org-semantic index ~/notes --both          # both
 ```
 
-`--lang` and `--fold` belong to the lexical index, which is the only one that has
-a use for a language: they choose the stemmer. Passing them to a semantic build
-is an error rather than a setting that does nothing.
+`--lang` and `--fold-diacritics` belong to the lexical index, which is the only
+one that has a use for a language: they choose the stemmer. Passing them to a
+semantic build is an error rather than a setting that does nothing.
 
 They are separate artifacts with separate records of what they have seen, so each
 re-run only reads the notes *that* index is behind on. Both are incremental by
@@ -258,8 +258,9 @@ ignoring timestamps.
 The asymmetry is the point. Embedding is minutes and needs a 129 MB model; the
 lexical index is a second and needs nothing but the notes. Keeping them apart
 means editing a few notes and refreshing keyword search costs a second, and
-changing `--fold` or your language list no longer drags the embeddings through a
-rebuild they have no stake in.
+changing the folding or your language list no longer drags the embeddings through
+a rebuild they have no stake in — those settings are hashed per index, so they
+invalidate only the one they affect.
 
 ### Two rankings, deliberately unmixed
 
@@ -340,6 +341,8 @@ The whole policy lives in a file you own, named with `--config`:
 
 ```json
 {
+  "languages": ["en-US", "de-DE"],
+  "fold_diacritics": false,
   "blocks": {
     "src":     { "semantic": "placeholder", "lexical": true },
     "example": { "semantic": "placeholder", "lexical": true },
@@ -351,7 +354,9 @@ The whole policy lives in a file you own, named with `--config`:
 }
 ```
 
-`semantic` takes `true` (embed it), `false` (drop it) or `"placeholder"`;
+`languages` and `fold_diacritics` configure the lexical index, which is the only
+one that stems anything — see *Languages* below. `semantic` takes `true` (embed
+it), `false` (drop it) or `"placeholder"`;
 `lexical` is a plain boolean, since labelling something in an exact-match index
 would only make `[src]` a searchable word. Babel `#+RESULTS:` and bare `: `
 fixed-width lines count as output, not prose. Quote and verse stay in both —
@@ -429,6 +434,11 @@ you name decides everything else**:
 --lang auto                   classified with no restriction, all 176
 ```
 
+`--lang` and `--fold-diacritics` are shorthand for the `languages` and
+`fold_diacritics` keys in the config, and **what you pass is cached with the rest
+of the policy**. Forgetting them on a later run reuses what you set; it does not
+quietly revert to English alone, which is what a plain flag used to do.
+
 Classification is per note rather than per chunk, since a chunk can be a two-line
 heading. It uses fastText's `lid.176` (917 kB), downloaded to
 `$XDG_CACHE_HOME/org-semantic/` on first use.
@@ -459,7 +469,9 @@ Lexical search stems each note in its own language: `oscillation` finds
 neither leaks into the other. Regional variants share a stemmer, so `de-DE` and
 `de-AT` are both German.
 
-`--fold` folds accents, so `eleves` matches `élèves`. Off by default, and worth
+`fold_diacritics` (or `--fold-diacritics`) folds accents, so `eleves` matches
+`élèves`. It is named for the case worth having; the filter is broader, mapping
+non-ASCII to ASCII generally, so `æ` becomes `ae` too. Off by default, and worth
 noting it does nothing for German — that stemmer already strips umlauts, so
 `Worter` finds `Wörter` regardless. It is French, Spanish and Portuguese that
 need it. Changing it rebuilds the lexical index once (0.2 s).

@@ -72,7 +72,8 @@ const USAGE: &str = "\
 usage:
   org-semantic index   <vault> [--full|--rehash] [--model NAME] [--config FILE]
   org-semantic index   <vault> --lexical|--both [--full|--rehash]
-                              [--lang en-US[,de-DE,…]|auto] [--fold]
+                              [--lang en-US[,de-DE,…]|auto]
+                              [--fold-diacritics]
   org-semantic search  <vault> <query> [k] [--model NAME] [--json]
   org-semantic search  <vault> <query> [k] --lexical [--any] [--json]
   org-semantic chunks  <vault> <path-substring> [--lexical] [--lang …]
@@ -408,6 +409,19 @@ impl Blocks {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(deny_unknown_fields, default)]
 struct Config {
+    /// The languages the vault is written in, as `--lang` spells them: one means
+    /// no classification, several restrict the classifier, empty means `auto`.
+    ///
+    /// Here rather than a flag because it is index-defining and must be the same
+    /// on every run: as a flag, forgetting it silently rebuilt the lexical index
+    /// with English alone, losing German and Italian stemming without a word.
+    languages: Vec<String>,
+    /// Fold non-ASCII to ASCII before indexing, so `eleves` matches `élèves`.
+    ///
+    /// Named for diacritics because that is the case worth having; the filter is
+    /// broader (`æ` becomes `ae`).  It does nothing for German, whose stemmer
+    /// already strips umlauts.
+    fold_diacritics: bool,
     /// What to do with each kind of block.
     blocks: Blocks,
     /// Subtrees carrying any of these tags are not indexed.  `noexport` is org's
@@ -424,6 +438,8 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            languages: vec!["en-US".into()],
+            fold_diacritics: false,
             blocks: Blocks::default(),
             exclude_tags: vec!["noexport".into(), "ARCHIVE".into()],
         }
@@ -437,12 +453,7 @@ impl Config {
         let mut tags = self.exclude_tags.clone();
         tags.sort();
         tags.dedup();
-        serde_json::to_string(&Config { blocks: self.blocks.clone(), exclude_tags: tags })
-            .unwrap_or_default()
-    }
-
-    fn hash(&self) -> u64 {
-        content_hash(self.canonical().as_bytes())
+        serde_json::to_string(&Config { exclude_tags: tags, ..self.clone() }).unwrap_or_default()
     }
 
     const KINDS: [&'static str; 5] = ["src", "example", "results", "quote", "verse"];
@@ -458,6 +469,14 @@ impl Config {
         tags.dedup();
         // Excluded subtrees are the one setting both indexes share.
         let mut key = format!("tags={}", tags.join(","));
+        if target == Target::Lexical {
+            // Language and folding pick stemmers, which only this index has.
+            key.push_str(&format!(
+                ";langs={};fold={}",
+                self.languages.join(","),
+                self.fold_diacritics
+            ));
+        }
         for kind in Self::KINDS {
             let p = self.blocks.of(kind);
             let v = match target {
@@ -504,6 +523,21 @@ impl Config {
                 theirs.join(", "),
                 mine.join(", ")
             ));
+        }
+        if target == Target::Lexical {
+            if self.languages != other.languages {
+                out.push(format!(
+                    "languages: was [{}], now [{}]",
+                    other.languages.join(", "),
+                    self.languages.join(", ")
+                ));
+            }
+            if self.fold_diacritics != other.fold_diacritics {
+                out.push(format!(
+                    "fold_diacritics: was {}, now {}",
+                    other.fold_diacritics, self.fold_diacritics
+                ));
+            }
         }
         for kind in Self::KINDS {
             let (a, b) = (self.blocks.of(kind), other.blocks.of(kind));
@@ -2925,17 +2959,20 @@ fn stored_hash<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-/// `--lang`, read the same way wherever it appears.
-fn lang_args(args: &[String], from: usize) -> LangConfig {
-    let mut lang = LangConfig::default();
-    for (i, a) in args.iter().enumerate().skip(from) {
-        if a == "--lang" {
-            if let Some(v) = args.get(i + 1) {
-                lang = LangConfig::parse(v);
-            }
-        }
+/// Apply `--lang` and `--fold-diacritics` on top of a policy.
+///
+/// Flags are another way of saying the same thing the file says, not a separate
+/// channel: whatever they express is cached with the rest, so omitting them on
+/// the next run reuses the value rather than silently reverting to the default.
+/// Precedence is defaults, then the file, then the flags.
+fn apply_lang_flags(mut cfg: Config, args: &[String], from: usize) -> Config {
+    if let Some(v) = flag_value(args, from, "--lang") {
+        cfg.languages = LangConfig::parse(v).languages;
     }
-    lang
+    if args.iter().skip(from).any(|a| a == "--fold-diacritics") {
+        cfg.fold_diacritics = true;
+    }
+    cfg
 }
 
 fn model_arg(args: &[String], from: usize) -> Result<&'static Model> {
@@ -3090,15 +3127,10 @@ fn main() -> Result<()> {
                 &args,
                 3,
                 &[
-                    "--full", "--rehash", "--lexical", "--both", "--lang", "--fold", "--model",
-                    "--config",
+                    "--full", "--rehash", "--lexical", "--both", "--lang", "--fold-diacritics",
+                    "--model", "--config",
                 ],
             )?;
-            let lang = lang_args(&args, 3);
-            // Accent folding, so `Worter` matches `Wörter`.  Off unless asked
-            // for: it maps `ö` to `o`, and the transliteration a German speaker
-            // would actually type is `Woerter`, which this does not produce.
-            let fold = args.iter().skip(3).any(|a| a == "--fold");
             // Same convention as `search`: bare is semantic, `--lexical` is the
             // word index, and the two are separate artifacts built separately.
             // `--both` is one command for the Emacs side to call.
@@ -3109,7 +3141,7 @@ fn main() -> Result<()> {
             // settings that do nothing.
             if !lexical && !both {
                 for a in args.iter().skip(3) {
-                    if a == "--lang" || a == "--fold" {
+                    if a == "--lang" || a == "--fold-diacritics" {
                         return Err(anyhow!(
                             "{a} configures the lexical index; pass --lexical or --both"
                         ));
@@ -3121,7 +3153,8 @@ fn main() -> Result<()> {
                 None => model_named(DEFAULT_MODEL)?,
             };
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = resolve_config(vault, given.as_deref())?;
+            let cfg = apply_lang_flags(resolve_config(vault, given.as_deref())?, &args, 3);
+            let lang = LangConfig { languages: cfg.languages.clone() };
             // The policy last indexed under, kept only so the error can say
             // which setting moved rather than that one did.
             let previous = Config::read(&config_path(&state_dir(vault))).ok();
@@ -3151,7 +3184,7 @@ fn main() -> Result<()> {
             }
             if both || lexical {
                 prepare_lang(&lang)?;
-                cmd_index_lexical(vault, full, rehash, &lang, fold, &cfg, &mut out)?;
+                cmd_index_lexical(vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut out)?;
             }
             // Cached so a later run need not restate it.
             fs::create_dir_all(state_dir(vault))?;
@@ -3170,7 +3203,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 4,
-                &["--lexical", "--any", "--fold", "--json", "--model"],
+                &["--lexical", "--any", "--fold-diacritics", "--json", "--model"],
             )?;
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
@@ -3183,7 +3216,7 @@ fn main() -> Result<()> {
             };
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-                let fold = args.iter().skip(4).any(|a| a == "--fold");
+                let fold = args.iter().skip(4).any(|a| a == "--fold-diacritics");
                 cmd_lexical(vault, query, k, conjunction, fold, json)
             } else {
                 cmd_search(vault, query, k, want, json)
@@ -3193,12 +3226,12 @@ fn main() -> Result<()> {
             let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
             reject_unknown_flags(&args, 3, &["--lang", "--model", "--config", "--lexical"])?;
-            let lang = lang_args(&args, 3);
-            prepare_lang(&lang)?;
             // `--config` here is a dry run: try a policy without storing it or
             // paying for a reindex to find out what it would do.
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = resolve_config(vault, given.as_deref())?;
+            let cfg = apply_lang_flags(resolve_config(vault, given.as_deref())?, &args, 3);
+            let lang = LangConfig { languages: cfg.languages.clone() };
+            prepare_lang(&lang)?;
             let target = if args.iter().skip(3).any(|a| a == "--lexical") {
                 Target::Lexical
             } else {
@@ -3638,12 +3671,40 @@ mod tests {
         let a: Config = serde_json::from_str(r#"{"exclude_tags":["noexport","ARCHIVE"]}"#).unwrap();
         let b: Config =
             serde_json::from_str(r#"{"exclude_tags":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
-        assert_eq!(a.hash(), b.hash(), "order and duplicates must not force a rebuild");
-        assert_eq!(a.hash(), Config::default().hash(), "restating the defaults is free");
-        assert_ne!(a.hash(), Config { exclude_tags: vec![], ..Config::default() }.hash(), "a real change is seen");
+        for t in [Target::Semantic, Target::Lexical] {
+            assert_eq!(a.hash_for(t), b.hash_for(t), "order and duplicates are not changes");
+            assert_eq!(a.hash_for(t), Config::default().hash_for(t), "restating defaults is free");
+            assert_ne!(
+                a.hash_for(t),
+                Config { exclude_tags: vec![], ..Config::default() }.hash_for(t),
+                "a real change is seen"
+            );
+        }
 
         // A typo must not be a setting that silently does nothing.
         assert!(serde_json::from_str::<Config>(r#"{"exclude_tag":["x"]}"#).is_err());
+    }
+
+    #[test]
+    fn languages_and_folding_are_lexical_policy_and_stick() {
+        let a = Config::default();
+        let b = Config { languages: vec!["en-US".into(), "de-DE".into()], ..Config::default() };
+        // Adding a language cannot change an embedding, so it must not cost one.
+        assert_eq!(a.hash_for(Target::Semantic), b.hash_for(Target::Semantic));
+        assert_ne!(a.hash_for(Target::Lexical), b.hash_for(Target::Lexical));
+
+        // A flag is another way of saying what the file says, merged on top and
+        // then cached — which is what stops `--lang` being forgotten and the
+        // index silently reverting to English alone.
+        let args: Vec<String> =
+            ["x", "index", "/v", "--lang", "en-US,de-DE", "--fold-diacritics"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let merged = apply_lang_flags(Config::default(), &args, 3);
+        assert_eq!(merged.languages, vec!["en-US", "de-DE"]);
+        assert!(merged.fold_diacritics);
+        assert_eq!(merged.hash_for(Target::Semantic), a.hash_for(Target::Semantic));
     }
 
     #[test]
