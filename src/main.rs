@@ -15,6 +15,8 @@
 //! database — a vault of a thousand notes is a few megabytes of vectors, and a
 //! brute-force dot product over that is exact and takes under a millisecond.
 
+mod serve;
+
 use anyhow::{anyhow, Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use fasttext::FastText;
@@ -76,6 +78,7 @@ usage:
   org-semantic chunks  <vault> <path-substring> [--lang …] [--model NAME]
   org-semantic tokens  <vault> [limit] [--model NAME]
   org-semantic models  [vault]
+  org-semantic serve                           JSON-RPC over stdio, for an editor
   org-semantic bench   <vault> [n] [config]
 
 Bare `index` builds the semantic index, `--lexical` the word index, `--both` both.
@@ -2566,6 +2569,7 @@ fn main() -> Result<()> {
             prepare_lang(&lang)?;
             cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?)
         }
+        Some("serve") => serve::serve(),
         Some("models") => {
             // With a vault, say which of them are actually built for it.
             let built = args.get(2).map(|v| {

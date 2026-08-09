@@ -93,6 +93,48 @@ org-semantic bench   <dir> [n] [config]        embedding throughput
 org-semantic models                            embedding models available
 ```
 
+### Driving it from an editor
+
+`search --json` returns the hits as data rather than prose, and `serve` keeps a
+process alive so a query costs milliseconds instead of a model load:
+
+```console
+$ org-semantic serve        # JSON-RPC 2.0 over stdio, LSP framing
+```
+
+| request | time |
+|---|---|
+| first semantic query (loads the model) | 309 ms |
+| the same query again, model resident | **9.5 ms** |
+| lexical query | 23 ms |
+
+That gap is the whole reason for a resident process: 10 ms is a keystroke, 300 ms
+is not.
+
+Framing is LSP's `Content-Length` because Emacs ships `jsonrpc.el` — the library
+Eglot runs on — so the editor needs no protocol code: `make-process`, and
+request/response correlation, notifications and cancellation come free. No
+socket, no port, no authentication, and the server lives exactly as long as the
+editor does.
+
+Methods:
+
+| method | params | returns |
+|---|---|---|
+| `search` | `vault`, `query`, `k`, `mode` (`semantic`\|`lexical`), `model`, `any` | `{"hits": [...]}` |
+| `status` | `vault` | which indexes are built, and which are loaded |
+| `reload` | — | drop cached indexes after a rebuild |
+| `shutdown` | — | exit |
+
+Both modalities take the same request and return the same shape, so an editor can
+offer one command with a toggle and never branch on the reply. Each hit carries
+an absolute `file`, the `line`, and the `:ID:` when the note has one — enough to
+build a clickable link and jump through `org-id`, which survives the note being
+moved or renamed.
+
+An empty query returns no hits rather than an error, so it is safe to send on
+every keystroke; debouncing is the editor's policy, not the server's.
+
 ### Choosing an embedding model
 
 ```console
