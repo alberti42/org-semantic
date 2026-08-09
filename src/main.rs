@@ -466,18 +466,18 @@ impl Blocks {
 /// that the heading does not already say.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
-struct PlanningPolicy {
+struct PlanningLinePolicy {
     semantic: bool,
     lexical: bool,
 }
 
-impl Default for PlanningPolicy {
+impl Default for PlanningLinePolicy {
     fn default() -> Self {
-        PlanningPolicy { semantic: false, lexical: true }
+        PlanningLinePolicy { semantic: false, lexical: true }
     }
 }
 
-impl PlanningPolicy {
+impl PlanningLinePolicy {
     fn keeps(&self, target: Target) -> bool {
         match target {
             Target::Semantic => self.semantic,
@@ -514,7 +514,7 @@ struct Config {
     /// What to do with each kind of block.
     blocks: Blocks,
     /// What to do with a heading's `DEADLINE:` / `SCHEDULED:` / `CLOSED:` line.
-    planning: PlanningPolicy,
+    planning_line: PlanningLinePolicy,
     /// Anything tagged with one of these is not indexed — the tag names what to
     /// leave out, not what to strip from the index.  `noexport` is org's own
     /// "not for consumption" marker and `ARCHIVE` its "put this away"; both
@@ -555,7 +555,7 @@ impl Default for Config {
             languages: vec!["en-US".into()],
             fold_diacritics: false,
             blocks: Blocks::default(),
-            planning: PlanningPolicy::default(),
+            planning_line: PlanningLinePolicy::default(),
             exclude_tagged: vec!["noexport".into(), "ARCHIVE".into()],
             todo_keywords: DEFAULT_TODO_KEYWORDS.iter().map(|s| (*s).into()).collect(),
         }
@@ -605,7 +605,7 @@ impl Config {
             };
             key.push_str(&format!(";{kind}={v}"));
         }
-        key.push_str(&format!(";planning={}", self.planning.keeps(target)));
+        key.push_str(&format!(";planning_line={}", self.planning_line.keeps(target)));
         content_hash(key.as_bytes())
     }
 
@@ -666,13 +666,13 @@ impl Config {
                 _ => {}
             }
         }
-        let (mine, theirs) = (self.planning.keeps(target), other.planning.keeps(target));
+        let (mine, theirs) = (self.planning_line.keeps(target), other.planning_line.keeps(target));
         if mine != theirs {
             let side = match target {
                 Target::Semantic => "semantic",
                 Target::Lexical => "lexical",
             };
-            out.push(format!("planning.{side}: was {theirs}, now {mine}"));
+            out.push(format!("planning_line.{side}: was {theirs}, now {mine}"));
         }
         out
     }
@@ -1106,7 +1106,7 @@ fn chunk_file(
         // paragraph that mentions one, and stays.
         let planning = at_planning && is_planning_line(line);
         at_planning = false;
-        if planning && !cfg.planning.keeps(target) {
+        if planning && !cfg.planning_line.keeps(target) {
             continue;
         }
 
@@ -4683,7 +4683,7 @@ mod tests {
     fn planning_can_be_kept_or_dropped_on_either_side() {
         let note = "#+title: T\n* Task\nDEADLINE: <2026-09-01 Tue>\nBody.\n";
         let cfg = Config {
-            planning: PlanningPolicy { semantic: true, lexical: false },
+            planning_line: PlanningLinePolicy { semantic: true, lexical: false },
             ..Config::default()
         };
         let of = |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target);
@@ -4694,8 +4694,10 @@ mod tests {
         let d = Config::default();
         assert_ne!(cfg.hash_for(Target::Semantic), d.hash_for(Target::Semantic));
         assert_ne!(cfg.hash_for(Target::Lexical), d.hash_for(Target::Lexical));
-        let semantic_only =
-            Config { planning: PlanningPolicy { semantic: true, ..d.planning }, ..d.clone() };
+        let semantic_only = Config {
+            planning_line: PlanningLinePolicy { semantic: true, ..d.planning_line },
+            ..d.clone()
+        };
         assert_eq!(
             semantic_only.hash_for(Target::Lexical),
             d.hash_for(Target::Lexical),
@@ -4704,7 +4706,7 @@ mod tests {
         assert!(semantic_only
             .differences(&d, Target::Semantic)
             .iter()
-            .any(|s| s.starts_with("planning.semantic:")));
+            .any(|s| s.starts_with("planning_line.semantic:")));
     }
 
     /// Regression: org lets a keyword carry a fast-selection key and logging

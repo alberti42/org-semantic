@@ -555,7 +555,7 @@ edit it:
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
-  "planning": { "semantic": false, "lexical": true },
+  "planning_line": { "semantic": false, "lexical": true },
   "exclude_tagged": ["noexport", "ARCHIVE"],
   "todo_keywords": ["TODO", "DONE"]
 }
@@ -569,7 +569,7 @@ would only make =[src]= a searchable word. Babel =#+RESULTS:= and bare =: =
 fixed-width lines count as output, not prose. Quote and verse stay in both ---
 they are prose someone chose to set off, not machine output.
 
-=planning= is a heading's =DEADLINE:= / =SCHEDULED:= / =CLOSED:= line, and is
+=planning_line= is a heading's =DEADLINE:= / =SCHEDULED:= / =CLOSED:= line, and is
 split by index for the same reason Babel output is. A date carries almost
 nothing an embedding can use, and in a project file where nearly every heading
 has one it would open most passages with the same shape of noise --- so it is
