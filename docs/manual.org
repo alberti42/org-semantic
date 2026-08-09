@@ -75,8 +75,9 @@ properly buys things a format-agnostic tool cannot reach:
 - Property drawers stay out of the embedded text, so =:ID:= and =:MODIFIED:=
   do not dilute a chunk's meaning.
 - =#+title:= names the note, rather than guessing from the filename.
-- Every chunk carries its enclosing =:ID:=, so an editor can jump to a hit
-  through =org-id= instead of by file position --- surviving renames and moves.
+- Every hit carries the outline path to the node it came from, so an editor can
+  jump to the *section*, not to the file --- and the enclosing =:ID:= as well,
+  when the note has one.
 - Tags are parsed with org's inheritance rules and become search filters, as do
   TODO keywords and priorities.
 - Heading breadcrumbs (=Note > Section > Subsection=) are prepended to each
@@ -203,12 +204,18 @@ Methods:
 
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
-an absolute =file=, the =line=, and the =:ID:= when there is one --- enough to
-build a clickable link and jump to the passage. Use both: =id= is the nearest
-enclosing node's, so it survives the note being moved or renamed but is only as
-precise as the outline is annotated, while =line= always points at the passage
-itself. Resolving =id= to a file and then going to =line= is right in either
-case. =k= and =perFile= are the two caps described under
+an absolute =file=, the =heading= path, the =line=, and the =:ID:= when there is
+one. The first three are what locate a hit --- go to the file, then to the
+heading or the line --- and they need no cooperation from the notes. Prefer the
+heading over the line if the index may be a little behind the buffer: text moves
+down a file, a heading does not. =id= is an extra for the vaults that have them.
+
+One trap if you build an org link to the heading rather than jumping yourself:
+=org-link-search= prompts /"Create new heading?"/ when it misses, which over
+=emacsclient= blocks every frame. Bind =org-link-search-must-match-exact-headline=
+to nil and pass the heading text *unescaped*.
+
+=k= and =perFile= are the two caps described under
 [[#vaults-kept-in-a-few-large-files][vaults kept in a few large files]]; an editor
 showing such a vault raises the second.
 
@@ -453,11 +460,17 @@ A result is an *outline node*, not a file. A hit inside a four-thousand-line
 it starts, with the =:ID:= of the nearest enclosing node --- so it points at the
 meeting, not at the file the meeting happens to live in.
 
-The =:ID:= part of that depends on your notes: it is the nearest one *there is*.
-Give each meeting its own and a hit jumps straight to it; put a single =:ID:= at
-the top of the file and every hit in it reports that one. =line= is unaffected
-either way, so jump by resolving =id= to the file and then going to =line= ---
-correct in both cases, and it costs nothing to prefer.
+*You do not need =:ID:= for any of this.* =path=, =heading= and =line= locate a
+hit on their own, and they stay correct: rename a note and the next index run
+sees the old path gone and the new one arrived, so the paths are rewritten ---
+for free if the note has a =#+title:=, since nothing it embedded changed. Org
+itself only creates an =:ID:= when you ask (=org-id-get-create=, =org-attach=,
+or a package like org-roam), so most vaults have few, and a tool that hinged on
+them would work well for some people and badly for everyone else.
+
+=id= is therefore a bonus rather than the handle: present, it is the nearest
+enclosing node's, and org can resolve it without consulting our index at all ---
+useful when the index has not caught up with an edit. Absent, nothing is lost.
 
 #+begin_src console
 $ org-semantic search ~/notes "who is fixing the cryostat shaking"

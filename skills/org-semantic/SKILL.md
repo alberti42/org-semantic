@@ -66,12 +66,11 @@ Each hit is an object:
 - A hit is an **outline node**, not a file: `heading` is the full path to it and
   `line` is where it starts. In a vault that keeps three hundred meetings in one
   `meetings.org`, `title` is the file's and tells you nothing — `section` and
-  `heading` are what locate the hit. Cite both the file and the heading.
-- Cite a hit by `file` and `line`. **`line` is the precise anchor**; `id` is the
-  org-id of the nearest enclosing node, which is often the *file's* rather than
-  the passage's — in a file holding three hundred meetings, every hit may carry
-  the same `id`. Use `id` to identify the note (it survives a rename) and `line`
-  to say where in it.
+  `heading` are what locate the hit.
+- **Cite a hit by `file` plus `heading`, and `line` for the exact spot.** Those
+  three always identify it. `id` is an org-id when the note happens to carry
+  one; it is the *nearest enclosing* node's, so in a large file every hit may
+  report the same one. Do not use it as the address of a passage.
 - `text` is the passage itself, so you usually need not open the file. Read it
   when you need surrounding context.
 
