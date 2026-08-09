@@ -169,11 +169,12 @@ is not. The first figure is the model being read from disk and is paid once per
 process, so it scales with the model --- =bge-small-en= takes about 300 ms where
 =e5-small= takes 1.6 s --- while the warm figures do not depend on it.
 
-Framing is LSP's =Content-Length= because Emacs ships =jsonrpc.el= --- the library
-Eglot runs on --- so the editor needs no protocol code: =make-process=, and
-request/response correlation, notifications and cancellation come free. No
-socket, no port, no authentication, and the server lives exactly as long as the
-editor does.
+Messages are framed the way LSP frames them, with a =Content-Length= header. That
+choice is for the client's sake: Emacs ships =jsonrpc.el= --- the library Eglot
+runs on --- so the editor needs no protocol code of its own. It starts the
+process with =make-process=, and request/response correlation, notifications and
+cancellation all come for free. No socket, no port, no authentication, and the
+server lives exactly as long as the editor does.
 
 Methods:
 
