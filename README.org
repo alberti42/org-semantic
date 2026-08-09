@@ -60,8 +60,10 @@ Existing packages either run a Python service --- one popular org indexer pulls 
 Markdown and know nothing about org structure. [[#related-work][Related work]]
 compares them one by one.
 
-org-semantic is one 34 MB binary. ONNX Runtime is statically linked; the only
-thing it ever downloads is the embedding model (129 MB, once, into your cache).
+org-semantic is a single 34 MB program. The machinery that runs the embedding
+model is compiled into it, so there is nothing to install alongside it, and the
+only thing it ever downloads is the model itself --- 129 MB, once, into your
+cache.
 
 *By design, it specialises in org and nothing else.* Parsing one format
 properly buys things a format-agnostic tool cannot reach:
@@ -95,9 +97,9 @@ git clone https://github.com/alberti42/org-semantic && cd org-semantic
 cargo build --release          # target/release/org-semantic
 #+end_src
 
-Requires a Rust toolchain. Nothing else --- no Python, no system ONNX Runtime, no
-package manager. The BGE-small-en-v1.5 model downloads on first use to
-=$XDG_CACHE_HOME/fastembed=.
+Requires a Rust toolchain, and nothing else --- no Python, no libraries to install
+system-wide, no package manager. The default embedding model downloads by itself
+the first time you index, into =$XDG_CACHE_HOME/fastembed=.
 
 * Use
 :PROPERTIES:
@@ -206,29 +208,32 @@ replaced.
 :PROPERTIES:
 :CUSTOM_ID: scores-and-why-the-raw-one-is-not-worth-showing
 :END:
-Search prints =0.883 (+2.1σ)=: the raw cosine, and how many standard deviations
-it sits above the corpus's own noise floor. =--json= carries both, as =score= and
-=z=. *Read the σ.*
+Search prints =0.883 (+2.1σ)=. The first number is the similarity itself; the
+second says how far above the ordinary background it stands. *Read the second
+one.* (=--json= carries them as =score= and =z=.)
 
-These embeddings are strongly anisotropic --- they nearly all point the same way.
-Averaging every unit vector in a 951-note vault leaves something 75% of unit
-length under =bge-small-en= and 90% under =e5-small=, so /unrelated/ chunks
-already score 0.563 and 0.801 respectively. The raw number is mostly that
-constant offset, and it is not comparable between models:
+The reason is that these models do not spread their vectors over the whole space:
+they point in nearly the same direction, whatever the text. Take two passages
+with nothing to do with each other and they still score 0.563 under
+=bge-small-en=, or 0.801 under =e5-small=. So most of any score is a fixed
+background common to everything, which differs from one model to the next and
+tells you nothing about the hit in front of you:
 
 |                         | raw   | z     |
 |-------------------------+-------+-------|
 | =bge-small-en=, top hit | 0.755 | 2.52σ |
 | =e5-small=, top hit     | 0.883 | 2.17σ |
 
-=z= is how far above the corpus's own noise floor a hit sits, in that corpus's
-standard deviations. The two models disagree by 0.13 on the raw scale and land in
-the same place on this one. It also exposes weak hits that look respectable: a
-0.826 under E5 is only 0.66σ.
+The σ figure subtracts that background and measures what is left against how much
+scores normally vary --- so +2.1σ means "well clear of the noise" in either
+model. The two disagree by 0.13 on the raw scale and land in the same place on
+this one. It also catches weak hits that look respectable: 0.826 under E5 is only
++0.7σ, barely above the background.
 
-The floor is measured from the vectors themselves --- 20k sampled pairs, ~37 ms
-when an index is loaded and cached thereafter --- rather than stored, so it cannot
-drift from the vectors it describes.
+The background is measured from the vectors themselves, by sampling 20,000
+unrelated pairs when an index is loaded --- about 37 ms, then kept in memory.
+Measuring rather than storing it means it can never disagree with the vectors it
+describes.
 
 *Lexical scores are left as they are, and carry no σ.* BM25 has no fixed range:
 a score is a sum over the matched terms, weighted by how rare each is in the
@@ -338,10 +343,16 @@ lexical index --- those settings are hashed per index.
 :PROPERTIES:
 :CUSTOM_ID: two-rankings-never-merged
 :END:
-Without a flag, =search= ranks by *meaning*, scoring the query's embedding
-against every chunk's. With =--lexical= it ranks by *words*, using
-[[https://github.com/quickwit-oss/tantivy][tantivy]]: BM25 ranking over an inverted
-index whose text is stemmed per language, so =Sprachen= finds =Sprache=.
+Without a flag, =search= ranks by *meaning*: your query is turned into a vector
+and compared against the vector of every passage.
+
+With =--lexical= it ranks by *words*, using
+[[https://github.com/quickwit-oss/tantivy][tantivy]]. That is ordinary keyword
+search, of the kind a search engine does: it keeps a list of which words appear
+where, and ranks a passage by *BM25*, the standard measure for this --- rarer
+words count for more, a word appearing twice counts for less than twice, and long
+passages are not rewarded for their length. Words are reduced to their stem
+first, in the language of the note, so =Sprachen= finds =Sprache=.
 
 It comes with a real query language --- phrases, =AND=/=OR=/=NOT=, parentheses and
 field boosts --- following
@@ -624,20 +635,28 @@ cheap enough to run on every Emacs start.
 :PROPERTIES:
 :CUSTOM_ID: design
 :END:
-*No ANN index.* A thousand notes is 1.5M tokens and under 10 MB of =f32=, and
-a brute-force dot product over all of it takes 1.4 ms and is exact. FAISS, HNSW
-and quantisers like TurboQuant address corpora three orders of magnitude larger,
-trading recall for memory this problem does not lack.
+*Every vector is compared, every time.* A thousand notes come to 1.5M tokens and
+under 10 MB of numbers, and comparing a query against all of them takes 1.4 ms.
+Because nothing is skipped, the best match is always found.
 
-*Chunked by section, then paragraph, never past 512 tokens.* The limit is
-enforced with the tokenizer, not a character budget --- this corpus runs 2.0
-characters per token in LaTeX-heavy notes against 4.0 in prose, and the
-underlying library truncates silently, so a character heuristic quietly discards
-the tail of long chunks. Consecutive pieces overlap by one paragraph so an idea
+Larger systems cannot afford that, so they build an /approximate nearest
+neighbour/ index --- FAISS, HNSW, quantisers like TurboQuant --- which searches a
+fraction of the data and usually finds the best match. They are built for
+collections a thousand times bigger than a note archive, and they trade away
+exactness to save memory this problem has to spare.
+
+*Chunked by section, then paragraph, never past 512 tokens.* A /token/ is what
+the model actually reads --- roughly a word, or a fragment of one --- and 512 of
+them is all it can take at once. The limit is therefore counted in tokens rather
+than characters: a character budget looks equivalent but is not, since this
+corpus runs 2.0 characters per token in LaTeX-heavy notes against 4.0 in prose.
+Get it wrong and the embedding library simply drops whatever did not fit, without
+a word. Consecutive pieces overlap by one paragraph so an idea
 cut at a boundary is still embedded whole somewhere.
 
-*Results are grouped per note.* A note that matches a query tends to match in
-several places, and a flat top-k spends every slot on one document.
+*Results are grouped per note.* A note that answers a query tends to answer it in
+several places, so a flat list of the best passages can spend all ten slots on
+one document and never mention the other nine notes that also match.
 
 *The index belongs to the vault it describes*, so pointing org-semantic at
 another vault is a different argument, not a different configuration.
@@ -688,7 +707,7 @@ wire up yourself.
 :PROPERTIES:
 :CUSTOM_ID: markdown-vdb
 :END:
-[[https://github.com/geckse/markdown-vdb][markdown-vdb]] reaches a very similar architecture for Markdown --- one Rust binary, the index on disk, notes never modified. What sets it apart is where the embeddings come from: an external provider --- OpenAI, Ollama, any OpenAI-compatible endpoint --- so a search reaches out to a network or a local model server, and an API key and its cost or a running server come with it. org-semantic embeds in-process through a statically linked ONNX Runtime and calls nothing. Its front-end is aimed at AI agents --- it ships Claude Code skills rather than an Emacs package. (It also offers a fused hybrid ranking, semantic + BM25 through RRF, which org-semantic leaves as separate commands for now --- see Status.)
+[[https://github.com/geckse/markdown-vdb][markdown-vdb]] reaches a very similar architecture for Markdown --- one Rust binary, the index on disk, notes never modified. What sets it apart is where the embeddings come from: an external provider --- OpenAI, Ollama, any OpenAI-compatible endpoint --- so a search reaches out to a network or a local model server, and an API key and its cost or a running server come with it. org-semantic runs the model inside its own process and calls nothing over the network. Its front-end is aimed at AI agents --- it ships Claude Code skills rather than an Emacs package. (It also merges the two rankings into one list, using /reciprocal rank fusion/ --- a way of combining two orderings without needing their scores to be comparable. org-semantic keeps them as separate commands for now; see Status.)
 
 ** mdvault
 :PROPERTIES:
