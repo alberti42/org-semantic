@@ -1,0 +1,9 @@
+Vendored subset of the ReadTheOrg HTML export theme, GPL-3.0 (same as this
+repo, see LICENSE at the repo root).
+
+Upstream: https://github.com/fniessen/org-html-themes
+Commit:   8a87654701ab24d1bab984524a011bc57f94803b
+
+Verbatim upstream copies; to update, re-copy the same paths from a newer
+checkout and bump the commit above.  The Google Fonts and Font Awesome CDN
+imports in readtheorg.css are intentionally left remote.
