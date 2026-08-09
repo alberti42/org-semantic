@@ -205,10 +205,15 @@ Methods:
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
 an absolute =file=, the =heading= path, the =line=, and the =:ID:= when there is
-one. The first three are what locate a hit --- go to the file, then to the
-heading or the line --- and they need no cooperation from the notes. Prefer the
-heading over the line if the index may be a little behind the buffer: text moves
-down a file, a heading does not. =id= is an extra for the vaults that have them.
+one. All four are anchors on the same passage, and which to prefer is the
+client's call, not this tool's --- so all four are sent and none is privileged:
+
+| anchor    | exact                                    | costs                                    |
+|-----------+------------------------------------------+------------------------------------------|
+| =line=    | yes, when the index matches the buffer   | drifts if text was inserted above it     |
+| =heading= | to the node                              | a search, and repeated headings are ambiguous |
+| =id=      | index-independent; org resolves it alone | only as precise as the outline is annotated, and many vaults have none |
+| =file=    | the note                                 | --- always needed, never sufficient      |
 
 One trap if you build an org link to the heading rather than jumping yourself:
 =org-link-search= prompts /"Create new heading?"/ when it misses, which over
