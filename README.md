@@ -88,7 +88,8 @@ org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
 org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
-org-semantic chunks  <dir> <path-substring> [--lexical] [--lang …] [--model NAME]
+org-semantic chunks  <dir> <path-substring> [--lexical] [--lang …]
+                           [--model NAME] [--config FILE]
 org-semantic tokens  <dir> [limit] [--model NAME]     token-length distribution
 org-semantic models  [dir]                     models, and which are built here
 org-semantic serve                             JSON-RPC over stdio, for an editor
