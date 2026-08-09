@@ -20,21 +20,23 @@ lexical index: 5780 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
-0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter and fermion dynamics
+0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Rydberg excitation
        03 Literature review/2025-06-06 Review - Probing topological matter.org:672
        id:f73825a4-c877-4f69-a7e0-4ae305314b8d
        :Literature:
-       · 0.883 L672   Observations: > Atom Loss: What causes it? > Rydberg excitation
-               Atoms are excited to the n=53 Rydberg state using a two-photon transition…
-       · 0.883 L677   Observations: > Atom Loss: What causes it? > Trap-induced loss
-               Optical tweezers are subject to power drifts and pointing instabilities…
+       Atoms are excited to the n=53 Rydberg state using a two-photon transition…
 
-0.876 (+1.9σ)  2024-04-12 Atom sorting specifications
+0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Trap-induced loss
+       03 Literature review/2025-06-06 Review - Probing topological matter.org:677
+       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
+       :Literature:
+       Optical tweezers are subject to power drifts and pointing instabilities…
+
+0.876 (+1.9σ)  2024-04-12 Atom sorting specifications > Atom sorting -- shared specification document
        01 Daily notes/2024/2024-04-12 Atom sorting specifications.org:43
        id:ce45cf4b-1cf8-434e-9129-fc2952877ea9
        :Daily:
-       · 0.876 L43    Atom sorting -- shared specification document
-               Rearranging a partially filled array into a defect-free one, with the…
+       Rearranging a partially filled array into a defect-free one, with the…
 
 [model load 640ms · query embed 9ms · search over 5794 vectors 1.3ms]
 ```

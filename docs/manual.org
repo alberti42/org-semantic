@@ -25,21 +25,23 @@ lexical index: 5780 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
-0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter and fermion dynamics
+0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Rydberg excitation
        03 Literature review/2025-06-06 Review - Probing topological matter.org:672
        id:f73825a4-c877-4f69-a7e0-4ae305314b8d
        :Literature:
-       · 0.883 L672   Observations: > Atom Loss: What causes it? > Rydberg excitation
-               Atoms are excited to the n=53 Rydberg state using a two-photon transition…
-       · 0.883 L677   Observations: > Atom Loss: What causes it? > Trap-induced loss
-               Optical tweezers are subject to power drifts and pointing instabilities…
+       Atoms are excited to the n=53 Rydberg state using a two-photon transition…
 
-0.876 (+1.9σ)  2024-04-12 Atom sorting specifications
+0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Trap-induced loss
+       03 Literature review/2025-06-06 Review - Probing topological matter.org:677
+       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
+       :Literature:
+       Optical tweezers are subject to power drifts and pointing instabilities…
+
+0.876 (+1.9σ)  2024-04-12 Atom sorting specifications > Atom sorting -- shared specification document
        01 Daily notes/2024/2024-04-12 Atom sorting specifications.org:43
        id:ce45cf4b-1cf8-434e-9129-fc2952877ea9
        :Daily:
-       · 0.876 L43    Atom sorting -- shared specification document
-               Rearranging a partially filled array into a defect-free one, with the…
+       Rearranging a partially filled array into a defect-free one, with the…
 
 [model load 640ms · query embed 9ms · search over 5794 vectors 1.3ms]
 #+end_src
@@ -119,8 +121,11 @@ notes by meaning, and a lexical one, which finds them by word.
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
-  search <vault> <query> [k] [--model NAME] [--json]
+  search <vault> <query> [k] [--per-file N] [--model NAME] [--json]
          Rank by meaning: describe what you are after, not its words.
+         k bounds the notes shown (default 8); --per-file bounds how many
+         passages any one of them may contribute (default 3).  Keeping a
+         year of meetings in one meetings.org?  Raise --per-file.
   search <vault> <query> [k] --lexical [--any] [--json]
          Rank by word (BM25, over a per-language stemmed index).  Every
          term must match; --any matches notes carrying any of them.
@@ -190,7 +195,7 @@ Methods:
 
 | method     | params                                                                                   | returns                                       |
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =search=   | =vault=, =query=, =k=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...]}=                             |
+| =search=   | =vault=, =query=, =k=, =perFile=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...]}=                             |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers               |
 | =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
@@ -200,7 +205,9 @@ Both modalities take the same request and return the same shape, so an editor ca
 offer one command with a toggle and never branch on the reply. Each hit carries
 an absolute =file=, the =line=, and the =:ID:= when the note has one --- enough to
 build a clickable link and jump through =org-id=, which survives the note being
-moved or renamed.
+moved or renamed. =k= and =perFile= are the two caps described under
+[[#vaults-kept-in-a-few-large-files][vaults kept in a few large files]]; an editor
+showing such a vault raises the second.
 
 An empty query returns no hits rather than an error, so it is safe to send on
 every keystroke; debouncing is the editor's policy, not the server's.
@@ -423,6 +430,49 @@ $ org-semantic search ~/notes Gehm
 
 A surname carries no meaning for an embedding model. Equally, =why do the atoms heat up and get lost from the trap= finds the right passage semantically and
 nothing at all lexically, since none of those words appear in it.
+
+** Vaults kept in a few large files
+:PROPERTIES:
+:CUSTOM_ID: vaults-kept-in-a-few-large-files
+:END:
+Plenty of people keep every project in one =projects.org= and every meeting in
+one =meetings.org=, rather than a file per note. org-semantic is built for that
+as much as for a file per note, but there is one number you will want to change.
+
+A result is an *outline node*, not a file. A hit inside a four-thousand-line
+=meetings.org= is reported as the heading path that contains it, at the line where
+it starts, with the =:ID:= of the nearest enclosing node --- so it points at the
+meeting, not at the file the meeting happens to live in:
+
+#+begin_src console
+$ org-semantic search ~/notes "who is fixing the cryostat shaking"
+0.883 (+2.4σ)  Meetings > Meeting 099 — cryostat vibration > Decisions
+       meetings.org:1474
+       id:mtg-0099-…
+#+end_src
+
+Two numbers bound the list, because two different things can crowd it out:
+
+| =k= (positional) | how many *notes* may appear --- default 8 |
+| =--per-file N=   | how many *passages* any one note may contribute --- default 3 |
+
+The defaults suit a vault of one note per file, where a note matching in five
+places would otherwise spend the whole list on itself. Keep your year of
+meetings in a single file and that same cap becomes the thing in your way: every
+hit comes from one file, so three is all you will ever see, and raising =k= will
+not help --- it counts files, and you have one.
+
+#+begin_src sh
+# Three files, everything in them: ask for depth, not for more files.
+org-semantic search ~/notes "cryostat vibration" --per-file 25
+#+end_src
+
+Nothing about *indexing* needs changing for large files. Notes are split at
+headings regardless of the file they sit in, and re-indexing costs what you
+actually edited: adding one meeting to a file of three hundred re-embeds that one
+meeting. Inserting it at the top, which moves every line number below it, still
+re-embeds only the one --- a line is recorded with the passage but is not part of
+what was embedded.
 
 ** Filters
 :PROPERTIES:

@@ -80,8 +80,11 @@ notes by meaning, and a lexical one, which finds them by word.
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
-  search <vault> <query> [k] [--model NAME] [--json]
+  search <vault> <query> [k] [--per-file N] [--model NAME] [--json]
          Rank by meaning: describe what you are after, not its words.
+         k bounds the notes shown (default 8); --per-file bounds how many
+         passages any one of them may contribute (default 3).  Keeping a
+         year of meetings in one meetings.org?  Raise --per-file.
   search <vault> <query> [k] --lexical [--any] [--json]
          Rank by word (BM25, over a per-language stemmed index).  Every
          term must match; --any matches notes carrying any of them.
@@ -127,8 +130,33 @@ const MAX_CHARS: usize = 1500;
 
 const STATE_DIR: &str = ".org-semantic";
 
-/// How many matching sections to show beneath a note before collapsing.
-const SECTIONS_PER_NOTE: usize = 3;
+/// How much of a result list any one note may occupy.
+///
+/// Two caps rather than one because the two vault shapes fail in opposite
+/// directions.  With a note per file, one note matching in five places would
+/// spend the whole list on itself, so passages per file must be bounded.  With
+/// a year of meetings in a single `meetings.org`, *every* hit comes from one
+/// file, and a bound that tight returns three passages however many matched —
+/// so it has to be raisable, and the file count has to be a separate number
+/// rather than the only one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Limits {
+    /// How many distinct notes may appear.
+    files: usize,
+    /// How many passages any one note may contribute.
+    per_file: usize,
+}
+
+/// Chosen for a vault of one note per file, which is what most org vaults are.
+/// `PER_FILE` is what someone keeping large files raises.
+const DEFAULT_FILES: usize = 8;
+const DEFAULT_PER_FILE: usize = 3;
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { files: DEFAULT_FILES, per_file: DEFAULT_PER_FILE }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Chunk {
@@ -1924,6 +1952,29 @@ struct Manifest {
     stamps: std::collections::BTreeMap<String, Stamp>,
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// FNV-1a over exactly what gets embedded — the heading path, a newline, and
+/// the body — so that a passage can be recognised across an edit to the note
+/// around it.
+///
+/// One pass over the two halves rather than over their concatenation: looking
+/// up every chunk of a large note would otherwise allocate a copy of it.
+///
+/// Only ever a *lookup* key.  A hit is confirmed by comparing the strings
+/// themselves, so a collision costs a needless comparison rather than the wrong
+/// vector.
+fn chunk_key(heading: &str, text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in heading.bytes().chain(std::iter::once(b'\n')).chain(text.bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
 /// FNV-1a. Written out rather than taken from `DefaultHasher`, whose values are
 /// explicitly not stable across Rust releases — a toolchain upgrade would
 /// silently invalidate every hash and force a full reindex.
@@ -2291,6 +2342,11 @@ struct IndexReport {
     /// is "the size of the index" — ask `status` for that.
     chunks: usize,
     embedded: usize,
+    /// Passages inside a *changed* note whose vector was reused because the
+    /// passage itself did not change.  Distinct from the notes skipped whole:
+    /// this is the saving on the files that really were edited.
+    #[serde(skip_serializing_if = "is_zero")]
+    carried: usize,
     /// Present only for the semantic index.
     #[serde(skip_serializing_if = "Option::is_none")]
     resplit: Option<usize>,
@@ -2347,6 +2403,27 @@ fn cmd_index(
     let mut pending_len: Vec<usize> = Vec::new();
     let mut resplit = 0usize;
 
+    // Every passage the old index holds, by what was embedded for it.
+    //
+    // The file-level fast path above skips notes that did not change at all;
+    // this is the second chance for the notes that did.  A vector depends on
+    // the heading path and the body and on nothing else in the chunk, so a note
+    // edited in one place re-embeds that passage alone — which is what keeps a
+    // `meetings.org` of three hundred meetings from costing three hundred
+    // embeddings every time one line is added to it.  Line numbers shift for
+    // everything below an insertion, but a line is metadata: the fresh chunk
+    // keeps its new one and only the vector is carried over.
+    //
+    // Built from `chunks.json` and `vectors.f32` as they already are on disk,
+    // so this costs no format change and no reindex to start working.
+    let mut cached: std::collections::HashMap<u64, usize> = Default::default();
+    if let Some(ix) = &old {
+        for (i, c) in ix.chunks.iter().enumerate() {
+            cached.entry(chunk_key(&c.heading, &c.text)).or_insert(i);
+        }
+    }
+    let mut carried = 0usize;
+
     for f in &files {
         let path = rel_path(vault, f);
         if reused.contains(path.as_str()) {
@@ -2365,10 +2442,26 @@ fn cmd_index(
             enforce_token_limit(chunk_file(f, &path, text, None, cfg, Target::Semantic), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
-            pending.push(chunks.len());
-            pending_len.push(len);
-            chunks.push(c);
-            vectors.extend(std::iter::repeat(0.0).take(m.dim));
+            // Confirmed against the strings themselves: the key only finds the
+            // candidate, so a hash collision cannot attach the wrong vector.
+            let hit = cached.get(&chunk_key(&c.heading, &c.text)).copied().filter(|&j| {
+                let old = &old.as_ref().expect("no cache without an old index").chunks[j];
+                old.heading == c.heading && old.text == c.text
+            });
+            match hit {
+                Some(j) => {
+                    let ix = old.as_ref().expect("no cache without an old index");
+                    vectors.extend_from_slice(&ix.vectors[j * m.dim..(j + 1) * m.dim]);
+                    chunks.push(c);
+                    carried += 1;
+                }
+                None => {
+                    pending.push(chunks.len());
+                    pending_len.push(len);
+                    chunks.push(c);
+                    vectors.extend(std::iter::repeat(0.0).take(m.dim));
+                }
+            }
         }
     }
 
@@ -2385,9 +2478,17 @@ fn cmd_index(
     if resplit > 0 {
         eprintln!("  {resplit} sections ran past {TOKEN_LIMIT} tokens and were divided");
     }
+    // The carried count is what makes a large note cheap to edit, so it is
+    // worth saying out loud rather than leaving as an unexplained small number
+    // next to a file the user knows they changed.
+    let reused_here = if carried > 0 {
+        format!(" · {carried} unchanged within them")
+    } else {
+        String::new()
+    };
     writeln!(
         out,
-        "{} chunks · {} to embed · scanned in {:.2}s",
+        "{} chunks · {} to embed{reused_here} · scanned in {:.2}s",
         chunks.len(),
         pending.len(),
         t0.elapsed().as_secs_f64()
@@ -2396,6 +2497,7 @@ fn cmd_index(
         files: files.len(),
         chunks: chunks.len(),
         embedded: pending.len(),
+        carried,
         resplit: Some(resplit),
         changed: changed_files,
         new: new_files,
@@ -2407,8 +2509,11 @@ fn cmd_index(
     // Only a run that changes nothing at all may skip the write.  Dropping a
     // deleted note, or merely refreshing stamps, produces no work to embed but
     // must still be persisted.
+    // `stale` rather than `pending`, now that a changed note can need no
+    // embedding at all: its passages may all have been carried over, but its
+    // line numbers moved and its hash is new, and both belong on disk.
     let restamped = by_hash > 0 || old.as_ref().is_some_and(|ix| ix.stamps.len() != stamps.len());
-    if pending.is_empty() && dropped == 0 && !restamped && old.is_some() {
+    if pending.is_empty() && stale.is_empty() && dropped == 0 && !restamped && old.is_some() {
         writeln!(out, "nothing changed; index left as it is")?;
         report.unchanged = true;
         return Ok(report);
@@ -2560,39 +2665,69 @@ impl Baseline {
     }
 }
 
-/// The hits to show, grouped by note: at most K notes, at most
-/// `SECTIONS_PER_NOTE` passages from each.
+/// One outline node's passages, at the rank of its best one.
+struct Group<'a> {
+    /// Vault-relative path of the note the node lives in.
+    path: String,
+    /// Outline path of the node, e.g. `Meetings > Meeting 021 > Decisions`.
+    heading: String,
+    hits: Vec<(f32, &'a Chunk)>,
+}
+
+/// The hits to show, grouped by outline node and capped by `LIM`.
+///
+/// Grouped by node rather than by file because the file stops being the note
+/// the moment someone keeps three hundred meetings in one: every hit would
+/// carry the same headline, and the id printed with it would belong to
+/// whichever passage happened to rank highest.  A node is the note in both
+/// vault shapes — with one note per file it *is* the file.
+///
+/// The caps are counted per file even so, because that is where crowding
+/// happens: without it a single note with fifty matching sections would fill
+/// the list before the second note was reached.
 ///
 /// Shared by the human report and the JSON output so the two can never disagree
 /// about what was found — only about how it is written down.
-fn select<'a>(scored: &[(f32, &'a Chunk)], k: usize) -> Vec<(String, Vec<(f32, &'a Chunk)>)> {
-    let mut notes: Vec<(String, Vec<(f32, &Chunk)>)> = Vec::new();
+fn select<'a>(scored: &[(f32, &'a Chunk)], lim: Limits) -> Vec<Group<'a>> {
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    // Passages already taken from each file, in the order the files were first
+    // reached, so `lim.files` counts notes and not nodes.
+    let mut taken: Vec<(String, usize)> = Vec::new();
     for (score, c) in scored {
-        let path = &c.path;
-        match notes.iter_mut().find(|(p, _)| p == path) {
-            Some((_, hits)) => {
-                if hits.len() < SECTIONS_PER_NOTE {
-                    hits.push((*score, c));
-                }
-            }
+        let i = match taken.iter().position(|(p, _)| *p == c.path) {
+            Some(i) => i,
             None => {
-                if notes.len() < k {
-                    notes.push((path.clone(), vec![(*score, c)]));
+                if taken.len() == lim.files {
+                    continue;
                 }
+                taken.push((c.path.clone(), 0));
+                taken.len() - 1
             }
+        };
+        if taken[i].1 == lim.per_file {
+            continue;
+        }
+        taken[i].1 += 1;
+        match groups.iter_mut().find(|g| g.path == c.path && g.heading == c.heading) {
+            Some(g) => g.hits.push((*score, c)),
+            None => groups.push(Group {
+                path: c.path.clone(),
+                heading: c.heading.clone(),
+                hits: vec![(*score, c)],
+            }),
         }
     }
-    notes
+    groups
 }
 
 /// Everything an editor needs to show a hit and jump to it, without parsing
 /// anything: an absolute path so it need not know where the vault is, the
 /// `:ID:` when there is one so it can jump through `org-id` and survive the note
 /// moving, and the line as the fallback when there is not.
-fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize, base: Option<Baseline>) -> serde_json::Value {
-    let hits: Vec<serde_json::Value> = select(scored, k)
+fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, base: Option<Baseline>) -> serde_json::Value {
+    let hits: Vec<serde_json::Value> = select(scored, lim)
         .iter()
-        .flat_map(|(_, hits)| hits.iter())
+        .flat_map(|g| g.hits.iter())
         .map(|(score, c)| {
             let (title, section) = match c.heading.split_once(" > ") {
                 Some((t, rest)) => (t, Some(rest)),
@@ -2632,19 +2767,23 @@ fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize, base: Option<Base
 /// under BGE and 0.80 under E5 — so it cannot be read without that context.
 /// BM25 has no such floor, so lexical hits pass `None` and show their score
 /// alone.
-fn report(scored: &[(f32, &Chunk)], k: usize, baseline: Option<&Baseline>) {
-    let notes = select(scored, k);
+fn report(scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
+    let groups = select(scored, lim);
     // The headline figure, where notes are compared with each other.
     let rank = |s: f32| match baseline {
         Some(b) => format!("{s:.3} ({:+.1}σ)", b.z(s)),
         None => format!("{s:.3}"),
     };
 
-    for (path, hits) in &notes {
-        let (best, c) = hits[0];
-        let title = c.heading.split(" > ").next().unwrap_or(&c.heading);
-        println!("\n{}  {title}", rank(best));
-        println!("       {}:{}", path, c.line);
+    for g in &groups {
+        let (best, c) = g.hits[0];
+        // The whole outline path, which begins with the note's title: it reads
+        // as the title itself for a note that has no headings, and locates the
+        // hit inside a file that holds hundreds of them.
+        println!("\n{}  {}", rank(best), g.heading);
+        println!("       {}:{}", g.path, c.line);
+        // The node's own id, now that a group is a node: it jumps to the
+        // passage rather than to whatever the file happens to start with.
         if let Some(id) = &c.id {
             println!("       id:{id}");
         }
@@ -2657,18 +2796,19 @@ fn report(scored: &[(f32, &Chunk)], k: usize, baseline: Option<&Baseline>) {
             };
             println!("       {todo}{tags}");
         }
-        for (score, c) in hits {
-            let section = c
-                .heading
-                .split_once(" > ")
-                .map(|(_, rest)| rest)
-                .unwrap_or("(top)");
+        for (score, c) in &g.hits {
             let preview: String =
                 c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
-            // Raw here: within one note every passage shares the same offset,
+            // Several passages here means one section outran `MAX_CHARS` and was
+            // divided; they are numbered by line so they can be told apart.
+            // Raw score: within one node every passage shares the same offset,
             // so the comparison that matters is between them.
-            println!("       · {score:.3} L{:<5} {section}", c.line);
-            println!("               {preview}…");
+            if g.hits.len() > 1 {
+                println!("       · {score:.3} L{:<5}", c.line);
+                println!("               {preview}…");
+            } else {
+                println!("       {preview}…");
+            }
         }
     }
 }
@@ -2721,7 +2861,7 @@ fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static M
     }
 }
 
-fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>, json: bool) -> Result<()> {
+fn cmd_search(vault: &Path, query: &str, lim: Limits, want: Option<&'static Model>, json: bool) -> Result<()> {
     let m = choose_index(vault, want)?;
     let dir = semantic_dir(vault, m);
     let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
@@ -2759,7 +2899,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>,
         // No match is an answer, not an error: a caller reading JSON gets an
         // empty list rather than prose it would have to recognise.
         if json {
-            println!("{}", hits_json(vault, &[], k, None));
+            println!("{}", hits_json(vault, &[], lim, None));
         } else {
             println!("no chunk matches those filters");
         }
@@ -2795,10 +2935,10 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>,
     let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
     let baseline = Baseline::of(&vectors, m.dim);
     if json {
-        println!("{}", hits_json(vault, &hits, k, baseline));
+        println!("{}", hits_json(vault, &hits, lim, baseline));
         return Ok(());
     }
-    report(&hits, k, baseline.as_ref());
+    report(&hits, lim, baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -3100,7 +3240,7 @@ fn cmd_chunks(
 fn cmd_lexical(
     vault: &Path,
     query: &str,
-    k: usize,
+    lim: Limits,
     conjunction: bool,
     json: bool,
 ) -> Result<()> {
@@ -3118,23 +3258,25 @@ fn cmd_lexical(
         println!("filter: {}", describe_filters(&f));
     }
     let t = Instant::now();
-    // Generous, because grouping collapses many chunks into one note: a single
+    // Generous, because grouping collapses many chunks into one node: a single
     // well-matching note can otherwise fill the whole candidate pool and hide
-    // every other note.
-    let hits = lexical::search(&dir, &f, (k * 25).max(100), conjunction, &analyzer)?;
+    // every other note.  Scaled by both caps, since raising either one asks for
+    // more of the corpus to be considered before the grouping thins it out.
+    let pool = lim.files.saturating_mul(lim.per_file).saturating_mul(25).max(100);
+    let hits = lexical::search(&dir, &f, pool, conjunction, &analyzer)?;
     let el = t.elapsed();
     let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
     if json {
         // No baseline: BM25 scores are unbounded, so there is nothing to
         // standardise them against.
-        println!("{}", hits_json(vault, &hits, k, None));
+        println!("{}", hits_json(vault, &hits, lim, None));
         return Ok(());
     }
     if hits.is_empty() {
         println!("no match");
         return Ok(());
     }
-    report(&hits, k, None);
+    report(&hits, lim, None);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
@@ -3209,15 +3351,34 @@ fn main() -> Result<()> {
             let query = args
                 .get(3)
                 .ok_or_else(|| anyhow!("usage: search <vault> <query> [k] [--lexical]"))?;
-            let k = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
             // One command, two rankings, never mixed.  A shared entry point is
             // not the same as a fused result list: `--lexical` returns purely
             // word-ranked hits, `search` alone purely meaning-ranked ones.
             reject_unknown_flags(
                 &args,
                 4,
-                &["--lexical", "--any", "--json", "--model"],
+                &["--lexical", "--any", "--json", "--model", "--per-file"],
             )?;
+            // `k` bounds the notes; `--per-file` bounds how much of the list any
+            // one of them may take.  A vault kept in a few large files wants the
+            // second raised — see the manual.
+            let per_file = if args.iter().skip(4).any(|a| a == "--per-file") {
+                let v = flag_value(&args, 4, "--per-file")
+                    .ok_or_else(|| anyhow!("--per-file wants a number after it"))?;
+                match v.parse::<usize>() {
+                    // Zero would return an empty list rather than an error,
+                    // which reads as "nothing matched".
+                    Ok(0) => return Err(anyhow!("--per-file 0 would show nothing")),
+                    Ok(n) => n,
+                    Err(_) => return Err(anyhow!("--per-file wants a number, not `{v}`")),
+                }
+            } else {
+                DEFAULT_PER_FILE
+            };
+            let lim = Limits {
+                files: args.get(4).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_FILES),
+                per_file,
+            };
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
             // parse back out.
@@ -3229,9 +3390,9 @@ fn main() -> Result<()> {
             };
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-                cmd_lexical(vault, query, k, conjunction, json)
+                cmd_lexical(vault, query, lim, conjunction, json)
             } else {
-                cmd_search(vault, query, k, want, json)
+                cmd_search(vault, query, lim, want, json)
             }
         }
         Some("chunks") => {
@@ -3559,6 +3720,109 @@ mod tests {
         let m = model_named(DEFAULT_MODEL).unwrap();
         let vectors = vec![0.0f32; chunks.len() * m.dim];
         save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps).unwrap();
+    }
+
+    /// Seed an index holding the chunks the vault really produces, so that the
+    /// per-passage reuse has something it can recognise.  `seed` cannot serve
+    /// here: its chunks are placeholders that no re-chunking would ever match,
+    /// which is exactly what the reuse looks for.
+    ///
+    /// Vectors are distinct per chunk rather than zeroed, so a carried vector
+    /// can be told from a freshly written one.
+    fn seed_real(dir: &Path, paths: &[&str]) {
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let mut chunks = Vec::new();
+        let mut files = std::collections::BTreeMap::new();
+        for p in paths {
+            let abs = dir.join(p);
+            let text = fs::read_to_string(&abs).unwrap();
+            chunks.extend(chunk_file(&abs, p, &text, None, &Config::default(), Target::Semantic));
+            files.insert((*p).to_string(), content_hash(text.as_bytes()));
+        }
+        let stamps = paths
+            .iter()
+            .map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap()))
+            .collect();
+        let vectors: Vec<f32> =
+            (0..chunks.len()).flat_map(|i| std::iter::repeat_n(i as f32 + 1.0, m.dim)).collect();
+        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps).unwrap();
+    }
+
+    /// A note whose bytes changed but whose passages did not: every vector is
+    /// carried across and nothing is embedded.
+    ///
+    /// Regression on the write, not only on the saving: the early return used to
+    /// ask whether anything needed embedding, and a note like this needs none —
+    /// so its new hash was never recorded and it was read as changed on every
+    /// later run, forever.
+    #[test]
+    fn a_changed_note_carries_over_the_passages_that_did_not_change() {
+        let v = scratch("carry");
+        let a = note(&v, "alpha");
+        seed_real(&v, &[a.as_str()]);
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
+        let old_hash = load_index(&sem(&v), m).unwrap().files[&a];
+
+        // Trailing blank lines: the file's bytes differ, its chunking does not.
+        let abs = v.join(&a);
+        let body = fs::read_to_string(&abs).unwrap();
+        fs::write(&abs, format!("{body}\n\n")).unwrap();
+
+        let r = cmd_index(&v, false, false, m, &Config::default(), &mut io::sink(), None).unwrap();
+
+        assert_eq!(r.embedded, 0, "no passage changed, so none may be embedded");
+        assert!(r.carried > 0, "its passages must be carried over, not rebuilt");
+        assert_eq!(
+            fs::read(sem(&v).join("vectors.f32")).unwrap(),
+            before,
+            "carried vectors must be copied verbatim"
+        );
+        assert_ne!(
+            load_index(&sem(&v), m).unwrap().files[&a],
+            old_hash,
+            "the new content hash must reach the manifest, or this repeats every run"
+        );
+    }
+
+    /// The saving that makes a large note cheap to edit: one new section costs
+    /// one embedding, however many sections stand around it.
+    #[test]
+    fn adding_a_section_re_embeds_only_that_section() {
+        let v = scratch("carry-one");
+        let a = note(&v, "alpha");
+        // A note of several sections, so there is something to carry.
+        let abs = v.join(&a);
+        let mut body = fs::read_to_string(&abs).unwrap();
+        for i in 0..5 {
+            body.push_str(&format!("\n* Section {i}\nA paragraph about topic {i}.\n"));
+        }
+        fs::write(&abs, &body).unwrap();
+        seed_real(&v, &[a.as_str()]);
+        let seeded = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().chunks.len();
+
+        // Insert at the top: every line number below it moves, but a line is
+        // metadata and no passage's text changed.
+        fs::write(&abs, format!("* Section new\nSomething else entirely.\n{body}")).unwrap();
+
+        // `chunk_file` rather than `cmd_index`, which would load the model to
+        // embed the one new passage.
+        let text = fs::read_to_string(&abs).unwrap();
+        let fresh = chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic);
+        let old = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let cached: std::collections::HashMap<u64, usize> = old
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (chunk_key(&c.heading, &c.text), i))
+            .collect();
+        let missing = fresh
+            .iter()
+            .filter(|c| !cached.contains_key(&chunk_key(&c.heading, &c.text)))
+            .count();
+
+        assert_eq!(fresh.len(), seeded + 1, "the note gained exactly one passage");
+        assert_eq!(missing, 1, "only the new passage may need embedding");
     }
 
     /// Regression: a run whose only change is a deleted note produced nothing to
@@ -3978,6 +4242,96 @@ mod tests {
             "identical content must not be re-embedded"
         );
         assert_ne!(ix.stamps[&a], old_stamp, "the new stamp must be recorded");
+    }
+
+    // -------------------------------------------------------------- grouping
+
+    fn at(path: &str, heading: &str, line: usize) -> Chunk {
+        Chunk {
+            path: path.into(),
+            id: None,
+            heading: heading.into(),
+            line,
+            tags: Vec::new(),
+            todo: None,
+            priority: None,
+            lang: String::new(),
+            text: format!("body at {line}"),
+        }
+    }
+
+    /// Descending scores in the order given, which is the order `select` sees.
+    fn ranked(cs: &[Chunk]) -> Vec<(f32, &Chunk)> {
+        cs.iter().enumerate().map(|(i, c)| (1.0 - i as f32 / 1000.0, c)).collect()
+    }
+
+    /// Two meetings inside one `meetings.org` are two results, not one file
+    /// wearing the title of whichever passage ranked highest.
+    #[test]
+    fn hits_are_grouped_by_node_rather_than_by_file() {
+        let cs = vec![
+            at("meetings.org", "Meetings > Meeting 021", 315),
+            at("meetings.org", "Meetings > Meeting 030", 450),
+        ];
+        let g = select(&ranked(&cs), Limits::default());
+        assert_eq!(g.len(), 2, "two nodes, two results");
+        assert_eq!(g[0].heading, "Meetings > Meeting 021");
+        assert_eq!(g[1].heading, "Meetings > Meeting 030");
+    }
+
+    /// The other direction: one section divided because it outran `MAX_CHARS`
+    /// is still one place in the vault, so it stays a single result.
+    #[test]
+    fn a_divided_section_stays_one_result() {
+        let cs = vec![at("n.org", "N > S", 1), at("n.org", "N > S", 40)];
+        let g = select(&ranked(&cs), Limits::default());
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].hits.len(), 2, "both passages hang under the one node");
+    }
+
+    /// Regression: `k` counted files, so a vault kept in three of them returned
+    /// nine hits however large `k` was, with no way to ask for more.  The
+    /// passage cap is what a large-file vault raises.
+    #[test]
+    fn the_per_file_cap_is_what_bounds_a_large_note() {
+        let cs: Vec<Chunk> =
+            (0..30).map(|i| at("meetings.org", &format!("M > Meeting {i}"), i * 10 + 1)).collect();
+
+        let d = select(&ranked(&cs), Limits::default());
+        assert_eq!(d.len(), DEFAULT_PER_FILE, "one file may not fill the whole list");
+
+        let wide = select(&ranked(&cs), Limits { files: 8, per_file: 25 });
+        assert_eq!(wide.len(), 25, "raising the passage cap reaches deeper into it");
+
+        // Raising the *file* cap cannot help here: there is only one file.
+        let more_files = select(&ranked(&cs), Limits { files: 50, per_file: DEFAULT_PER_FILE });
+        assert_eq!(more_files.len(), DEFAULT_PER_FILE, "the two caps bound different things");
+    }
+
+    /// The property the file cap exists for, kept: one crowded note may not
+    /// spend the whole list before a second note is reached.
+    #[test]
+    fn a_crowded_note_still_leaves_room_for_the_others() {
+        let mut cs: Vec<Chunk> =
+            (0..20).map(|i| at("big.org", &format!("B > Node {i}"), i + 1)).collect();
+        cs.push(at("small.org", "Small", 1));
+        let g = select(&ranked(&cs), Limits::default());
+        assert_eq!(g.len(), DEFAULT_PER_FILE + 1);
+        assert_eq!(g.last().unwrap().path, "small.org", "the runner-up note survives");
+    }
+
+    /// `files` counts notes, not nodes: a file already at the cap keeps
+    /// contributing nodes, and a file beyond it contributes none.
+    #[test]
+    fn the_file_cap_counts_notes() {
+        let cs = vec![
+            at("a.org", "A > One", 1),
+            at("b.org", "B > One", 1),
+            at("a.org", "A > Two", 9),
+        ];
+        let g = select(&ranked(&cs), Limits { files: 1, per_file: 5 });
+        assert_eq!(g.len(), 2, "both of a.org's nodes, none of b.org's");
+        assert!(g.iter().all(|x| x.path == "a.org"));
     }
 
     // ------------------------------------------------------------ org parsing

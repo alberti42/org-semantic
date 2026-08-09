@@ -63,10 +63,31 @@ Each hit is an object:
   below ~1σ, treat it as a miss and say so rather than reporting it.
 - **For lexical hits `z` is null.** BM25 scores have no fixed scale, so read
   only the ordering, never the number.
+- A hit is an **outline node**, not a file: `heading` is the full path to it and
+  `line` is where it starts. In a vault that keeps three hundred meetings in one
+  `meetings.org`, `title` is the file's and tells you nothing — `section` and
+  `heading` are what locate the hit. Cite both the file and the heading.
 - Cite a hit by `file` and `line`. If `id` is present, that is an org-id and is
   the stable way to refer to the note — it survives the file being renamed.
 - `text` is the passage itself, so you usually need not open the file. Read it
   when you need surrounding context.
+
+## When every hit comes from the same file
+
+Two numbers bound the list: the positional `k` caps how many **files** appear
+(default 8), and `--per-file` caps how many passages any one of them may
+contribute (default 3).
+
+If the vault keeps notes in a few large files, the default of 3 is the binding
+constraint and raising `k` does nothing — it counts files, and there are only a
+few. Raise the other one instead:
+
+```sh
+org-semantic search <vault> "cryostat vibration" --per-file 25
+```
+
+A short result list whose hits all share one `file` is the sign that you are
+looking at this cap rather than at the whole of what matched.
 
 ## Before searching
 

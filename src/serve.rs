@@ -93,7 +93,17 @@ impl Server {
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
         let query = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let k = p.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+        // `k` bounds the notes, `perFile` how much of the list any one of them
+        // may take.  An editor showing a vault kept in a few large files raises
+        // the second; the names match the CLI's `k` and `--per-file`.
+        let lim = Limits {
+            files: p.get("k").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_FILES as u64) as usize,
+            per_file: p
+                .get("perFile")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_PER_FILE as u64)
+                .max(1) as usize,
+        };
         let lexical_mode = p.get("mode").and_then(|v| v.as_str()) == Some("lexical");
 
         let f = parse_query(query);
@@ -105,10 +115,11 @@ impl Server {
         if lexical_mode {
             let conjunction = !p.get("any").and_then(|v| v.as_bool()).unwrap_or(false);
             let a = Self::analyzer(&vault)?;
-            let hits = lexical::search(&state_dir(&vault), &f, (k * 25).max(100), conjunction, &a)?;
+            let pool = lim.files.saturating_mul(lim.per_file).saturating_mul(25).max(100);
+            let hits = lexical::search(&state_dir(&vault), &f, pool, conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
-            return Ok(hits_json(&vault, &hits, k, None));
+            return Ok(hits_json(&vault, &hits, lim, None));
         }
 
         if !f.langs.is_empty() {
@@ -140,7 +151,7 @@ impl Server {
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &s.chunks[*i])).collect();
-        Ok(hits_json(&vault, &hits, k, s.baseline))
+        Ok(hits_json(&vault, &hits, lim, s.baseline))
     }
 
     /// `index` — rebuild either index, or both, without leaving the process.
