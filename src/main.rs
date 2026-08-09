@@ -2860,10 +2860,10 @@ fn tokenizer_for(m: &Model) -> Result<tokenizers::Tokenizer> {
 fn reject_unknown_flags(args: &[String], from: usize, allowed: &[&str]) -> Result<()> {
     for a in args.iter().skip(from) {
         if a.starts_with("--") && !allowed.contains(&a.as_str()) {
-            return Err(anyhow!(
-                "unknown option `{a}`; this command takes {}",
-                allowed.join(", ")
-            ));
+            return Err(match allowed {
+                [] => anyhow!("unknown option `{a}`; this command takes no options"),
+                _ => anyhow!("unknown option `{a}`; this command takes {}", allowed.join(", ")),
+            });
         }
     }
     Ok(())
@@ -3169,6 +3169,7 @@ fn main() -> Result<()> {
         }
         Some("serve") => serve::serve(),
         Some("models") => {
+            reject_unknown_flags(&args, 2, &[])?;
             // With a vault, say which of them are actually built for it.
             let built = args.get(2).map(|v| {
                 built_models(Path::new(v)).iter().map(|m| m.name).collect::<Vec<_>>()
@@ -3198,11 +3199,13 @@ fn main() -> Result<()> {
         }
         Some("tokens") => {
             let vault = vault_arg(&args, "tokens <vault> [limit]")?;
+            reject_unknown_flags(&args, 3, &["--model"])?;
             let limit = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
             cmd_tokens(vault, limit, model_arg(&args, 3)?)
         }
         Some("bench") => {
             let vault = vault_arg(&args, "bench <vault> [n] [config]")?;
+            reject_unknown_flags(&args, 3, &[])?;
             let n = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(500);
             let cfg = args.get(4).map(String::as_str).unwrap_or("cpu512");
             cmd_bench(Path::new(vault), n, cfg)
@@ -3619,6 +3622,11 @@ mod tests {
         let err = reject_unknown_flags(&args, 3, &["--full", "--model"]).unwrap_err().to_string();
         assert!(err.contains("--fulll"), "names the offender: {err}");
         assert!(err.contains("--full"), "and lists what is accepted: {err}");
+
+        // A command with no options at all still says so, rather than trailing
+        // off with an empty list.
+        let none = reject_unknown_flags(&args, 3, &[]).unwrap_err().to_string();
+        assert!(none.contains("takes no options"), "{none}");
 
         // Values are not flags, and must not be mistaken for them.
         let ok: Vec<String> = ["org-semantic", "index", "/v", "--model", "e5-small"]
