@@ -10,13 +10,14 @@ $ org-semantic index ~/notes
 model loaded in 0.16s
   embedding 6328/6328 · 29 chunk/s · 6.6k tok/s · eta 0s
 embedded 6328 chunks in 220.7s (29/s)
-wrote ~/notes/.org-semantic (9.7 MB of vectors) in 223.0s total
+wrote ~/notes/.org-semantic/semantic/bge-small-en (9.7 MB of vectors) in 223.0s total
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
 0.755  2025-06-06 Review - Probing topological matter and fermion dynamics
        03 Literature review/2025-06-06 Review - Probing topological matter.org:677
        id:f73825a4-c877-4f69-a7e0-4ae305314b8d
+       :Literature:
        · 0.755 L677   Observations: > Atom Loss: What causes it? > Trap-induced loss
                Optical tweezers are subject to power drifts and pointing instabilities…
        · 0.736 L682   Observations: > Atom Loss: What causes it? > Motion and gate timing
@@ -87,8 +88,8 @@ org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
 org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
-org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
-org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
+org-semantic chunks  <dir> <path-substring> [--lang …] [--model NAME]
+org-semantic tokens  <dir> [limit] [--model NAME]     token-length distribution
 org-semantic models  [dir]                     models, and which are built here
 org-semantic serve                             JSON-RPC over stdio, for an editor
 org-semantic bench   <dir> [n] [config]        embedding throughput
@@ -239,7 +240,7 @@ index, `--lexical` builds the **word** index, and `--both` does the two in one
 command.
 
 ```sh
-org-semantic index ~/notes                 # embeddings      ~10 min / 951 notes
+org-semantic index ~/notes                 # embeddings      ~200 s / 951 notes
 org-semantic index ~/notes --lexical       # BM25             1.3 s
 org-semantic index ~/notes --both          # both
 ```
@@ -276,7 +277,7 @@ The difference is not academic. Searching your notes for the surname `Gehm`:
 
 ```console
 $ org-semantic search ~/notes Gehm --lexical
-13.181  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
+13.187  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
 
 $ org-semantic search ~/notes Gehm
 0.660   01 Deutsche Wörter 2024                        ← noise
@@ -316,7 +317,7 @@ A note declares its language the way ltex-ls-plus already asks for it:
 That takes effect from its own line onward, as ltex does, so a note may switch
 part-way — the marker forces a chunk boundary, since a chunk carries exactly one
 language. Placed between sections it costs nothing; placed mid-section it splits
-that section in two. The keyword is configurable if you don't use ltex.
+that section in two. The keyword is `--lang-keyword`, if you don't use ltex.
 
 **Language is a lexical concern.** It selects the stemmer that makes `Sprachen`
 find `Sprache`, and an embedding is not stemmed — so only `index --lexical`
