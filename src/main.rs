@@ -2624,13 +2624,26 @@ fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize, base: Option<Base
     serde_json::json!({ "hits": hits })
 }
 
-fn report(scored: &[(f32, &Chunk)], k: usize) {
+/// Print the hits.
+///
+/// With a BASELINE each score is annotated with how many standard deviations it
+/// sits above the corpus's own noise floor.  The raw cosine alone is mostly a
+/// constant offset that differs by model — unrelated chunks already score 0.56
+/// under BGE and 0.80 under E5 — so it cannot be read without that context.
+/// BM25 has no such floor, so lexical hits pass `None` and show their score
+/// alone.
+fn report(scored: &[(f32, &Chunk)], k: usize, baseline: Option<&Baseline>) {
     let notes = select(scored, k);
+    // The headline figure, where notes are compared with each other.
+    let rank = |s: f32| match baseline {
+        Some(b) => format!("{s:.3} ({:+.1}σ)", b.z(s)),
+        None => format!("{s:.3}"),
+    };
 
     for (path, hits) in &notes {
         let (best, c) = hits[0];
         let title = c.heading.split(" > ").next().unwrap_or(&c.heading);
-        println!("\n{best:.3}  {title}");
+        println!("\n{}  {title}", rank(best));
         println!("       {}:{}", path, c.line);
         if let Some(id) = &c.id {
             println!("       id:{id}");
@@ -2652,6 +2665,8 @@ fn report(scored: &[(f32, &Chunk)], k: usize) {
                 .unwrap_or("(top)");
             let preview: String =
                 c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
+            // Raw here: within one note every passage shares the same offset,
+            // so the comparison that matters is between them.
             println!("       · {score:.3} L{:<5} {section}", c.line);
             println!("               {preview}…");
         }
@@ -2778,11 +2793,12 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>,
     let search = t2.elapsed();
 
     let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
+    let baseline = Baseline::of(&vectors, m.dim);
     if json {
-        println!("{}", hits_json(vault, &hits, k, Baseline::of(&vectors, m.dim)));
+        println!("{}", hits_json(vault, &hits, k, baseline));
         return Ok(());
     }
-    report(&hits, k);
+    report(&hits, k, baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -3118,7 +3134,7 @@ fn cmd_lexical(
         println!("no match");
         return Ok(());
     }
-    report(&hits, k);
+    report(&hits, k, None);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }

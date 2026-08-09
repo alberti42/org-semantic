@@ -4,36 +4,40 @@ Search a tree of org-mode notes by meaning or by words. One static binary, no
 database, no Python, nothing listening on a port.
 
 ```console
-$ org-semantic index ~/notes
+$ org-semantic index ~/notes --both
 951 org files
-6328 chunks · 6328 to embed · scanned in 2.3s
-model loaded in 0.16s
-  embedding 6328/6328 · 29 chunk/s · 6.6k tok/s · eta 0s
-embedded 6328 chunks in 220.7s (29/s)
-wrote ~/notes/.org-semantic/semantic/bge-small-en (9.7 MB of vectors) in 223.0s total
+  180 sections ran past 512 tokens and were divided
+5794 chunks · 5794 to embed · scanned in 1.5s
+model loaded in 0.7s
+  embedding 5794/5794 · 29 chunk/s · 6.1k tok/s · eta 0s
+embedded 5794 chunks in 198.9s (29/s)
+wrote ~/notes/.org-semantic/semantic/e5-small (8.9 MB of vectors) in 201.3s total
+951 org files
+lexical index: 5780 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
-0.755  2025-06-06 Review - Probing topological matter and fermion dynamics
-       03 Literature review/2025-06-06 Review - Probing topological matter.org:677
+0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter and fermion dynamics
+       03 Literature review/2025-06-06 Review - Probing topological matter.org:672
        id:f73825a4-c877-4f69-a7e0-4ae305314b8d
        :Literature:
-       · 0.755 L677   Observations: > Atom Loss: What causes it? > Trap-induced loss
+       · 0.883 L672   Observations: > Atom Loss: What causes it? > Rydberg excitation
+               Atoms are excited to the n=53 Rydberg state using a two-photon transition…
+       · 0.883 L677   Observations: > Atom Loss: What causes it? > Trap-induced loss
                Optical tweezers are subject to power drifts and pointing instabilities…
-       · 0.736 L682   Observations: > Atom Loss: What causes it? > Motion and gate timing
-               During dynamical reconfiguration (AOD-based transport), atoms might spend…
 
-0.733  2024-08-27 Heating rate in optical traps
-       03 Literature review/2024-08-27 Heating rate in optical traps.org:9
-       id:b4c9ac08-0dfd-4439-a599-329109fa0bc3
-       · 0.733 L9     References:
-               M. E. Gehm, K. M. O'hara, T. A. Savard and J. E. Thomas, Dynamics of…
+0.876 (+1.9σ)  2024-04-12 Atom sorting specifications
+       01 Daily notes/2024/2024-04-12 Atom sorting specifications.org:43
+       id:ce45cf4b-1cf8-434e-9129-fc2952877ea9
+       :Daily:
+       · 0.876 L43    Atom sorting -- shared specification document
+               Rearranging a partially filled array into a defect-free one, with the…
 
-[model load 120ms · query embed 7ms · search over 6328 vectors 1.4ms]
+[model load 640ms · query embed 9ms · search over 5794 vectors 1.3ms]
 ```
 
 Not one word of that query appears in the top note's title, and the passage it
-points at is 677 lines in. Finding what you can describe but cannot name is the
+points at is 672 lines in. Finding what you can describe but cannot name is the
 whole point of org-semantic.
 
 ## Why
@@ -177,7 +181,9 @@ replaced.
 
 ### Scores, and why the raw one is not worth showing
 
-Every hit carries `score` (raw cosine) and `z`. **Prefer `z`.**
+Search prints `0.883 (+2.1σ)`: the raw cosine, and how many standard deviations
+it sits above the corpus's own noise floor. `--json` carries both, as `score` and
+`z`. **Read the σ.**
 
 These embeddings are strongly anisotropic — they nearly all point the same way.
 Averaging every unit vector in a 951-note vault leaves something 75% of unit
@@ -199,6 +205,9 @@ The floor is measured from the vectors themselves — 20k sampled pairs, ~37 ms
 when an index is loaded and cached thereafter — rather than stored, so it cannot
 drift from the vectors it describes. Lexical hits have `z: null`: BM25 is
 unbounded and has no such floor.
+
+Within a single note the passages show raw scores alone: they share the same
+offset, so the only comparison that matters there is between them.
 
 **No threshold is ever applied.** `z` is presentation; what to do with it is the
 caller's business.
@@ -313,7 +322,7 @@ $ org-semantic search ~/notes Gehm --lexical
 13.187  2024-08-27 Heating rate in optical traps      ← the note citing Gehm 1998
 
 $ org-semantic search ~/notes Gehm
-0.660   01 Deutsche Wörter 2024                        ← noise
+0.819 (+0.5σ)  01 Deutsche Wörter 2024                  ← noise
 ```
 
 A surname carries no meaning for an embedding model. Equally, `why do the atoms
