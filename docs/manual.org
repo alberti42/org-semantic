@@ -540,7 +540,8 @@ edit it:
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
-  "exclude_tagged": ["noexport", "ARCHIVE"]
+  "exclude_tagged": ["noexport", "ARCHIVE"],
+  "todo_keywords": ["TODO", "DONE"]
 }
 #+end_src
 
@@ -551,6 +552,22 @@ it), =false= (drop it) or ="placeholder"=;
 would only make =[src]= a searchable word. Babel =#+RESULTS:= and bare =: =
 fixed-width lines count as output, not prose. Quote and verse stay in both ---
 they are prose someone chose to set off, not machine output.
+
+=todo_keywords= is this vault's =org-todo-keywords=. It decides what a heading
+*says*: a keyword org knows is cut off the front of the title, and one it does
+not know stays there and is embedded with it. The default is org's own default
+and nothing more --- =TODO= and =DONE= --- so under it =* NEXT Rewire the trap=
+is a heading titled "NEXT Rewire the trap", which is exactly what your Emacs
+shows you until you configure =NEXT=. If you have configured it, say so here:
+
+#+begin_src json
+  "todo_keywords": ["TODO", "NEXT", "WAITING", "DONE", "CANCELLED"]
+#+end_src
+
+Order does not matter --- org's sequence order drives cycling, which nothing here
+does, so this is read as a set. Individual files may still add their own with
+=#+TODO:=, =#+SEQ_TODO:= or =#+TYP_TODO:=, including the fast-selection keys and
+logging specs org allows (=WAIT(w@/!)=), which are stripped down to the keyword.
 
 Those values are the defaults, so the block above describes what you get with no
 config at all.
@@ -590,6 +607,20 @@ Over JSON-RPC the =index= method takes the same policy as a =config= object, so
 an editor can keep its own source of truth in whatever format suits it --- a
 commented =.eld=, in Emacs's case --- and pass it already parsed. Neither side
 needs a reader for the other's syntax.
+
+That is also how =todo_keywords= is meant to be filled in from Emacs, rather
+than by hand: the editor already knows the answer, so it can send it.
+=org-remove-keyword-keys= does the stripping, so nothing has to be reimplemented:
+
+#+begin_src elisp
+(delete "|" (mapcan (lambda (s) (org-remove-keyword-keys (cdr s)))
+                    (default-value 'org-todo-keywords)))
+#+end_src
+
+Send it with =index=, not with every =search=: the policy is sticky and a change
+is refused, so a mismatch is a question worth putting to the user --- /your
+=org-todo-keywords= changed, reindex to match?/ --- rather than a silent rebuild
+they did not ask for.
 
 ** Languages
 :PROPERTIES:

@@ -8,5 +8,6 @@
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
-  "exclude_tagged": ["noexport", "ARCHIVE"]
+  "exclude_tagged": ["noexport", "ARCHIVE"],
+  "todo_keywords": ["TODO", "DONE"]
 }

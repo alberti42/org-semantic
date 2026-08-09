@@ -489,6 +489,28 @@ struct Config {
     /// unknown flags are: a typo that does nothing looks exactly like a setting
     /// that does nothing.
     exclude_tagged: Vec<String>,
+    /// The vault's TODO keywords — this file's `org-todo-keywords`.
+    ///
+    /// Defaults to org's own default and nothing more. Here rather than
+    /// compiled in because it decides what a heading *says*: a keyword we do
+    /// not know stays in the title and is embedded with it, and one we invent
+    /// is cut out of a title that never had it.
+    ///
+    /// A file's own `#+TODO:` / `#+SEQ_TODO:` / `#+TYP_TODO:` adds to this for
+    /// that file, exactly as it adds to `org-todo-keywords` in Emacs.
+    ///
+    /// Order is not kept: org's sequence order drives cycling, which nothing
+    /// here does. It is a set.
+    todo_keywords: Vec<String>,
+}
+
+/// A list read as the set it means: sorted and deduplicated, so that reordering
+/// it or repeating an entry is not a change worth a re-embed.
+fn as_set(items: &[String]) -> Vec<String> {
+    let mut v = items.to_vec();
+    v.sort();
+    v.dedup();
+    v
 }
 
 impl Default for Config {
@@ -498,6 +520,7 @@ impl Default for Config {
             fold_diacritics: false,
             blocks: Blocks::default(),
             exclude_tagged: vec!["noexport".into(), "ARCHIVE".into()],
+            todo_keywords: DEFAULT_TODO_KEYWORDS.iter().map(|s| (*s).into()).collect(),
         }
     }
 }
@@ -506,10 +529,12 @@ impl Config {
     /// The bytes the hash is taken over: defaults filled in, lists sorted and
     /// deduplicated, so two configs that *mean* the same thing agree.
     fn canonical(&self) -> String {
-        let mut tags = self.exclude_tagged.clone();
-        tags.sort();
-        tags.dedup();
-        serde_json::to_string(&Config { exclude_tagged: tags, ..self.clone() }).unwrap_or_default()
+        serde_json::to_string(&Config {
+            exclude_tagged: as_set(&self.exclude_tagged),
+            todo_keywords: as_set(&self.todo_keywords),
+            ..self.clone()
+        })
+        .unwrap_or_default()
     }
 
     const KINDS: [&'static str; 5] = ["src", "example", "results", "quote", "verse"];
@@ -520,11 +545,13 @@ impl Config {
     /// so changing it must not force a re-embed.  A single hash over the whole
     /// config made every lexical-only edit cost minutes on the semantic side.
     fn hash_for(&self, target: Target) -> u64 {
-        let mut tags = self.exclude_tagged.clone();
-        tags.sort();
-        tags.dedup();
-        // Excluded subtrees are the one setting both indexes share.
-        let mut key = format!("tags={}", tags.join(","));
+        // Both indexes share what is excluded, and what counts as a keyword:
+        // a keyword is cut out of the heading before either one sees it.
+        let mut key = format!(
+            "tags={};todo={}",
+            as_set(&self.exclude_tagged).join(","),
+            as_set(&self.todo_keywords).join(",")
+        );
         if target == Target::Lexical {
             // Language and folding pick stemmers, which only this index has.
             key.push_str(&format!(
@@ -564,19 +591,13 @@ impl Config {
     /// a lexical-only setting.
     fn differences(&self, other: &Config, target: Target) -> Vec<String> {
         let mut out = Vec::new();
-        let canon = |c: &Config| {
-            let mut t = c.exclude_tagged.clone();
-            t.sort();
-            t.dedup();
-            t
-        };
-        let (mine, theirs) = (canon(self), canon(other));
-        if mine != theirs {
-            out.push(format!(
-                "exclude_tagged: was [{}], now [{}]",
-                theirs.join(", "),
-                mine.join(", ")
-            ));
+        for (name, mine, theirs) in [
+            ("exclude_tagged", as_set(&self.exclude_tagged), as_set(&other.exclude_tagged)),
+            ("todo_keywords", as_set(&self.todo_keywords), as_set(&other.todo_keywords)),
+        ] {
+            if mine != theirs {
+                out.push(format!("{name}: was [{}], now [{}]", theirs.join(", "), mine.join(", ")));
+            }
         }
         if target == Target::Lexical {
             if self.languages != other.languages {
@@ -664,10 +685,17 @@ fn check_config(
     if prev == cfg.hash_for(target) {
         return Ok(());
     }
+    // A hash that moved while every setting reads the same means the *shape* of
+    // the policy changed, not its content: a setting exists now that did not
+    // when this index was written, and the stored copy is silent about it
+    // rather than disagreeing.  Saying "the stored policy differs" there sends
+    // someone hunting for an edit they never made.
     let detail = previous_cfg
         .map(|old| cfg.differences(old, target).join("; "))
         .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "the stored policy differs".into());
+        .unwrap_or_else(|| {
+            "no setting reads differently, so this index predates one that now exists".into()
+        });
     Err(anyhow!(
         "the {what} index was built under a different policy — {detail}\n\
          pass --full to rebuild under the new one, or restore the previous setting"
@@ -759,15 +787,35 @@ impl LangConfig {
 
 // ----------------------------------------------------------------- chunking
 
-/// TODO keywords recognised when a file does not declare its own with
-/// `#+TODO:`.  An explicit set rather than an all-caps heuristic: headings like
-/// "GPU benchmarks" or "PID loop" would otherwise lose their first word.
-// Two lines, not ten: the split is the org convention, not-done before done.
-#[rustfmt::skip]
-const DEFAULT_TODO_KEYWORDS: &[&str] = &[
-    "TODO", "NEXT", "STARTED", "WAITING", "HOLD", "SOMEDAY", "PROJ",
-    "DONE", "CANCELLED", "CANCELED",
-];
+/// TODO keywords recognised when a file declares none of its own.
+///
+/// Exactly org's default — `org-todo-keywords` is `((sequence "TODO" "DONE"))`
+/// and nothing more. This list used to carry the familiar NEXT / WAITING /
+/// SOMEDAY / CANCELLED set as well, which is Bernt Hansen's org guide and Doom
+/// rather than org, and guessing at it was wrong in the direction that hides
+/// the mistake: under stock settings `* NEXT Rewire the trap` really does have
+/// no keyword and really is titled "NEXT Rewire the trap", so stripping NEXT
+/// meant disagreeing with the user's own Emacs and then embedding our version.
+///
+/// A vault whose owner configured more says so in `todo_keywords`, or per file
+/// with `#+TODO:`. An editor that can read `org-todo-keywords` should pass it
+/// through rather than making anyone restate it.
+const DEFAULT_TODO_KEYWORDS: &[&str] = &["TODO", "DONE"];
+
+/// A keyword as written in `#+TODO:`, reduced to the keyword itself.
+///
+/// Org lets each one carry a fast-selection key and state-change logging in
+/// parentheses — `WAIT(w)`, `WAIT(w!)`, `WAIT(w@/!)`, `WAIT(@/@)` — and matches
+/// headings against the bare name. Keeping the suffix meant registering a token
+/// no heading could ever equal, so a file declaring `WAIT(w@/!)` had its WAIT
+/// headings left with the keyword sitting in their title, and in the text that
+/// was then embedded.
+fn todo_keyword_name(spec: &str) -> &str {
+    match spec.find('(') {
+        Some(i) => &spec[..i],
+        None => spec,
+    }
+}
 
 /// What a heading line says, once its markup is taken off.
 struct Headline {
@@ -876,8 +924,8 @@ fn chunk_file(
     let mut prio_stack: Vec<Option<char>> = Vec::new();
     let mut title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut file_tags: Vec<String> = Vec::new();
-    let mut todo_keywords: Vec<String> =
-        DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
+    // The vault's own, which a file may add to below.
+    let mut todo_keywords: Vec<String> = cfg.todo_keywords.clone();
     let mut file_id: Option<String> = None;
     let mut cur_id: Option<String> = None;
     let mut cur_line = 1usize;
@@ -897,10 +945,27 @@ fn chunk_file(
         let t = line.trim();
         if let Some(rest) = strip_prefix_ci(t, "#+filetags:") {
             file_tags.extend(parse_tag_list(rest));
-        } else if let Some(rest) = strip_prefix_ci(t, "#+todo:") {
-            todo_keywords.extend(parse_tag_list(rest).into_iter().filter(|w| w != "|"));
-        } else if let Some(rest) = strip_prefix_ci(t, "#+seq_todo:") {
-            todo_keywords.extend(parse_tag_list(rest).into_iter().filter(|w| w != "|"));
+        } else {
+            // All three are org's own in-buffer declarations and all three add
+            // keywords: `#+TODO:` and `#+SEQ_TODO:` are stages, `#+TYP_TODO:`
+            // is types (who or what rather than how far along).  The
+            // distinction decides how `org-todo` cycles, which is not our
+            // business — for reading a heading, a keyword is a keyword.
+            let declared = ["#+todo:", "#+seq_todo:", "#+typ_todo:"]
+                .iter()
+                .find_map(|k| strip_prefix_ci(t, k));
+            if let Some(rest) = declared {
+                todo_keywords.extend(
+                    parse_tag_list(rest)
+                        .iter()
+                        // `|` separates not-done from done.  Both are keywords
+                        // and neither belongs in a heading's title, so the
+                        // split itself carries nothing we need.
+                        .filter(|w| *w != "|")
+                        .map(|w| todo_keyword_name(w).to_string())
+                        .filter(|w| !w.is_empty()),
+                );
+            }
         }
     }
 
@@ -4457,6 +4522,82 @@ mod tests {
         let c = chunks_of("#+title: T\n#+TODO: LATER | SHIPPED\n* LATER Rewire\nalpha\n");
         assert_eq!(c[0].todo.as_deref(), Some("LATER"));
         assert_eq!(c[0].heading, "T > Rewire");
+    }
+
+    /// Regression: org lets a keyword carry a fast-selection key and logging
+    /// spec — `WAIT(w@/!)` — and matches headings against the bare name.  We
+    /// registered the whole token, which no heading can equal, so the keyword
+    /// stayed in the title and was embedded with it.
+    #[test]
+    fn a_declared_keyword_may_carry_its_selection_key_and_logging_spec() {
+        let c = chunks_of(
+            "#+title: T\n#+TODO: TODO(t) WAIT(w@/!) NEXT(n) | DONE(d) CANCELLED(c@)\n\
+             * WAIT Waiting on the vendor\nalpha\n\n* CANCELLED Dropped\nbeta\n",
+        );
+        let by = |needle: &str| c.iter().find(|x| x.text.trim() == needle).unwrap();
+        assert_eq!(by("alpha").todo.as_deref(), Some("WAIT"));
+        assert_eq!(by("alpha").heading, "T > Waiting on the vendor");
+        assert_eq!(by("beta").todo.as_deref(), Some("CANCELLED"));
+        assert_eq!(by("beta").heading, "T > Dropped");
+    }
+
+    /// `#+TYP_TODO:` declares keywords that name a who or a what rather than a
+    /// stage.  Org treats it alongside `#+TODO:` and `#+SEQ_TODO:`; we used to
+    /// ignore it, leaving "Sara" in the heading.
+    #[test]
+    fn typ_todo_declares_keywords_too() {
+        let c =
+            chunks_of("#+title: T\n#+TYP_TODO: Fred Sara Lucy | DONE\n* Sara Chase it\nalpha\n");
+        assert_eq!(c[0].todo.as_deref(), Some("Sara"));
+        assert_eq!(c[0].heading, "T > Chase it");
+    }
+
+    /// Org's default is `((sequence "TODO" "DONE"))` and nothing else, so a
+    /// heading starting with NEXT is titled "NEXT …" until the vault says
+    /// otherwise — which is what the user's own Emacs shows them.
+    #[test]
+    fn the_default_keywords_are_orgs_own_and_the_vault_may_widen_them() {
+        let c = chunks_of("#+title: T\n* NEXT Rewire\nalpha\n");
+        assert_eq!(c[0].todo, None, "NEXT is not an org keyword by default");
+        assert_eq!(c[0].heading, "T > NEXT Rewire");
+
+        let cfg = Config {
+            todo_keywords: vec!["TODO".into(), "NEXT".into(), "DONE".into()],
+            ..Config::default()
+        };
+        let c = chunk_file(
+            Path::new("/vault/Note.org"),
+            "Note.org",
+            "#+title: T\n* NEXT Rewire\nalpha\n",
+            None,
+            &cfg,
+            Target::Semantic,
+        );
+        assert_eq!(c[0].todo.as_deref(), Some("NEXT"));
+        assert_eq!(c[0].heading, "T > Rewire");
+    }
+
+    /// The keyword list decides what a heading *says*, so it must reach the
+    /// embedded text — and therefore both indexes' policy hashes.
+    #[test]
+    fn changing_the_keywords_invalidates_both_indexes() {
+        let a = Config::default();
+        let b = Config { todo_keywords: vec!["TODO".into(), "NEXT".into()], ..a.clone() };
+        for t in [Target::Semantic, Target::Lexical] {
+            assert_ne!(a.hash_for(t), b.hash_for(t), "a keyword change is a real change");
+        }
+        // Still a set: restating it in another order is not a change.
+        let reordered = Config {
+            todo_keywords: vec!["DONE".into(), "TODO".into(), "DONE".into()],
+            ..a.clone()
+        };
+        for t in [Target::Semantic, Target::Lexical] {
+            assert_eq!(a.hash_for(t), reordered.hash_for(t), "order and repeats are not changes");
+        }
+        assert!(b
+            .differences(&a, Target::Semantic)
+            .iter()
+            .any(|d| d.starts_with("todo_keywords:")));
     }
 
     #[test]
