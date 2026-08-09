@@ -1,0 +1,12 @@
+{
+  "languages": ["en-US"],
+  "fold_diacritics": false,
+  "blocks": {
+    "src":     { "semantic": "placeholder", "lexical": true },
+    "example": { "semantic": "placeholder", "lexical": true },
+    "results": { "semantic": false,         "lexical": true },
+    "quote":   { "semantic": true,          "lexical": true },
+    "verse":   { "semantic": true,          "lexical": true }
+  },
+  "exclude_tagged": ["noexport", "ARCHIVE"]
+}

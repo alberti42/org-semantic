@@ -69,23 +69,38 @@ const MODELS: &[Model] = &[
 ];
 
 const USAGE: &str = "\
-usage:
-  org-semantic index   <vault> [--full|--rehash] [--model NAME] [--config FILE]
-  org-semantic index   <vault> --lexical|--both [--full|--rehash]
-                              [--lang en-US[,de-DE,…]|auto]
-                              [--fold-diacritics]
-  org-semantic search  <vault> <query> [k] [--model NAME] [--json]
-  org-semantic search  <vault> <query> [k] --lexical [--any] [--json]
-  org-semantic chunks  <vault> <path-substring> [--lexical] [--lang …]
-                                                [--model NAME]
-                                                [--config FILE]
-  org-semantic tokens  <vault> [limit] [--model NAME]
-  org-semantic models  [vault]
-  org-semantic serve                           JSON-RPC over stdio, for an editor
-  org-semantic bench   <vault> [n] [config]
+usage: org-semantic <command> <vault> [options]
 
-Bare `index` builds the semantic index, `--lexical` the word index, `--both` both.
-Each model keeps its own semantic index; `models <vault>` shows which are built.";
+Two indexes are built and searched separately: a semantic one, which finds
+notes by meaning, and a lexical one, which finds them by word.
+
+  index  <vault> [--full|--rehash] [--model NAME] [--config FILE]
+         Build the semantic index.  Minutes, and downloads a model once.
+  index  <vault> --lexical|--both [--full|--rehash] [--config FILE]
+         [--lang en-US[,de-DE,...]|auto] [--fold-diacritics]
+         Build the word index (seconds), or --both in one run.
+         Incremental by default; --full rebuilds, --rehash re-reads every note.
+
+  search <vault> <query> [k] [--model NAME] [--json]
+         Rank by meaning: describe what you are after, not its words.
+  search <vault> <query> [k] --lexical [--any] [--json]
+         Rank by word, with phrases and boolean operators.  Terms are ANDed;
+         --any restores OR.  A query may carry predicates:
+           tag:x  -tag:x  dir:x  todo:x  lang:x   (lang: is lexical only)
+
+  chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
+         Show how notes would be split, without indexing anything.
+  tokens <vault> [limit] [--model NAME]     token lengths, and what would truncate
+  models [vault]                            embedding models, and which are built
+  serve                                     JSON-RPC 2.0 over stdio, for an editor
+  bench  <vault> [n] [config]               embedding throughput on a slice
+
+Which subtrees are skipped, and what happens to src and example blocks, is
+policy: a JSON file passed with --config, remembered afterwards so later runs
+need not repeat it.  Copy config.example.json and edit it.
+
+Each model keeps its own semantic index, so several can be built side by side;
+`models <vault>` shows which are.";
 
 const DEFAULT_MODEL: &str = "bge-small-en";
 
@@ -3673,6 +3688,17 @@ mod tests {
 
         let lex = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical);
         assert!(lex[0].text.contains("mounted ok"), "still findable by word");
+    }
+
+    /// The example is the first thing a user edits, so it must parse — and it
+    /// must be the defaults, or it silently changes their index the moment they
+    /// pass it.  `include_str!` means a stale example fails the build, not a
+    /// user's run.
+    #[test]
+    fn the_example_config_is_exactly_the_defaults() {
+        let text = include_str!("../config.example.json");
+        let cfg: Config = serde_json::from_str(text).expect("config.example.json must parse");
+        assert_eq!(cfg, Config::default());
     }
 
     #[test]

@@ -83,17 +83,38 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash] [--model NAME] [--config FILE]
-org-semantic index   <dir> --lexical|--both [--full|--rehash]
-                           [--lang en-US[,de-DE,…]|auto] [--fold-diacritics]
-org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
-org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
-org-semantic chunks  <dir> <path-substring> [--lexical] [--lang …]
-                           [--model NAME] [--config FILE]
-org-semantic tokens  <dir> [limit] [--model NAME]     token-length distribution
-org-semantic models  [dir]                     models, and which are built here
-org-semantic serve                             JSON-RPC over stdio, for an editor
-org-semantic bench   <dir> [n] [config]        embedding throughput
+usage: org-semantic <command> <vault> [options]
+
+Two indexes are built and searched separately: a semantic one, which finds
+notes by meaning, and a lexical one, which finds them by word.
+
+  index  <vault> [--full|--rehash] [--model NAME] [--config FILE]
+         Build the semantic index.  Minutes, and downloads a model once.
+  index  <vault> --lexical|--both [--full|--rehash] [--config FILE]
+         [--lang en-US[,de-DE,...]|auto] [--fold-diacritics]
+         Build the word index (seconds), or --both in one run.
+         Incremental by default; --full rebuilds, --rehash re-reads every note.
+
+  search <vault> <query> [k] [--model NAME] [--json]
+         Rank by meaning: describe what you are after, not its words.
+  search <vault> <query> [k] --lexical [--any] [--json]
+         Rank by word, with phrases and boolean operators.  Terms are ANDed;
+         --any restores OR.  A query may carry predicates:
+           tag:x  -tag:x  dir:x  todo:x  lang:x   (lang: is lexical only)
+
+  chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
+         Show how notes would be split, without indexing anything.
+  tokens <vault> [limit] [--model NAME]     token lengths, and what would truncate
+  models [vault]                            embedding models, and which are built
+  serve                                     JSON-RPC 2.0 over stdio, for an editor
+  bench  <vault> [n] [config]               embedding throughput on a slice
+
+Which subtrees are skipped, and what happens to src and example blocks, is
+policy: a JSON file passed with --config, remembered afterwards so later runs
+need not repeat it.  Copy config.example.json and edit it.
+
+Each model keeps its own semantic index, so several can be built side by side;
+`models <vault>` shows which are.
 ```
 
 ### Driving it from an editor
@@ -331,7 +352,9 @@ note never had — and lose the fact that a snippet was there at all, which is p
 of what the section is about. `[src bash]` keeps both, without forty lines of
 shell drowning the prose around it.
 
-The whole policy lives in a file you own, named with `--config`:
+The whole policy lives in a file you own, named with `--config`. Copy
+[`config.example.json`](config.example.json) — it is exactly the defaults — and
+edit it:
 
 ```json
 {
