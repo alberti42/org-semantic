@@ -482,36 +482,40 @@ shell snippets — 0.4% of chunks on the reference vault, and none once the
 languages are named with `--lang`. Re-split pieces of a long section share their
 section's line number.
 
-## Prior art
+## Related work
+
+Two things separate these projects for an org user: whether they parse **org** at
+all, and whether they come with an **Emacs** front-end or are a generic CLI you
+wire up yourself.
+
+| project | format | Emacs front-end | runtime |
+|---|---|---|---|
+| **org-semantic** | org | via `serve` (elisp UI in progress) | one static binary, in-process ONNX |
+| org-supertag | org | native elisp | elisp only, no embeddings |
+| org-db | org | native elisp | Python + `torch` server on a port |
+| emacs-rag-libsql | org | native elisp | Python + `torch` server on a port |
+| markdown-vdb | Markdown | none (Claude Code skills) | Rust CLI, external embedding API |
+| mdvault | Markdown | none (MCP for Claude Code) | Python, MCP server |
 
 ### markdown-vdb
 
-[markdown-vdb](https://github.com/geckse/markdown-vdb) reaches a very similar
-architecture for Markdown — filesystem-native, CLI-first, no server.
+[markdown-vdb](https://github.com/geckse/markdown-vdb) reaches a very similar architecture for Markdown — one Rust binary, the index on disk, notes never modified. What sets it apart is where the embeddings come from: an external provider — OpenAI, Ollama, any OpenAI-compatible endpoint — so a search reaches out to a network or a local model server, and an API key and its cost or a running server come with it. org-semantic embeds in-process through a statically linked ONNX Runtime and calls nothing. Its front-end is aimed at AI agents — it ships Claude Code skills rather than an Emacs package. (It also offers a fused hybrid ranking, semantic + BM25 through RRF, which org-semantic leaves as separate commands for now — see Status.)
 
-### mdvault and markdown-vault-mcp
+### mdvault
 
-[mdvault](https://pypi.org/project/mdvault/) and
-[markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) combine
-BM25/FTS5 with semantic search into one ranking; org-semantic has both but keeps
-them as separate commands, for the reason given under Status. All three are
-Markdown-first; org-semantic exists because none of them parse org.
+[mdvault](https://pypi.org/project/mdvault/) also does BM25 + semantic over a Markdown vault, but it is a Python tool (`uv tool install`) that keeps everything in one SQLite file and answers Claude Code over MCP. org-semantic is a single static binary — no interpreter, no `.db`. Both have a resident mode, aimed differently: mdvault's `serve` is MCP so Claude Code can search a vault; org-semantic's is JSON-RPC/LSP so an editor can. Neither ships an Emacs package.
 
-[org-supertag](https://github.com/yibie/org-supertag) is org-native and shares
-the same instincts — local-first, no server, no Python, `:ID:`-addressed,
-incremental on `(mtime, hash)` — but solves the opposite problem. It turns
-`#tag` headings into a *structured database*: you define fields once (a `#paper`
-has `authors`, `year`, `status`), fill them through spreadsheet and Kanban
-views, and query with an S-expression DSL over tags and fields — `(and (tag
-"task") (not (field "status" "done")))`. That answers *"all unread papers rated
-≥4"*, a question about structure you authored. org-semantic answers *"notes
-about X"* where you tagged nothing and don't know the words — a question about
-meaning, needing no schema. org-supertag has no embeddings; org-semantic keeps
-no database and never writes to your notes. They are complementary rather than
-competing, over the same vault: org-supertag could even maintain the `#tag`
-markers org-semantic reads as `tag:` predicates. If you want structured views
-and a query language, reach for it; if you want to find the note you can't name
-from a cold pile of prose, reach here.
+All of these are Markdown-first; org-semantic exists because none of them parse org.
+
+### org-supertag
+
+[org-supertag](https://github.com/yibie/org-supertag) is org-native and shares the same instincts — local-first, no server, no Python, `:ID:`-addressed, incremental on `(mtime, hash)` — but solves the opposite problem. It turns `#tag` headings into a *structured database*: you define fields once (a `#paper` has `authors`, `year`, `status`), fill them through spreadsheet and Kanban views, and query with an S-expression DSL over tags and fields — `(and (tag "task") (not (field "status" "done")))`. That answers *"all unread papers rated ≥4"*, a question about structure you authored. org-semantic answers *"notes about X"* where you tagged nothing and don't know the words — a question about meaning, needing no schema. org-supertag has no embeddings; org-semantic keeps no database and never writes to your notes. They are complementary rather than competing, over the same vault: org-supertag could even maintain the `#tag` markers org-semantic reads as `tag:` predicates. Reach for org-supertag when you want structured views and a query language; reach for org-semantic when you want to find the note you can't name in a vault full of prose.
+
+### org-db and emacs-rag-libsql
+
+[org-db](https://github.com/jkitchin/org-db-v3) and [emacs-rag-libsql](https://github.com/jkitchin/emacs-rag-libsql), both by John Kitchin, are the closest in aim to org-semantic — semantic search over an org tree, driven from Emacs. Both split the work the same way: Emacs parses and navigates, a Python FastAPI server does the embedding and the vector search. org-db goes wide — CLIP image search, SQLite full-text, indexing linked PDF/DOCX/PPTX, gptel tools for an LLM; emacs-rag-libsql goes deep on ranking, a cross-encoder reranking the vector hits in a second stage. Both fuse vector and keyword into one hybrid result.
+
+The difference is what you have to install and what has to be running. Each needs Python and `uv`, and pulls in `sentence-transformers` and `torch` — org-db also `transformers`, `pillow`, `pymupdf4llm`, `python-docx`, `python-pptx` — then a FastAPI process listening on a port for Emacs to reach over HTTP. org-semantic is one static binary: the embedding model runs in-process through a statically linked ONNX Runtime, nothing binds a port, and `serve` is a stdio child the editor starts and owns, not a daemon.
 
 ## Licence
 
