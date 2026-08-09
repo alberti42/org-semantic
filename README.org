@@ -179,8 +179,8 @@ Methods:
 
 | method     | params                                                                                   | returns                                       |
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =search=   | =vault=, =query=, =k=, =mode= (=semantic=|=lexical=), =model=, =any=                     | ={"hits": [...]}=                             |
-| =index=    | =vault=, =mode= (=semantic=|=lexical=|=both=), =full=, =rehash=, =model=, =lang=, =fold= | what each index did, as numbers               |
+| =search=   | =vault=, =query=, =k=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...]}=                             |
+| =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers               |
 | =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
 | =shutdown= | ---                                                                                      | exit                                          |
