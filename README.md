@@ -83,7 +83,7 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 ## Use
 
 ```
-org-semantic index   <dir> [--full|--rehash] [--model NAME]   semantic index
+org-semantic index   <dir> [--full|--rehash] [--model NAME] [--config FILE]
 org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
@@ -305,6 +305,51 @@ org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 | `dir:x` | note lives under directory `x`; repeating widens (any may match) |
 | `todo:x` | nearest enclosing heading has TODO keyword `x` |
 | `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT`. **`--lexical` only** |
+
+### What gets indexed
+
+By default, subtrees tagged `:noexport:` or `:ARCHIVE:` are left out — org's own
+markers for "not for consumption" and "put this away". Both inherit, so the rule
+covers a whole subtree, children included.
+
+That is the only policy so far, and it lives in a file you own, named with
+`--config`:
+
+```json
+{ "exclude_tags": ["noexport", "ARCHIVE"] }
+```
+
+```sh
+org-semantic index ~/notes --both --config ~/notes/indexing.json
+```
+
+**The policy is sticky.** Once given it is cached, so later runs need not restate
+it — forgetting the flag is safe, which is the property that makes a sticky
+setting tolerable. It is compared by *meaning*, not by bytes: key order,
+whitespace and duplicates all hash the same, and a file that merely restates the
+defaults is indistinguishable from no file at all.
+
+**Changing it is refused, not obeyed.** A config can change without you doing
+anything — a `git pull` brings someone else's edit — and re-embedding a corpus
+takes minutes, so the tool says what moved and waits:
+
+```console
+$ org-semantic index ~/notes --both --config ~/notes/indexing.json
+Error: the semantic index was built under a different policy —
+       exclude_tags: was [ARCHIVE, noexport], now []
+       pass --full to rebuild under the new one, or restore the previous setting
+```
+
+Unknown keys are an error rather than ignored, for the same reason unknown flags
+are: a typo that does nothing looks exactly like a setting that does nothing.
+
+`chunks --config` applies a policy **without** storing it or reindexing, so you
+can see what a change would do before paying for it.
+
+Over JSON-RPC the `index` method takes the same policy as a `config` object, so
+an editor can keep its own source of truth in whatever format suits it — a
+commented `.eld`, in Emacs's case — and pass it already parsed. Neither side
+needs a reader for the other's syntax.
 
 ### Languages
 

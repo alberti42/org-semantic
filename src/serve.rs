@@ -160,6 +160,15 @@ impl Server {
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut out = io::sink();
         let mut done = serde_json::Map::new();
+        // Emacs keeps its policy in whatever format it likes — a commented
+        // `.eld`, say — and passes it here already parsed, so neither side
+        // needs a reader for the other's syntax.
+        let cfg = match p.get("config") {
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|e| anyhow!("config: {e}"))?,
+            None => resolve_config(&vault, None)?,
+        };
+        let previous = Config::read(&config_path(&state_dir(&vault))).ok();
 
         if mode == "semantic" || mode == "both" {
             let want = match p.get("model").and_then(|v| v.as_str()) {
@@ -171,13 +180,22 @@ impl Server {
                     .copied()
                     .unwrap_or(model_named(DEFAULT_MODEL)?),
             };
+            if !full {
+                check_config(
+                    stored_hash::<Manifest>(&semantic_dir(&vault, want).join("manifest.json"))
+                        .map(|m| m.config),
+                    &cfg,
+                    previous.as_ref(),
+                    "semantic",
+                )?;
+            }
             let key = (vault.clone(), want.name);
             // Lend the resident model if this vault's index is already loaded.
             let report = match self.semantic.get_mut(&key) {
                 Some(s) => {
-                    cmd_index(&vault, full, rehash, want, &mut out, Some(&mut s.model))?
+                    cmd_index(&vault, full, rehash, want, &cfg, &mut out, Some(&mut s.model))?
                 }
-                None => cmd_index(&vault, full, rehash, want, &mut out, None)?,
+                None => cmd_index(&vault, full, rehash, want, &cfg, &mut out, None)?,
             };
             // The vectors on disk have moved, so what is held in memory is now
             // wrong — including the baseline, which is derived from them.
@@ -193,13 +211,24 @@ impl Server {
             };
             let fold = p.get("fold").and_then(|v| v.as_bool()).unwrap_or(false);
             prepare_lang(&lang)?;
-            let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &mut out)?;
+            if !full {
+                check_config(
+                    stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
+                        .map(|m| m.config),
+                    &cfg,
+                    previous.as_ref(),
+                    "lexical",
+                )?;
+            }
+            let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &cfg, &mut out)?;
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
         if done.is_empty() {
             return Err(anyhow!("unknown mode `{mode}`; use semantic, lexical or both"));
         }
+        fs::create_dir_all(state_dir(&vault))?;
+        fs::write(config_path(&state_dir(&vault)), cfg.canonical())?;
         Ok(serde_json::Value::Object(done))
     }
 

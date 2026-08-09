@@ -70,12 +70,13 @@ const MODELS: &[Model] = &[
 
 const USAGE: &str = "\
 usage:
-  org-semantic index   <vault> [--full|--rehash] [--model NAME]
+  org-semantic index   <vault> [--full|--rehash] [--model NAME] [--config FILE]
   org-semantic index   <vault> --lexical|--both [--full|--rehash]
                               [--lang en-US[,de-DE,…]|auto] [--fold]
   org-semantic search  <vault> <query> [k] [--model NAME] [--json]
   org-semantic search  <vault> <query> [k] --lexical [--any] [--json]
   org-semantic chunks  <vault> <path-substring> [--lang …] [--model NAME]
+                                                [--config FILE]
   org-semantic tokens  <vault> [limit] [--model NAME]
   org-semantic models  [vault]
   org-semantic serve                           JSON-RPC over stdio, for an editor
@@ -307,6 +308,119 @@ fn rel_path(vault: &Path, f: &Path) -> String {
     f.strip_prefix(vault).unwrap_or(f).to_string_lossy().into_owned()
 }
 
+/// Indexing policy: what in a vault is worth indexing at all.
+///
+/// Kept in a file the user owns, wherever they like, and named with `--config`.
+/// Once given it is cached in the state directory, so later runs need not
+/// restate it — forgetting the flag must be safe, or a sticky setting is a trap.
+///
+/// Compared by **normalized content**, never by the file: reformatting, key
+/// order, or writing it as `.eld` in Emacs and passing it over JSON-RPC must all
+/// hash the same, or a cosmetic edit would cost a full re-embed.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+struct Config {
+    /// Subtrees carrying any of these tags are not indexed.  `noexport` is org's
+    /// own "not for consumption" marker and `ARCHIVE` its "put this away"; both
+    /// inherit down the outline, which is what makes this a subtree rule rather
+    /// than a per-heading one.
+    ///
+    /// Unknown keys are rejected rather than ignored, for the same reason
+    /// unknown flags are: a typo that does nothing looks exactly like a setting
+    /// that does nothing.
+    exclude_tags: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { exclude_tags: vec!["noexport".into(), "ARCHIVE".into()] }
+    }
+}
+
+impl Config {
+    /// The bytes the hash is taken over: defaults filled in, lists sorted and
+    /// deduplicated, so two configs that *mean* the same thing agree.
+    fn canonical(&self) -> String {
+        let mut tags = self.exclude_tags.clone();
+        tags.sort();
+        tags.dedup();
+        serde_json::to_string(&Config { exclude_tags: tags }).unwrap_or_default()
+    }
+
+    fn hash(&self) -> u64 {
+        content_hash(self.canonical().as_bytes())
+    }
+
+    /// Does a chunk carrying TAGS fall outside what should be indexed?
+    fn excluded(&self, tags: &[String]) -> bool {
+        tags.iter().any(|t| self.exclude_tags.iter().any(|x| x.eq_ignore_ascii_case(t)))
+    }
+
+    fn read(path: &Path) -> Result<Config> {
+        let bytes = fs::read(path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing config {}", path.display()))
+    }
+
+    /// What changed, in words, so an error can say which setting moved rather
+    /// than that something did.
+    fn differences(&self, other: &Config) -> Vec<String> {
+        let mut out = Vec::new();
+        let gone: Vec<&String> =
+            other.exclude_tags.iter().filter(|t| !self.exclude_tags.contains(t)).collect();
+        let added: Vec<&String> =
+            self.exclude_tags.iter().filter(|t| !other.exclude_tags.contains(t)).collect();
+        if !gone.is_empty() || !added.is_empty() {
+            out.push(format!(
+                "exclude_tags: was [{}], now [{}]",
+                other.exclude_tags.join(", "),
+                self.exclude_tags.join(", ")
+            ));
+            let _ = (&gone, &added);
+        }
+        out
+    }
+}
+
+fn config_path(dir: &Path) -> PathBuf {
+    dir.join("config.json")
+}
+
+/// The policy to index with: what `--config` names, else what the vault was last
+/// indexed with, else the defaults.
+fn resolve_config(vault: &Path, given: Option<&Path>) -> Result<Config> {
+    if let Some(p) = given {
+        return Config::read(p);
+    }
+    let cached = config_path(&state_dir(vault));
+    if cached.exists() {
+        return Config::read(&cached);
+    }
+    Ok(Config::default())
+}
+
+/// Refuse to index over an index built under a different policy.
+///
+/// Not a silent rebuild: a config file can change without the user acting — a
+/// `git pull` brings a colleague's edit — and spending minutes re-embedding on
+/// something they did not do is exactly the surprise to avoid.  `--full` is the
+/// way to say yes.
+fn check_config(previous: Option<u64>, cfg: &Config, previous_cfg: Option<&Config>, what: &str) -> Result<()> {
+    let Some(prev) = previous else { return Ok(()) };
+    if prev == cfg.hash() {
+        return Ok(());
+    }
+    let detail = previous_cfg
+        .map(|old| cfg.differences(old).join("; "))
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "the stored policy differs".into());
+    Err(anyhow!(
+        "the {what} index was built under a different policy — {detail}\n\
+         pass --full to rebuild under the new one, or restore the previous setting"
+    ))
+}
+
 /// Where a note's language comes from: the languages the vault is written in,
 /// as `--lang` spelled them.
 ///
@@ -482,7 +596,13 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 /// embedding is not stemmed, so classifying a note there would be labelling for
 /// its own sake.  Language belongs to the lexical index, which needs it to pick
 /// a stemmer.
-fn chunk_file(path: &Path, rel: &str, text: &str, lang: Option<&LangConfig>) -> Vec<Chunk> {
+fn chunk_file(
+    path: &Path,
+    rel: &str,
+    text: &str,
+    lang: Option<&LangConfig>,
+    cfg: &Config,
+) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     // Tags of each open heading, so a chunk can inherit from every ancestor.
@@ -543,6 +663,11 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: Option<&LangConfig>) -> 
             if !tags.iter().any(|x| x == t) {
                 tags.push(t.clone());
             }
+        }
+        // Excluded subtrees are dropped here, where inheritance has already been
+        // resolved: `:noexport:` on an ancestor covers everything beneath it.
+        if cfg.excluded(&tags) {
+            return;
         }
         let todo = todo_stack.iter().rev().find_map(|t| t.clone());
         let priority = prio_stack.iter().rev().find_map(|p| *p);
@@ -1477,6 +1602,9 @@ fn stamp_of(p: &Path) -> Option<Stamp> {
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,
+    /// Hash of the normalized `Config` this index was built under.
+    #[serde(default)]
+    config: u64,
     model: String,
     dim: usize,
     /// Absolute note path to a hash of its bytes.  Content rather than mtime:
@@ -1545,12 +1673,19 @@ fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
     for (i, c) in chunks.iter().enumerate() {
         by_path.entry(c.path.clone()).or_default().push(i);
     }
-    Some(LoadedIndex { chunks, vectors, files: manifest.files, stamps: manifest.stamps, by_path })
+    Some(LoadedIndex {
+        chunks,
+        vectors,
+        files: manifest.files,
+        stamps: manifest.stamps,
+        by_path,
+    })
 }
 
 fn save_index(
     dir: &Path,
     m: &Model,
+    cfg: &Config,
     chunks: &[Chunk],
     vectors: &[f32],
     files: std::collections::BTreeMap<String, u64>,
@@ -1567,6 +1702,7 @@ fn save_index(
         dir.join("manifest.json"),
         serde_json::to_vec(&Manifest {
             version: INDEX_VERSION,
+            config: cfg.hash(),
             model: m.name.into(),
             dim: m.dim,
             files,
@@ -1713,6 +1849,8 @@ fn scan_vault(
 struct LexManifest {
     /// The analyzer the index was built with; a change means a new schema.
     key: String,
+    #[serde(default)]
+    config: u64,
     files: std::collections::BTreeMap<String, u64>,
     #[serde(default)]
     stamps: std::collections::BTreeMap<String, Stamp>,
@@ -1734,6 +1872,7 @@ fn cmd_index_lexical(
     rehash: bool,
     lang: &LangConfig,
     fold: bool,
+    cfg: &Config,
     out: &mut dyn Write,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
@@ -1756,7 +1895,7 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     for st in &scan.stale {
         let f = vault.join(&st.path);
-        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang)));
+        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg));
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -1769,7 +1908,7 @@ fn cmd_index_lexical(
         for f in &files {
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
-                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang))),
+                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg)),
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
         }
@@ -1814,6 +1953,7 @@ fn cmd_index_lexical(
         lex_manifest_path(&dir),
         serde_json::to_vec(&LexManifest {
             key: analyzer.key(),
+            config: cfg.hash(),
             files: scan.hashes,
             stamps: scan.stamps,
         })?,
@@ -1862,6 +2002,7 @@ fn cmd_index(
     full: bool,
     rehash: bool,
     m: &Model,
+    cfg: &Config,
     out: &mut dyn Write,
     resident: Option<&mut TextEmbedding>,
 ) -> Result<IndexReport> {
@@ -1915,7 +2056,7 @@ fn cmd_index(
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, &path, text, None), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, &path, text, None, cfg), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -2036,7 +2177,7 @@ fn cmd_index(
         )?;
     }
 
-    let written = save_index(&dir, m, &chunks, &vectors, hashes, stamps)?;
+    let written = save_index(&dir, m, cfg, &chunks, &vectors, hashes, stamps)?;
     writeln!(
         out,
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
@@ -2356,7 +2497,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default()));
         }
         if chunks.len() >= n {
             break;
@@ -2432,7 +2573,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default()));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -2535,6 +2676,17 @@ fn reject_unknown_flags(args: &[String], from: usize, allowed: &[&str]) -> Resul
     Ok(())
 }
 
+/// The value following FLAG, if it is there.
+fn flag_value<'a>(args: &'a [String], from: usize, flag: &str) -> Option<&'a str> {
+    let i = args.iter().skip(from).position(|a| a == flag)?;
+    args.get(from + i + 1).map(String::as_str)
+}
+
+/// Read a manifest just far enough to learn what policy it was written under.
+fn stored_hash<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
 /// `--lang`, read the same way wherever it appears.
 fn lang_args(args: &[String], from: usize) -> LangConfig {
     let mut lang = LangConfig::default();
@@ -2565,7 +2717,7 @@ fn vault_arg<'a>(args: &'a [String], usage: &str) -> Result<&'a Path> {
 
 /// Print the chunks a file produces, without embedding — for checking chunking
 /// decisions (boundaries, overlap, headings) without paying for a full index.
-fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model) -> Result<()> {
+fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model, cfg: &Config) -> Result<()> {
     let tok = tokenizer_for(m)?;
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -2575,7 +2727,7 @@ fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model) -> Resul
         let measure = |s: &str| n_tokens(&tok, s);
         let (chunks, _, _) =
             enforce_token_limit(
-                chunk_file(f, &rel_path(vault, f), &text, Some(lang)),
+                chunk_file(f, &rel_path(vault, f), &text, Some(lang), cfg),
                 &measure,
                 TOKEN_LIMIT,
             );
@@ -2669,7 +2821,10 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 3,
-                &["--full", "--rehash", "--lexical", "--both", "--lang", "--fold", "--model"],
+                &[
+                    "--full", "--rehash", "--lexical", "--both", "--lang", "--fold", "--model",
+                    "--config",
+                ],
             )?;
             let lang = lang_args(&args, 3);
             // Accent folding, so `Worter` matches `Wörter`.  Off unless asked
@@ -2697,14 +2852,42 @@ fn main() -> Result<()> {
                 Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
                 None => model_named(DEFAULT_MODEL)?,
             };
+            let given = flag_value(&args, 3, "--config").map(PathBuf::from);
+            let cfg = resolve_config(vault, given.as_deref())?;
+            // The policy last indexed under, kept only so the error can say
+            // which setting moved rather than that one did.
+            let previous = Config::read(&config_path(&state_dir(vault))).ok();
+            if !full {
+                if both || !lexical {
+                    check_config(
+                        stored_hash::<Manifest>(&semantic_dir(vault, model).join("manifest.json"))
+                            .map(|m| m.config),
+                        &cfg,
+                        previous.as_ref(),
+                        "semantic",
+                    )?;
+                }
+                if both || lexical {
+                    check_config(
+                        stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(vault)))
+                            .map(|m| m.config),
+                        &cfg,
+                        previous.as_ref(),
+                        "lexical",
+                    )?;
+                }
+            }
             let mut out = io::stdout();
             if both || !lexical {
-                cmd_index(vault, full, rehash, model, &mut out, None)?;
+                cmd_index(vault, full, rehash, model, &cfg, &mut out, None)?;
             }
             if both || lexical {
                 prepare_lang(&lang)?;
-                cmd_index_lexical(vault, full, rehash, &lang, fold, &mut out)?;
+                cmd_index_lexical(vault, full, rehash, &lang, fold, &cfg, &mut out)?;
             }
+            // Cached so a later run need not restate it.
+            fs::create_dir_all(state_dir(vault))?;
+            fs::write(config_path(&state_dir(vault)), cfg.canonical())?;
             Ok(())
         }
         Some("search") => {
@@ -2741,10 +2924,14 @@ fn main() -> Result<()> {
         Some("chunks") => {
             let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
-            reject_unknown_flags(&args, 3, &["--lang", "--model"])?;
+            reject_unknown_flags(&args, 3, &["--lang", "--model", "--config"])?;
             let lang = lang_args(&args, 3);
             prepare_lang(&lang)?;
-            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?)
+            // `--config` here is a dry run: try a policy without storing it or
+            // paying for a reindex to find out what it would do.
+            let given = flag_value(&args, 3, "--config").map(PathBuf::from);
+            let cfg = resolve_config(vault, given.as_deref())?;
+            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg)
         }
         Some("serve") => serve::serve(),
         Some("models") => {
@@ -2837,7 +3024,7 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None)
+        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None, &Config::default())
     }
 
     #[test]
@@ -3050,7 +3237,7 @@ mod tests {
             .collect();
         let m = model_named(DEFAULT_MODEL).unwrap();
         let vectors = vec![0.0f32; chunks.len() * m.dim];
-        save_index(&semantic_dir(dir, m), m, &chunks, &vectors, files, stamps).unwrap();
+        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps).unwrap();
     }
 
     /// Regression: a run whose only change is a deleted note produced nothing to
@@ -3064,7 +3251,7 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
             .unwrap();
 
         let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
@@ -3084,7 +3271,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
             .unwrap();
         assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
     }
@@ -3110,6 +3297,50 @@ mod tests {
         let other = model_named("e5-large").unwrap();
         assert_ne!(other.dim, model_named(DEFAULT_MODEL).unwrap().dim);
         assert!(load_index(&state_dir(&v), other).is_none());
+    }
+
+    #[test]
+    fn an_excluded_subtree_takes_its_children_with_it() {
+        let text = "#+title: T\n* Public\nordinary prose here\n\
+                    * Private :noexport:\nsecret prose here\n\
+                    ** Deeper\nstill under the excluded parent\n";
+        let c = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &Config::default());
+        let texts: Vec<&str> = c.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts.len(), 1, "only the public section survives: {texts:?}");
+        assert!(texts[0].contains("ordinary"));
+
+        // The exclusion is inherited, so it is the child that proves it works:
+        // a per-heading rule would have kept "Deeper".
+        let keep = Config { exclude_tags: vec![] };
+        let all = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &keep);
+        assert_eq!(all.len(), 3, "and nothing is dropped when nothing is excluded");
+    }
+
+    #[test]
+    fn a_policy_is_compared_by_meaning_not_by_bytes() {
+        let a: Config = serde_json::from_str(r#"{"exclude_tags":["noexport","ARCHIVE"]}"#).unwrap();
+        let b: Config =
+            serde_json::from_str(r#"{"exclude_tags":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
+        assert_eq!(a.hash(), b.hash(), "order and duplicates must not force a rebuild");
+        assert_eq!(a.hash(), Config::default().hash(), "restating the defaults is free");
+        assert_ne!(a.hash(), Config { exclude_tags: vec![] }.hash(), "a real change is seen");
+
+        // A typo must not be a setting that silently does nothing.
+        assert!(serde_json::from_str::<Config>(r#"{"exclude_tag":["x"]}"#).is_err());
+    }
+
+    #[test]
+    fn a_changed_policy_is_refused_and_names_what_moved() {
+        let old = Config::default();
+        let new = Config { exclude_tags: vec![] };
+        assert!(check_config(Some(old.hash()), &old, Some(&old), "semantic").is_ok());
+        let err = check_config(Some(old.hash()), &new, Some(&old), "semantic")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exclude_tags"), "names the setting: {err}");
+        assert!(err.contains("--full"), "and how to proceed: {err}");
+        // Nothing stored yet is not a mismatch.
+        assert!(check_config(None, &new, None, "semantic").is_ok());
     }
 
     #[test]
@@ -3199,6 +3430,7 @@ mod tests {
         save_index(
             &semantic_dir(&v, other),
             other,
+            &Config::default(),
             &[],
             &[],
             Default::default(),
@@ -3276,7 +3508,7 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
             .unwrap();
 
         let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
@@ -3356,7 +3588,7 @@ mod tests {
 
     #[test]
     fn chunks_store_a_vault_relative_path() {
-        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None);
+        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None, &Config::default());
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
 
@@ -3535,6 +3767,7 @@ mod tests {
             "N.org",
             "#+title: T\n* English part\nalpha\n\n# ltex: language=de-DE\n* Deutscher Teil\nbeta\n",
             Some(&cfg),
+            &Config::default(),
         );
         let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
         assert_eq!(by("alpha").lang, "en-US", "the configured default");
@@ -3544,7 +3777,7 @@ mod tests {
     #[test]
     fn the_default_language_is_configurable() {
         let cfg = LangConfig::parse("it-IT");
-        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg));
+        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg), &Config::default());
         assert_eq!(c[0].lang, "it-IT");
     }
 
@@ -3686,6 +3919,7 @@ mod tests {
             "de.org",
             "#+title: Notiz\n* Abschnitt\nDie Wörter der deutschen Sprache sind manchmal sehr lang\n",
             Some(&cfg),
+            &Config::default(),
         );
         assert_eq!(de[0].lang, "de");
         let en = chunk_file(
@@ -3693,6 +3927,7 @@ mod tests {
             "en.org",
             "#+title: Note\n* Section\nThe damped oscillations of a trapped atom in the tweezer\n",
             Some(&cfg),
+            &Config::default(),
         );
         assert_eq!(en[0].lang, "en");
     }
@@ -3707,6 +3942,7 @@ mod tests {
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n             # ltex: language=it-IT\n* Two\nThe text here is still English but declared Italian\n",
             Some(&cfg),
+            &Config::default(),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
@@ -3724,6 +3960,7 @@ mod tests {
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n# ltex: language=it-IT\n* Two\nQuesto paragrafo dichiara la propria lingua\n",
             Some(&cfg),
+            &Config::default(),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
@@ -3739,6 +3976,7 @@ mod tests {
             "n.org",
             "#+title: N\n* One\nPlain English body text here\n\n# ltex: language=de-DE\n* Two\nDieser Abschnitt ist auf Deutsch geschrieben\n",
             Some(&cfg),
+            &Config::default(),
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("Plain").lang, "en-US");
@@ -3751,14 +3989,14 @@ mod tests {
         // would file the chunk under a language nothing ever searches.  The
         // first configured language is the vault's default and takes over.
         let body = "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
-        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")));
+        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")), &Config::default());
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
-        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")));
+        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")), &Config::default());
         assert_eq!(single[0].lang, "en-US");
 
         // Under `auto` there is no configured default, so it is classified.
-        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")));
+        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")), &Config::default());
         assert_eq!(auto[0].lang, "en");
     }
 }
