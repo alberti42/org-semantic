@@ -1961,7 +1961,12 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
 /// A note that matches a query tends to match it in several places, and a flat
 /// top-k then spends every slot on one document.  Each note appears once, at
 /// the rank of its best chunk, with its other matching sections beneath it.
-fn report(scored: &[(f32, &Chunk)], k: usize) {
+/// The hits to show, grouped by note: at most K notes, at most
+/// `SECTIONS_PER_NOTE` passages from each.
+///
+/// Shared by the human report and the JSON output so the two can never disagree
+/// about what was found — only about how it is written down.
+fn select<'a>(scored: &[(f32, &'a Chunk)], k: usize) -> Vec<(String, Vec<(f32, &'a Chunk)>)> {
     let mut notes: Vec<(String, Vec<(f32, &Chunk)>)> = Vec::new();
     for (score, c) in scored {
         let path = &c.path;
@@ -1978,6 +1983,45 @@ fn report(scored: &[(f32, &Chunk)], k: usize) {
             }
         }
     }
+    notes
+}
+
+/// Everything an editor needs to show a hit and jump to it, without parsing
+/// anything: an absolute path so it need not know where the vault is, the
+/// `:ID:` when there is one so it can jump through `org-id` and survive the note
+/// moving, and the line as the fallback when there is not.
+fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize) -> serde_json::Value {
+    let hits: Vec<serde_json::Value> = select(scored, k)
+        .iter()
+        .flat_map(|(_, hits)| hits.iter())
+        .map(|(score, c)| {
+            let (title, section) = match c.heading.split_once(" > ") {
+                Some((t, rest)) => (t, Some(rest)),
+                None => (c.heading.as_str(), None),
+            };
+            serde_json::json!({
+                "score": score,
+                "path": c.path,
+                "file": vault.join(&c.path),
+                "line": c.line,
+                "id": c.id,
+                "title": title,
+                "section": section,
+                "heading": c.heading,
+                "tags": c.tags,
+                "todo": c.todo,
+                "priority": c.priority.map(|p| p.to_string()),
+                // Null rather than "" on semantic hits, which carry no language.
+                "lang": (!c.lang.is_empty()).then_some(&c.lang),
+                "text": c.text,
+            })
+        })
+        .collect();
+    serde_json::json!({ "hits": hits })
+}
+
+fn report(scored: &[(f32, &Chunk)], k: usize) {
+    let notes = select(scored, k);
 
     for (path, hits) in &notes {
         let (best, c) = hits[0];
@@ -2058,7 +2102,7 @@ fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static M
     }
 }
 
-fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>) -> Result<()> {
+fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>, json: bool) -> Result<()> {
     let m = choose_index(vault, want)?;
     let dir = semantic_dir(vault, m);
     let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
@@ -2085,7 +2129,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>)
         return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
     }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&chunks[i])).collect();
-    if !f.is_empty() {
+    if !f.is_empty() && !json {
         println!(
             "filter: {} → {} of {n} chunks",
             describe_filters(&f),
@@ -2093,7 +2137,13 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>)
         );
     }
     if candidates.is_empty() {
-        println!("no chunk matches those filters");
+        // No match is an answer, not an error: a caller reading JSON gets an
+        // empty list rather than prose it would have to recognise.
+        if json {
+            println!("{}", hits_json(vault, &[], k));
+        } else {
+            println!("no chunk matches those filters");
+        }
         return Ok(());
     }
     if f.text.trim().is_empty() {
@@ -2123,7 +2173,12 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>)
     scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let search = t2.elapsed();
 
-    report(&scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect::<Vec<_>>(), k);
+    let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
+    if json {
+        println!("{}", hits_json(vault, &hits, k));
+        return Ok(());
+    }
+    report(&hits, k);
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -2369,6 +2424,7 @@ fn cmd_lexical(
     k: usize,
     conjunction: bool,
     fold: bool,
+    json: bool,
 ) -> Result<()> {
     let dir = state_dir(vault);
     // The analyzer comes from the index's own metadata, not from the corpus:
@@ -2387,7 +2443,7 @@ fn cmd_lexical(
     }
 
     let f = parse_query(query);
-    if !f.is_empty() {
+    if !f.is_empty() && !json {
         println!("filter: {}", describe_filters(&f));
     }
     let t = Instant::now();
@@ -2396,11 +2452,16 @@ fn cmd_lexical(
     // every other note.
     let hits = lexical::search(&dir, &f, (k * 25).max(100), conjunction, &analyzer)?;
     let el = t.elapsed();
+    let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
+    if json {
+        println!("{}", hits_json(vault, &hits, k));
+        return Ok(());
+    }
     if hits.is_empty() {
         println!("no match");
         return Ok(());
     }
-    report(&hits.iter().map(|(s, c)| (*s, c)).collect::<Vec<_>>(), k);
+    report(&hits, k);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
@@ -2466,9 +2527,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("search") => {
-            let vault = args
-                .get(2)
-                .ok_or_else(|| anyhow!("usage: search <vault> <query> [k] [--lexical]"))?;
+            let vault = vault_arg(&args, "search <vault> <query> [k] [--lexical] [--json]")?;
             let query = args
                 .get(3)
                 .ok_or_else(|| anyhow!("usage: search <vault> <query> [k] [--lexical]"))?;
@@ -2477,6 +2536,9 @@ fn main() -> Result<()> {
             // not the same as a fused result list: `--lexical` returns purely
             // word-ranked hits, `search` alone purely meaning-ranked ones.
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
+            // Structured output for an editor: the same hits, without prose to
+            // parse back out.
+            let json = args.iter().skip(4).any(|a| a == "--json");
             // Selects which index to search when several models are built.
             let want = match args.iter().skip(4).position(|a| a == "--model") {
                 Some(i) => Some(model_named(args.get(i + 5).map(String::as_str).unwrap_or(""))?),
@@ -2485,9 +2547,9 @@ fn main() -> Result<()> {
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
                 let fold = args.iter().skip(4).any(|a| a == "--fold");
-                cmd_lexical(Path::new(vault), query, k, conjunction, fold)
+                cmd_lexical(vault, query, k, conjunction, fold, json)
             } else {
-                cmd_search(Path::new(vault), query, k, want)
+                cmd_search(vault, query, k, want, json)
             }
         }
         Some("chunks") => {
