@@ -1,7 +1,7 @@
 # org-semantic
 
-Semantic search over a tree of org-mode notes. One static binary, no server, no
-database, no Python.
+Search a tree of org-mode notes by meaning or by words. One static binary, no
+database, no Python, nothing listening on a port.
 
 ```console
 $ org-semantic index ~/notes
@@ -85,12 +85,13 @@ package manager. The BGE-small-en-v1.5 model downloads on first use to
 org-semantic index   <dir> [--full|--rehash] [--model NAME]   semantic index
 org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
-org-semantic search  <dir> <query> [k]        ranked by meaning; --lexical by words
-org-semantic search  <dir> <query> [k] [--lexical [--any] [--fold]]
+org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
+org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
 org-semantic chunks  <dir> <path-substring>    show chunking decisions, no embedding
 org-semantic tokens  <dir> [limit]             token-length distribution of the corpus
+org-semantic models  [dir]                     models, and which are built here
+org-semantic serve                             JSON-RPC over stdio, for an editor
 org-semantic bench   <dir> [n] [config]        embedding throughput
-org-semantic models                            embedding models available
 ```
 
 ### Driving it from an editor
@@ -416,30 +417,59 @@ another vault is a different argument, not a different configuration.
 
 ## Status
 
-Early, and useful. It indexes an org tree, searches it, and updates
-incrementally.
+Early, and useful. It indexes an org tree, searches it by meaning and by words,
+updates incrementally, and speaks JSON — over `--json` for one-shot calls and
+over `serve` for an editor holding a session open.
 
-The roadmap is org depth rather than more formats: honouring `:noexport:` and
-archived subtrees; treating `#+begin_src` blocks distinctly, since code embedded
-as prose pollutes results; and an Emacs command that jumps to a hit.
+**The editor side is the open piece.** Everything it needs exists: structured
+hits with an absolute path, a line and an `:ID:`, and a resident process that
+answers in ~10 ms. What is missing is the client itself — no elisp is written
+yet, and jumping to a hit is still a manual `find-file`.
+
+The rest of the roadmap is org depth rather than more formats: honouring
+`:noexport:` and archived subtrees, and treating `#+begin_src` blocks distinctly,
+since code embedded as prose pollutes results.
 
 Known gaps. The two modes are not fused into a single ranking — deliberately,
 since a phrase or a boolean means nothing to an embedding, so a combined result
-list would mix hits that honoured your query with hits that could not. If that
-is ever added it should be a third subcommand using reciprocal rank fusion, and
-only once there is evidence it beats picking the right mode. Auto language
-detection mislabels about 4% of chunks on a code-heavy vault. Re-split pieces of
-a long section share their section's line number.
+list would mix hits that honoured your query with hits that could not. If that is
+ever added it should be a third mode using reciprocal rank fusion, and only once
+there is evidence it beats picking the right one. Auto language detection is
+right on prose and guesses on notes that are almost entirely attachment links or
+shell snippets — 0.4% of chunks on the reference vault, and none once the
+languages are named with `--lang`. Re-split pieces of a long section share their
+section's line number.
 
 ## Prior art
 
+### markdown-vdb
+
 [markdown-vdb](https://github.com/geckse/markdown-vdb) reaches a very similar
 architecture for Markdown — filesystem-native, CLI-first, no server.
+
+### mdvault and markdown-vault-mcp
+
 [mdvault](https://pypi.org/project/mdvault/) and
 [markdown-vault-mcp](https://github.com/pvliesdonk/markdown-vault-mcp) combine
 BM25/FTS5 with semantic search into one ranking; org-semantic has both but keeps
 them as separate commands, for the reason given under Status. All three are
 Markdown-first; org-semantic exists because none of them parse org.
+
+[org-supertag](https://github.com/yibie/org-supertag) is org-native and shares
+the same instincts — local-first, no server, no Python, `:ID:`-addressed,
+incremental on `(mtime, hash)` — but solves the opposite problem. It turns
+`#tag` headings into a *structured database*: you define fields once (a `#paper`
+has `authors`, `year`, `status`), fill them through spreadsheet and Kanban
+views, and query with an S-expression DSL over tags and fields — `(and (tag
+"task") (not (field "status" "done")))`. That answers *"all unread papers rated
+≥4"*, a question about structure you authored. org-semantic answers *"notes
+about X"* where you tagged nothing and don't know the words — a question about
+meaning, needing no schema. org-supertag has no embeddings; org-semantic keeps
+no database and never writes to your notes. They are complementary rather than
+competing, over the same vault: org-supertag could even maintain the `#tag`
+markers org-semantic reads as `tag:` predicates. If you want structured views
+and a query language, reach for it; if you want to find the note you can't name
+from a cold pile of prose, reach here.
 
 ## Licence
 

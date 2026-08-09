@@ -2,7 +2,7 @@
 name = "org-semantic"
 version = "0.1.0"
 edition = "2021"
-description = "Semantic search over a tree of org-mode notes. One static binary, no server, no database, no Python."
+description = "Search a tree of org-mode notes by meaning or by words. One static binary, no database, no Python."
 license = "MIT"
 repository = "https://github.com/alberti42/org-semantic"
 authors = ["Andrea Alberti <a.alberti82@gmail.com>"]
