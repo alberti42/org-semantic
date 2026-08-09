@@ -205,15 +205,28 @@ Methods:
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
 an absolute =file=, the =heading= path, the =line=, and the =:ID:= when there is
-one. All four are anchors on the same passage, and which to prefer is the
-client's call, not this tool's --- so all four are sent and none is privileged:
+one.
 
-| anchor    | exact                                    | costs                                    |
-|-----------+------------------------------------------+------------------------------------------|
-| =line=    | yes, when the index matches the buffer   | drifts if text was inserted above it     |
-| =heading= | to the node                              | a search, and repeated headings are ambiguous |
-| =id=      | index-independent; org resolves it alone | only as precise as the outline is annotated, and many vaults have none |
-| =file=    | the note                                 | --- always needed, never sufficient      |
+*The address of a hit is =path= and =line=.* =path= is relative to the vault
+root --- the directory holding =.org-semantic= --- which identifies the note
+uniquely and survives the whole tree being moved; =file= is the same thing made
+absolute, for convenience. =line= is the line of the *heading that owns the
+passage*, so jumping there lands on the heading itself and org can take it from
+there: the section, its subtree, its properties. Nothing needs to be matched
+against a string we stored.
+
+=heading= is for showing the hit in a result list, and is part of what was
+embedded. It is not a navigation anchor --- deriving the section from the buffer
+is both cheaper and more accurate than searching for the text of a heading that
+may since have been edited.
+
+=id= is an extra for the vaults that carry them.
+
+One consequence of =line= naming the node: a section long enough to be divided
+yields several passages that all report the same =path= and =line=. They are
+distinct hits with distinct =text=, at one address. If a client wants to put
+point on the passage rather than the section, =text= is what locates it inside
+the subtree.
 
 One trap if you build an org link to the heading rather than jumping yourself:
 =org-link-search= prompts /"Create new heading?"/ when it misses, which over
