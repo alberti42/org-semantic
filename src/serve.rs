@@ -25,6 +25,9 @@ struct Semantic {
     which: &'static Model,
     chunks: Vec<Chunk>,
     vectors: Vec<f32>,
+    /// Computed once when the index is loaded — a few milliseconds there rather
+    /// than on every keystroke.
+    baseline: Option<Baseline>,
 }
 
 /// One vault's lexical index: only the analyzer needs caching, since tantivy
@@ -62,7 +65,9 @@ impl Server {
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect();
             let model = model_with(m.which.clone(), None, false)?;
-            self.semantic.insert(key.clone(), Semantic { model, which: m, chunks, vectors });
+            let baseline = Baseline::of(&vectors, m.dim);
+            self.semantic
+                .insert(key.clone(), Semantic { model, which: m, chunks, vectors, baseline });
         }
         Ok(self.semantic.get_mut(&key).expect("just inserted"))
     }
@@ -104,7 +109,8 @@ impl Server {
             let a = &self.lexical(&vault)?.analyzer;
             let hits = lexical::search(&state_dir(&vault), &f, (k * 25).max(100), conjunction, a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
-            return Ok(hits_json(&vault, &hits, k));
+            // BM25 has no noise floor to standardise against.
+            return Ok(hits_json(&vault, &hits, k, None));
         }
 
         if !f.langs.is_empty() {
@@ -136,7 +142,7 @@ impl Server {
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &s.chunks[*i])).collect();
-        Ok(hits_json(&vault, &hits, k))
+        Ok(hits_json(&vault, &hits, k, s.baseline))
     }
 
     /// What a vault has, so an editor can offer the right commands and say why

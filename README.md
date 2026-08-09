@@ -136,6 +136,34 @@ moved or renamed.
 An empty query returns no hits rather than an error, so it is safe to send on
 every keystroke; debouncing is the editor's policy, not the server's.
 
+### Scores, and why the raw one is not worth showing
+
+Every hit carries `score` (raw cosine) and `z`. **Prefer `z`.**
+
+These embeddings are strongly anisotropic — they nearly all point the same way.
+Averaging every unit vector in a 951-note vault leaves something 75% of unit
+length under `bge-small-en` and 90% under `e5-small`, so *unrelated* chunks
+already score 0.563 and 0.801 respectively. The raw number is mostly that
+constant offset, and it is not comparable between models:
+
+| | raw | z |
+|---|---|---|
+| `bge-small-en`, top hit | 0.755 | 2.52σ |
+| `e5-small`, top hit | 0.883 | 2.17σ |
+
+`z` is how far above the corpus's own noise floor a hit sits, in that corpus's
+standard deviations. The two models disagree by 0.13 on the raw scale and land in
+the same place on this one. It also exposes weak hits that look respectable: a
+0.826 under E5 is only 0.66σ.
+
+The floor is measured from the vectors themselves — 20k sampled pairs, ~37 ms
+when an index is loaded and cached thereafter — rather than stored, so it cannot
+drift from the vectors it describes. Lexical hits have `z: null`: BM25 is
+unbounded and has no such floor.
+
+**No threshold is ever applied.** `z` is presentation; what to do with it is the
+caller's business.
+
 ### Choosing an embedding model
 
 ```console

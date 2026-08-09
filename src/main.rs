@@ -1964,6 +1964,65 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
 /// A note that matches a query tends to match it in several places, and a flat
 /// top-k then spends every slot on one document.  Each note appears once, at
 /// the rank of its best chunk, with its other matching sections beneath it.
+/// The corpus's own noise floor under one model: the mean and spread of the
+/// cosine between chunks that have nothing to do with each other.
+///
+/// Reported alongside the raw score because a raw cosine means nothing on its
+/// own — these embeddings are strongly anisotropic, so *every* pair scores high.
+/// Measured on a 951-note vault: unrelated chunks average 0.563 under
+/// `bge-small-en` and 0.801 under `e5-small`, and the mean vector of the whole
+/// corpus keeps 75% and 90% of unit length respectively.  Expressed in units of
+/// this floor the two models agree — a top hit is ~2.2σ under either — where
+/// their raw scores (0.755 and 0.883) share no scale at all.
+///
+/// Derived from the vectors and never stored: it costs a few milliseconds to
+/// recompute, it cannot go stale that way, and storing it would mean a format
+/// bump and a full re-embed for a number that is only ever displayed.
+#[derive(Clone, Copy)]
+struct Baseline {
+    mean: f32,
+    sd: f32,
+}
+
+impl Baseline {
+    /// Sampled rather than exhaustive: 20k pairs settle the mean to ~3 decimal
+    /// places and all-pairs would be 18M dot products.  Deterministically
+    /// seeded, so the same index always reports the same figure.
+    fn of(vectors: &[f32], dim: usize) -> Option<Baseline> {
+        let n = vectors.len() / dim;
+        if n < 3 {
+            return None;
+        }
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 33) as usize
+        };
+        let samples = 20_000.min(n * n);
+        let mut cs: Vec<f32> = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let (a, b) = (next() % n, next() % n);
+            if a == b {
+                continue;
+            }
+            let (x, y) = (&vectors[a * dim..(a + 1) * dim], &vectors[b * dim..(b + 1) * dim]);
+            cs.push(x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>());
+        }
+        if cs.len() < 2 {
+            return None;
+        }
+        let mean = cs.iter().sum::<f32>() / cs.len() as f32;
+        let var = cs.iter().map(|c| (c - mean) * (c - mean)).sum::<f32>() / cs.len() as f32;
+        Some(Baseline { mean, sd: var.sqrt().max(f32::EPSILON) })
+    }
+
+    fn z(&self, score: f32) -> f32 {
+        (score - self.mean) / self.sd
+    }
+}
+
 /// The hits to show, grouped by note: at most K notes, at most
 /// `SECTIONS_PER_NOTE` passages from each.
 ///
@@ -1993,7 +2052,7 @@ fn select<'a>(scored: &[(f32, &'a Chunk)], k: usize) -> Vec<(String, Vec<(f32, &
 /// anything: an absolute path so it need not know where the vault is, the
 /// `:ID:` when there is one so it can jump through `org-id` and survive the note
 /// moving, and the line as the fallback when there is not.
-fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize) -> serde_json::Value {
+fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize, base: Option<Baseline>) -> serde_json::Value {
     let hits: Vec<serde_json::Value> = select(scored, k)
         .iter()
         .flat_map(|(_, hits)| hits.iter())
@@ -2004,6 +2063,11 @@ fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], k: usize) -> serde_json::Va
             };
             serde_json::json!({
                 "score": score,
+                // How far above the corpus's own noise floor, in its standard
+                // deviations.  Comparable across models and queries where the
+                // raw score is not.  Null for lexical hits: BM25 is unbounded
+                // and has no such floor.
+                "z": base.map(|b| b.z(*score)),
                 "path": c.path,
                 "file": vault.join(&c.path),
                 "line": c.line,
@@ -2143,7 +2207,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>,
         // No match is an answer, not an error: a caller reading JSON gets an
         // empty list rather than prose it would have to recognise.
         if json {
-            println!("{}", hits_json(vault, &[], k));
+            println!("{}", hits_json(vault, &[], k, None));
         } else {
             println!("no chunk matches those filters");
         }
@@ -2178,7 +2242,7 @@ fn cmd_search(vault: &Path, query: &str, k: usize, want: Option<&'static Model>,
 
     let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
     if json {
-        println!("{}", hits_json(vault, &hits, k));
+        println!("{}", hits_json(vault, &hits, k, Baseline::of(&vectors, m.dim)));
         return Ok(());
     }
     report(&hits, k);
@@ -2457,7 +2521,9 @@ fn cmd_lexical(
     let el = t.elapsed();
     let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
     if json {
-        println!("{}", hits_json(vault, &hits, k));
+        // No baseline: BM25 scores are unbounded, so there is nothing to
+        // standardise them against.
+        println!("{}", hits_json(vault, &hits, k, None));
         return Ok(());
     }
     if hits.is_empty() {
@@ -2959,6 +3025,32 @@ mod tests {
         assert_ne!(bge, e5);
         assert!(bge.ends_with("models--Xenova--bge-small-en-v1.5"), "{bge:?}");
         assert!(e5.ends_with("models--intfloat--multilingual-e5-small"), "{e5:?}");
+    }
+
+    #[test]
+    fn the_baseline_is_the_corpus_noise_floor() {
+        // Orthonormal vectors: every unrelated pair scores exactly 0, so the
+        // floor is 0 and a perfect match stands far above it.
+        let dim = 8;
+        let mut v = vec![0.0f32; dim * dim];
+        for i in 0..dim {
+            v[i * dim + i] = 1.0;
+        }
+        let b = Baseline::of(&v, dim).unwrap();
+        assert!(b.mean.abs() < 1e-6, "an orthogonal corpus has a zero floor: {}", b.mean);
+        assert!(b.z(1.0) > 100.0, "and a perfect match towers over it");
+
+        // Every vector pointing the same way is anisotropy in miniature: the
+        // floor sits at 1.0, so a perfect match is worth nothing above it —
+        // which is why the raw score alone says so little.
+        let mut same = Vec::new();
+        for _ in 0..dim {
+            same.push(1.0f32);
+            same.extend(std::iter::repeat(0.0).take(dim - 1));
+        }
+        let b2 = Baseline::of(&same, dim).unwrap();
+        assert!((b2.mean - 1.0).abs() < 1e-6, "floor at 1.0: {}", b2.mean);
+        assert!(b2.z(1.0).abs() < 1.0, "nothing stands out: {}", b2.z(1.0));
     }
 
     #[test]
