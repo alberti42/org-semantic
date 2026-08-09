@@ -350,7 +350,7 @@ The whole policy lives in a file you own, named with `--config`:
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
-  "exclude_tags": ["noexport", "ARCHIVE"]
+  "exclude_tagged": ["noexport", "ARCHIVE"]
 }
 ```
 
@@ -382,7 +382,7 @@ takes minutes, so the tool says what moved and waits:
 ```console
 $ org-semantic index ~/notes --both --config ~/notes/indexing.json
 Error: the semantic index was built under a different policy —
-       exclude_tags: was [ARCHIVE, noexport], now []
+       exclude_tagged: was [ARCHIVE, noexport], now []
        pass --full to rebuild under the new one, or restore the previous setting
 ```
 

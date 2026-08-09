@@ -424,15 +424,16 @@ struct Config {
     fold_diacritics: bool,
     /// What to do with each kind of block.
     blocks: Blocks,
-    /// Subtrees carrying any of these tags are not indexed.  `noexport` is org's
-    /// own "not for consumption" marker and `ARCHIVE` its "put this away"; both
+    /// Anything tagged with one of these is not indexed — the tag names what to
+    /// leave out, not what to strip from the index.  `noexport` is org's own
+    /// "not for consumption" marker and `ARCHIVE` its "put this away"; both
     /// inherit down the outline, which is what makes this a subtree rule rather
     /// than a per-heading one.
     ///
     /// Unknown keys are rejected rather than ignored, for the same reason
     /// unknown flags are: a typo that does nothing looks exactly like a setting
     /// that does nothing.
-    exclude_tags: Vec<String>,
+    exclude_tagged: Vec<String>,
 }
 
 impl Default for Config {
@@ -441,7 +442,7 @@ impl Default for Config {
             languages: vec!["en-US".into()],
             fold_diacritics: false,
             blocks: Blocks::default(),
-            exclude_tags: vec!["noexport".into(), "ARCHIVE".into()],
+            exclude_tagged: vec!["noexport".into(), "ARCHIVE".into()],
         }
     }
 }
@@ -450,10 +451,10 @@ impl Config {
     /// The bytes the hash is taken over: defaults filled in, lists sorted and
     /// deduplicated, so two configs that *mean* the same thing agree.
     fn canonical(&self) -> String {
-        let mut tags = self.exclude_tags.clone();
+        let mut tags = self.exclude_tagged.clone();
         tags.sort();
         tags.dedup();
-        serde_json::to_string(&Config { exclude_tags: tags, ..self.clone() }).unwrap_or_default()
+        serde_json::to_string(&Config { exclude_tagged: tags, ..self.clone() }).unwrap_or_default()
     }
 
     const KINDS: [&'static str; 5] = ["src", "example", "results", "quote", "verse"];
@@ -464,7 +465,7 @@ impl Config {
     /// so changing it must not force a re-embed.  A single hash over the whole
     /// config made every lexical-only edit cost minutes on the semantic side.
     fn hash_for(&self, target: Target) -> u64 {
-        let mut tags = self.exclude_tags.clone();
+        let mut tags = self.exclude_tagged.clone();
         tags.sort();
         tags.dedup();
         // Excluded subtrees are the one setting both indexes share.
@@ -490,7 +491,7 @@ impl Config {
 
     /// Does a chunk carrying TAGS fall outside what should be indexed?
     fn excluded(&self, tags: &[String]) -> bool {
-        tags.iter().any(|t| self.exclude_tags.iter().any(|x| x.eq_ignore_ascii_case(t)))
+        tags.iter().any(|t| self.exclude_tagged.iter().any(|x| x.eq_ignore_ascii_case(t)))
     }
 
     fn read(path: &Path) -> Result<Config> {
@@ -511,7 +512,7 @@ impl Config {
     fn differences(&self, other: &Config, target: Target) -> Vec<String> {
         let mut out = Vec::new();
         let canon = |c: &Config| {
-            let mut t = c.exclude_tags.clone();
+            let mut t = c.exclude_tagged.clone();
             t.sort();
             t.dedup();
             t
@@ -519,7 +520,7 @@ impl Config {
         let (mine, theirs) = (canon(self), canon(other));
         if mine != theirs {
             out.push(format!(
-                "exclude_tags: was [{}], now [{}]",
+                "exclude_tagged: was [{}], now [{}]",
                 theirs.join(", "),
                 mine.join(", ")
             ));
@@ -3626,7 +3627,7 @@ mod tests {
 
         // The exclusion is inherited, so it is the child that proves it works:
         // a per-heading rule would have kept "Deeper".
-        let keep = Config { exclude_tags: vec![], ..Config::default() };
+        let keep = Config { exclude_tagged: vec![], ..Config::default() };
         let all = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &keep, Target::Semantic);
         assert_eq!(all.len(), 3, "and nothing is dropped when nothing is excluded");
     }
@@ -3668,15 +3669,15 @@ mod tests {
 
     #[test]
     fn a_policy_is_compared_by_meaning_not_by_bytes() {
-        let a: Config = serde_json::from_str(r#"{"exclude_tags":["noexport","ARCHIVE"]}"#).unwrap();
+        let a: Config = serde_json::from_str(r#"{"exclude_tagged":["noexport","ARCHIVE"]}"#).unwrap();
         let b: Config =
-            serde_json::from_str(r#"{"exclude_tags":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
+            serde_json::from_str(r#"{"exclude_tagged":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
         for t in [Target::Semantic, Target::Lexical] {
             assert_eq!(a.hash_for(t), b.hash_for(t), "order and duplicates are not changes");
             assert_eq!(a.hash_for(t), Config::default().hash_for(t), "restating defaults is free");
             assert_ne!(
                 a.hash_for(t),
-                Config { exclude_tags: vec![], ..Config::default() }.hash_for(t),
+                Config { exclude_tagged: vec![], ..Config::default() }.hash_for(t),
                 "a real change is seen"
             );
         }
@@ -3710,13 +3711,13 @@ mod tests {
     #[test]
     fn a_changed_policy_is_refused_and_names_what_moved() {
         let old = Config::default();
-        let new = Config { exclude_tags: vec![], ..Config::default() };
+        let new = Config { exclude_tagged: vec![], ..Config::default() };
         let t = Target::Semantic;
         assert!(check_config(Some(old.hash_for(t)), &old, Some(&old), t).is_ok());
         let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("exclude_tags"), "names the setting: {err}");
+        assert!(err.contains("exclude_tagged"), "names the setting: {err}");
         assert!(err.contains("--full"), "and how to proceed: {err}");
         // Nothing stored yet is not a mismatch.
         assert!(check_config(None, &new, None, t).is_ok());
@@ -3734,7 +3735,7 @@ mod tests {
 
         // Reordering a list is not a change, and must not be reported as one.
         let reordered = Config {
-            exclude_tags: vec!["ARCHIVE".into(), "noexport".into()],
+            exclude_tagged: vec!["ARCHIVE".into(), "noexport".into()],
             ..Config::default()
         };
         assert!(
