@@ -1831,6 +1831,11 @@ fn cmd_index_lexical(
 #[derive(Serialize, Default)]
 struct IndexReport {
     files: usize,
+    /// Chunks **written by this run**, which differs by index because they
+    /// update differently: the semantic index rewrites `chunks.json` wholesale,
+    /// so this is the whole index; the lexical one replaces only the notes that
+    /// changed, so a run that merely drops a deleted note writes none.  Neither
+    /// is "the size of the index" — ask `status` for that.
     chunks: usize,
     embedded: usize,
     /// Present only for the semantic index.
