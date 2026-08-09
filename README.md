@@ -398,12 +398,13 @@ Those values are the defaults, so the block above describes what you get with no
 config at all.
 
 ```sh
+cp config.example.json ~/notes/indexing.json     # then edit it
 org-semantic index ~/notes --both --config ~/notes/indexing.json
 ```
 
-**The policy is sticky.** Once given it is cached, so later runs need not restate
-it — forgetting the flag is safe, which is the property that makes a sticky
-setting tolerable. It is compared by *meaning*, not by bytes: key order,
+**The policy is sticky.** Once given it is cached, so later runs need not repeat
+`--config` — forgetting it is safe, which is what makes a sticky setting
+tolerable. It is compared by *meaning*, not by bytes: key order,
 whitespace and duplicates all hash the same, and a file that merely restates the
 defaults is indistinguishable from no file at all.
 
