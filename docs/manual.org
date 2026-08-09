@@ -8,8 +8,8 @@
 #+html: <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-dea584.svg"/></a>
 
 Search a tree of org-mode notes by meaning or by words. One static binary, no
-database, no Python. It runs as a one-shot command, or stays resident for an
-editor --- over a pipe, never a port.
+database, no Python. It runs as a one-shot command, or stays resident for Emacs
+--- over a pipe, never a port.
 
 #+begin_src console
 $ org-semantic index ~/notes --both
@@ -150,12 +150,18 @@ Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
 #+end_example
 
-** Driving it from an editor
+** Driving it from Emacs, or anything else
 :PROPERTIES:
 :CUSTOM_ID: driving-it-from-an-editor
 :END:
-=search --json= returns the hits as data rather than prose, and =serve= keeps a
-process alive so a query costs milliseconds instead of a model load:
+org-semantic was designed to sit behind Emacs, and that is what the Emacs package
+will use. Nothing in it is Emacs-specific, though: =search --json= returns the
+hits as data rather than prose, and =serve= speaks JSON-RPC over a pipe, so any
+program that can start a process and write to its standard input can drive it ---
+another editor, a script, or an agent doing retrieval before it answers.
+
+=serve= keeps the process alive, so a query costs milliseconds instead of a model
+load:
 
 #+begin_src console
 $ org-semantic serve        # JSON-RPC 2.0 over stdio, LSP framing
@@ -669,12 +675,12 @@ another vault is a different argument, not a different configuration.
 :END:
 Early, and useful. It indexes an org tree, searches it by meaning and by words,
 updates incrementally, and speaks JSON --- over =--json= for one-shot calls and
-over =serve= for an editor holding a session open.
+over =serve= for a caller holding a session open.
 
-*The editor side is the open piece.* Everything it needs exists: structured
-hits with an absolute path, a line and an =:ID:=, and a resident process that
-answers in ~10 ms. What is missing is the client itself --- no elisp is written
-yet, and jumping to a hit is still a manual =find-file=.
+*The Emacs package is the open piece, and is coming.* Everything it needs
+exists: structured hits with an absolute path, a line and an =:ID:=, and a
+resident process that answers in ~10 ms. What is missing is the client itself ---
+no elisp is written yet, so for now jumping to a hit is a manual =find-file=.
 
 The rest of the roadmap is org depth rather than more formats: honouring
 =:noexport:= and archived subtrees, and treating =#+begin_src= blocks distinctly,

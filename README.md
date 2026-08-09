@@ -1,8 +1,8 @@
 # org-semantic
 
 Search a tree of org-mode notes by meaning or by words. One static binary, no
-database, no Python. It runs as a one-shot command, or stays resident for an
-editor — over a pipe, never a port.
+database, no Python. It runs as a one-shot command, or stays resident for Emacs
+— over a pipe, never a port.
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
@@ -75,7 +75,7 @@ starting from [`config.example.json`](config.example.json).
 - [Why](https://alberti42.github.io/org-semantic/#why) — what else exists, and why this is org-only
 - [Install](https://alberti42.github.io/org-semantic/#install)
 - [Use](https://alberti42.github.io/org-semantic/#use)
-  - [Driving it from an editor](https://alberti42.github.io/org-semantic/#driving-it-from-an-editor) — `--json` and `serve`
+  - [Driving it from Emacs, or anything else](https://alberti42.github.io/org-semantic/#driving-it-from-an-editor) — `--json` and `serve`
   - [Scores](https://alberti42.github.io/org-semantic/#scores-and-why-the-raw-one-is-not-worth-showing) — and why the raw one is not worth showing
   - [Choosing an embedding model](https://alberti42.github.io/org-semantic/#choosing-an-embedding-model) — English or multilingual
   - [Two indexes, built separately](https://alberti42.github.io/org-semantic/#two-indexes-built-separately)
