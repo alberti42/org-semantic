@@ -212,6 +212,41 @@ takes ~95 ms and embeds only that note. The cached vectors and the score baselin
 are refreshed straight after, so the next query cannot answer from what was just
 replaced.
 
+** Letting an agent search for you
+:PROPERTIES:
+:CUSTOM_ID: letting-an-agent-search-for-you
+:END:
+This tool was built so that /you/ can find your own notes. That is the point of
+it, and everything above is about that. What follows is an extension some people
+will want, and nothing depends on it.
+
+An AI assistant answering a question about your work has two options. It can
+answer from what it learnt during training --- which knows nothing of your notes
+--- or it can first go and read the relevant passages from them, and answer with
+those in front of it. The second is called /retrieval-augmented generation/, or
+RAG: retrieve first, then generate. The retrieval half is exactly what
+org-semantic does, and the assistant needs no model of its own to use it, since
+=--json= hands it the passages as data.
+
+The awkward part is usually teaching the assistant when to search and how to read
+what comes back. A short instruction file does that, and one is included:
+
+#+begin_src sh
+cp -R skills/org-semantic ~/.claude/skills/     # Claude Code
+#+end_src
+
+It tells the agent which of the two searches suits which question, that a
+surname is invisible to the semantic index and a paraphrase invisible to the
+lexical one, how to narrow with =tag:= and =dir:=, that /z/ above about 2σ is a
+real match and below 1σ is not, that a lexical score means only "more than the
+ones below it", and that it should ask before spending minutes on an index. The
+file is plain Markdown --- if your assistant takes instructions in some other
+form, it reads as documentation and translates easily.
+
+Your notes stay where they are throughout. org-semantic never modifies them, and
+nothing leaves the machine: the embedding model runs locally, and the only thing
+the assistant sees is the passages it asked for.
+
 ** Scores, and why the raw one is not worth showing
 :PROPERTIES:
 :CUSTOM_ID: scores-and-why-the-raw-one-is-not-worth-showing

@@ -76,6 +76,7 @@ starting from [`config.example.json`](config.example.json).
 - [Install](https://alberti42.github.io/org-semantic/#install)
 - [Use](https://alberti42.github.io/org-semantic/#use)
   - [Driving it from Emacs, or anything else](https://alberti42.github.io/org-semantic/#driving-it-from-an-editor) — `--json` and `serve`
+  - [Letting an agent search for you](https://alberti42.github.io/org-semantic/#letting-an-agent-search-for-you) — RAG, and the skill in [`skills/`](skills/org-semantic/SKILL.md)
   - [Scores](https://alberti42.github.io/org-semantic/#scores-and-why-the-raw-one-is-not-worth-showing) — and why the raw one is not worth showing
   - [Choosing an embedding model](https://alberti42.github.io/org-semantic/#choosing-an-embedding-model) — English or multilingual
   - [Two indexes, built separately](https://alberti42.github.io/org-semantic/#two-indexes-built-separately)
