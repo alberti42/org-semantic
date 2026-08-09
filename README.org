@@ -1,5 +1,6 @@
 #+title: org-semantic — search a tree of org-mode notes by meaning or by words
 #+language: en
+#+description: Semantic and lexical search for a large collection of org-mode notes. One static binary, no server, no database, no Python.
 #+options: toc:2 num:nil author:nil
 #+SETUPFILE: docs/org-html-themes/org/setup/html-theme-readtheorg-local.setup
 
