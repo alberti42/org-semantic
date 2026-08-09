@@ -203,8 +203,19 @@ the same place on this one. It also exposes weak hits that look respectable: a
 
 The floor is measured from the vectors themselves — 20k sampled pairs, ~37 ms
 when an index is loaded and cached thereafter — rather than stored, so it cannot
-drift from the vectors it describes. Lexical hits have `z: null`: BM25 is
-unbounded and has no such floor.
+drift from the vectors it describes.
+
+**Lexical scores are left as they are, and carry no σ.** BM25 has no fixed range:
+a score is a sum over the matched terms, weighted by how rare each is in the
+corpus and damped by document length, so it rises with both the rarity of what
+you asked for and the number of terms that hit. On the same vault, the top hit
+for `atom` scores 11.9, for `LSCOLORS` 21.6, and for `Rabi oscillations` 29.2 —
+which says nothing about which is the better answer to its own question.
+
+So a BM25 number means only "more than the ones below it". It is not comparable
+between queries, between vaults, or with anything on the semantic side, and there
+is no noise floor to standardise it against — hence `z: null` for lexical hits in
+`--json`. Read the ordering, not the value.
 
 Within a single note the passages show raw scores alone: they share the same
 offset, so the only comparison that matters there is between them.
