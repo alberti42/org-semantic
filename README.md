@@ -46,8 +46,8 @@ compares them one by one.
 org-semantic is one 34 MB binary. ONNX Runtime is statically linked; the only
 thing it ever downloads is the embedding model (129 MB, once, into your cache).
 
-**It is org-only.** Knowing the format buys things a format-agnostic tool cannot
-reach:
+**By design, it specialises in org and nothing else.** Parsing one format
+properly buys things a format-agnostic tool cannot reach:
 
 - Property drawers stay out of the embedded text, so `:ID:` and `:MODIFIED:`
   do not dilute a chunk's meaning.
