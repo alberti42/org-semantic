@@ -2926,25 +2926,34 @@ fn cmd_chunks(
     target: Target,
 ) -> Result<()> {
     let tok = tokenizer_for(m)?;
+    println!(
+        "previewing the {} index",
+        match target {
+            Target::Semantic => "semantic",
+            Target::Lexical => "lexical",
+        }
+    );
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
-        let (chunks, _, _) =
-            enforce_token_limit(
-                chunk_file(
-                    f,
-                    &rel_path(vault, f),
-                    &text,
-                    (target == Target::Lexical).then_some(lang),
-                    cfg,
-                    target,
-                ),
-                &measure,
-                TOKEN_LIMIT,
-            );
+        let raw = chunk_file(
+            f,
+            &rel_path(vault, f),
+            &text,
+            (target == Target::Lexical).then_some(lang),
+            cfg,
+            target,
+        );
+        // Only the semantic index re-splits at the token limit; showing a
+        // lexical preview cut the same way would be showing something that
+        // never reaches disk.
+        let chunks = match target {
+            Target::Semantic => enforce_token_limit(raw, &measure, TOKEN_LIMIT).0,
+            Target::Lexical => raw,
+        };
         println!("\n=== {} — {} chunks", f.display(), chunks.len());
         for (i, c) in chunks.iter().enumerate() {
             let full = format!("{}\n{}", c.heading, c.text);
@@ -3148,6 +3157,12 @@ fn main() -> Result<()> {
             let target = if args.iter().skip(3).any(|a| a == "--lexical") {
                 Target::Lexical
             } else {
+                // Same rule as `index`: a language picks a stemmer, and the
+                // semantic side has none.  Accepting it here would preview a
+                // setting that does nothing.
+                if args.iter().skip(3).any(|a| a == "--lang") {
+                    return Err(anyhow!("--lang previews the lexical index; add --lexical"));
+                }
                 Target::Semantic
             };
             cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target)

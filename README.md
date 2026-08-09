@@ -385,9 +385,9 @@ are: a typo that does nothing looks exactly like a setting that does nothing.
 
 `chunks --config` applies a policy **without** storing it or reindexing, so you
 can see what a change would do before paying for it. `chunks` previews the
-semantic index and `chunks --lexical` the word index — they no longer chunk the
-same way, so it shows one or the other rather than claiming to show "the"
-chunking.
+semantic index and `chunks --lexical` the word index, faithfully in each case:
+only the semantic preview re-splits at 512 tokens, only the lexical one carries a
+language. It says which one it is showing.
 
 Over JSON-RPC the `index` method takes the same policy as a `config` object, so
 an editor can keep its own source of truth in whatever format suits it — a
