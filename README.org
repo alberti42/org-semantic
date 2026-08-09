@@ -738,4 +738,13 @@ The difference is what you have to install and what has to be running. Each need
 :CUSTOM_ID: licence
 :END:
 MIT. Embeddings via [[https://github.com/Anush008/fastembed-rs][fastembed-rs]]
-(Apache-2.0) over [[https://github.com/pykeio/ort][ort]] (Apache-2.0).
+(Apache-2.0) over [[https://github.com/pykeio/ort][ort]] (Apache-2.0); lexical
+search via [[https://github.com/quickwit-oss/tantivy][tantivy]] (MIT); language
+identification via the [[https://github.com/messense/fasttext-rs][fasttext]]
+binding (MIT), whose =lid.176= model is CC BY-SA 3.0 and is downloaded rather
+than redistributed here.
+
+This documentation is rendered with the
+[[https://github.com/fniessen/org-html-themes][ReadTheOrg]] theme, vendored under
+=docs/org-html-themes/= and GPL-3.0 --- a documentation asset, kept under its own
+licence and not part of the program.

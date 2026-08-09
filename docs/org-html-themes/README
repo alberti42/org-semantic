@@ -1,8 +1,16 @@
-Vendored subset of the ReadTheOrg HTML export theme, GPL-3.0 (same as this
-repo, see LICENSE at the repo root).
+Vendored subset of the ReadTheOrg HTML export theme.
 
 Upstream: https://github.com/fniessen/org-html-themes
 Commit:   8a87654701ab24d1bab984524a011bc57f94803b
+
+These files are GPL-3.0, which is NOT the licence of this repository (MIT, see
+LICENSE at the root).  They are documentation assets: CSS and JavaScript served
+alongside the exported HTML, never compiled into the binary and never linked
+against org-semantic's own code.  Keep them under their own licence, and keep
+this notice with them.
+
+The bundled jQuery, Bootstrap and stickytableheaders under src/vendor/ carry
+their own (MIT) licences from their respective projects.
 
 Verbatim upstream copies; to update, re-copy the same paths from a newer
 checkout and bump the commit above.  The Google Fonts and Font Awesome CDN
