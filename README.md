@@ -289,15 +289,18 @@ lexical index — those settings are hashed per index.
 
 Without a flag, `search` ranks by **meaning**, scoring the query's embedding
 against every chunk's. With `--lexical` it ranks by **words**, using
-[tantivy](https://github.com/quickwit-oss/tantivy) — BM25 over an inverted index
-whose text is stemmed per language, with a real query language: phrases,
-`AND`/`OR`/`NOT`, parentheses and field boosts, all following
-[tantivy's query syntax](https://docs.rs/tantivy/latest/tantivy/query/struct.QueryParser.html).
-A malformed query is reported as a syntax error rather than silently matching
-nothing. Every term must
-match, since matching any of them would rank anything merely containing
-"oscillations" for the query "Rabi oscillations"; `--any` asks for that looser
-match when you want it.
+[tantivy](https://github.com/quickwit-oss/tantivy): BM25 ranking over an inverted
+index whose text is stemmed per language, so `Sprachen` finds `Sprache`.
+
+It comes with a real query language — phrases, `AND`/`OR`/`NOT`, parentheses and
+field boosts — following
+[tantivy's query syntax](https://docs.rs/tantivy/latest/tantivy/query/struct.QueryParser.html)
+in full. A malformed query is reported as a syntax error rather than silently
+matching nothing.
+
+Every term must match by default, since matching any of them would rank anything
+merely containing "oscillations" for the query "Rabi oscillations"; `--any` asks
+for that looser match when you want it.
 
 One command, but never one merged result list: a phrase or a boolean means
 nothing to an embedding, so a fused list would mix hits that honoured your query
