@@ -40,6 +40,11 @@ Not one word of that query appears in the top note's title, and the passage it
 points at is 672 lines in. Finding what you can describe but cannot name is the
 whole point of org-semantic.
 
+Most of that half-second is the model loading, paid once per process. For
+anything interactive, run [`org-semantic serve`](#driving-it-from-an-editor)
+instead: it keeps the model and the vectors resident, and answers in **7–9 ms**
+by meaning or **3 ms** by word — fast enough to search as you type.
+
 ## Why
 
 Existing packages either run a Python service — one popular org indexer pulls in
@@ -140,12 +145,15 @@ $ org-semantic serve        # JSON-RPC 2.0 over stdio, LSP framing
 
 | request | time |
 |---|---|
-| first semantic query (loads the model) | 309 ms |
-| the same query again, model resident | **9.5 ms** |
-| lexical query | 23 ms |
+| first semantic query, loading `e5-small` | 1.6 s |
+| the same query again, model resident | **7–9 ms** |
+| first lexical query | 14 ms |
+| lexical, warm | **3 ms** |
 
-That gap is the whole reason for a resident process: 10 ms is a keystroke, 300 ms
-is not.
+That gap is the whole reason for a resident process: 8 ms is a keystroke, 1.6 s
+is not. The first figure is the model being read from disk and is paid once per
+process, so it scales with the model — `bge-small-en` takes about 300 ms where
+`e5-small` takes 1.6 s — while the warm figures do not depend on it.
 
 Framing is LSP's `Content-Length` because Emacs ships `jsonrpc.el` — the library
 Eglot runs on — so the editor needs no protocol code: `make-process`, and
