@@ -8,6 +8,7 @@
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
+  "planning": { "semantic": false, "lexical": true },
   "exclude_tagged": ["noexport", "ARCHIVE"],
   "todo_keywords": ["TODO", "DONE"]
 }

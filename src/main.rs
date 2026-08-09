@@ -452,6 +452,40 @@ impl Blocks {
     }
 }
 
+/// What to do with a heading's planning line — `DEADLINE:`, `SCHEDULED:`,
+/// `CLOSED:`.
+///
+/// Split by index because the two want opposite things, the same way Babel
+/// `#+RESULTS:` does. A date carries almost nothing an embedding can use, and in
+/// a project file where nearly every heading has one it would open most chunks
+/// with the same shape of noise. Looking one up by word is an ordinary thing to
+/// want, though — "what was due on the first of September" is a lexical
+/// question — so it stays there.
+///
+/// No placeholder: unlike a src block there is nothing to say a line was here
+/// that the heading does not already say.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct PlanningPolicy {
+    semantic: bool,
+    lexical: bool,
+}
+
+impl Default for PlanningPolicy {
+    fn default() -> Self {
+        PlanningPolicy { semantic: false, lexical: true }
+    }
+}
+
+impl PlanningPolicy {
+    fn keeps(&self, target: Target) -> bool {
+        match target {
+            Target::Semantic => self.semantic,
+            Target::Lexical => self.lexical,
+        }
+    }
+}
+
 /// Indexing policy: what in a vault is worth indexing at all.
 ///
 /// Kept in a file the user owns, wherever they like, and named with `--config`.
@@ -479,6 +513,8 @@ struct Config {
     fold_diacritics: bool,
     /// What to do with each kind of block.
     blocks: Blocks,
+    /// What to do with a heading's `DEADLINE:` / `SCHEDULED:` / `CLOSED:` line.
+    planning: PlanningPolicy,
     /// Anything tagged with one of these is not indexed — the tag names what to
     /// leave out, not what to strip from the index.  `noexport` is org's own
     /// "not for consumption" marker and `ARCHIVE` its "put this away"; both
@@ -519,6 +555,7 @@ impl Default for Config {
             languages: vec!["en-US".into()],
             fold_diacritics: false,
             blocks: Blocks::default(),
+            planning: PlanningPolicy::default(),
             exclude_tagged: vec!["noexport".into(), "ARCHIVE".into()],
             todo_keywords: DEFAULT_TODO_KEYWORDS.iter().map(|s| (*s).into()).collect(),
         }
@@ -568,6 +605,7 @@ impl Config {
             };
             key.push_str(&format!(";{kind}={v}"));
         }
+        key.push_str(&format!(";planning={}", self.planning.keeps(target)));
         content_hash(key.as_bytes())
     }
 
@@ -627,6 +665,14 @@ impl Config {
                 }
                 _ => {}
             }
+        }
+        let (mine, theirs) = (self.planning.keeps(target), other.planning.keeps(target));
+        if mine != theirs {
+            let side = match target {
+                Target::Semantic => "semantic",
+                Target::Lexical => "lexical",
+            };
+            out.push(format!("planning.{side}: was {theirs}, now {mine}"));
         }
         out
     }
@@ -809,6 +855,27 @@ impl LangConfig {
 /// through rather than making anyone restate it.
 const DEFAULT_TODO_KEYWORDS: &[&str] = &["TODO", "DONE"];
 
+/// Org's planning keywords, from `org-planning-line-re`.
+///
+/// Matched case-sensitively, as org matches them: `org-element-planning-parser`
+/// binds `case-fold-search` to nil, so a sentence opening "Deadline: …" is
+/// prose and stays.
+const PLANNING_KEYWORDS: [&str; 3] = ["DEADLINE:", "SCHEDULED:", "CLOSED:"];
+
+/// Is this the planning line belonging to the heading just above it?
+///
+/// Org is strict about where one may sit — `org-at-planning-p` requires the line
+/// immediately after the headline — and so is this, because the position is the
+/// only thing separating a deadline from a paragraph that begins by quoting one.
+/// A single line may carry more than one keyword, which is why this asks whether
+/// the line *starts* with any of them rather than trying to parse the timestamps
+/// after it: they are metadata either way, and org's own timestamp grammar is
+/// more than is needed to decide that.
+fn is_planning_line(line: &str) -> bool {
+    let t = line.trim_start_matches([' ', '\t']);
+    PLANNING_KEYWORDS.iter().any(|k| t.starts_with(k))
+}
+
 /// A keyword as written in `#+TODO:`, reduced to the keyword itself.
 ///
 /// Org lets each one carry a fast-selection key and state-change logging in
@@ -944,6 +1011,9 @@ fn chunk_file(
     // `#+end_`; they run until something that is not one of them.
     let mut literal_run: Option<bool> = None;
     let mut seen_heading = false;
+    // Set by a heading, cleared by whatever line follows: only the line directly
+    // beneath a headline can be its planning line.
+    let mut at_planning = false;
     let mut cur_lang = lang.map(|l| l.undeclared().to_string()).unwrap_or_default();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
@@ -1029,6 +1099,17 @@ fn chunk_file(
         let n = i + 1;
         let trimmed = line.trim();
 
+        // Consumed here rather than wherever a `DEADLINE:` turns up, because
+        // only this position makes it org's planning line — and cleared by
+        // *any* line, so it cannot reach past a property drawer.  Org parses a
+        // heading as planning-then-drawer, so a deadline below the drawer is a
+        // paragraph that mentions one, and stays.
+        let planning = at_planning && is_planning_line(line);
+        at_planning = false;
+        if planning && !cfg.planning.keeps(target) {
+            continue;
+        }
+
         if in_drawer {
             if trimmed.eq_ignore_ascii_case(":END:") {
                 in_drawer = false;
@@ -1082,6 +1163,7 @@ fn chunk_file(
             cur_id = file_id.clone();
             cur_line = n;
             seen_heading = true;
+            at_planning = true;
             continue;
         }
 
@@ -4533,6 +4615,96 @@ mod tests {
         let c = chunks_of("#+title: T\n#+TODO: LATER | SHIPPED\n* LATER Rewire\nalpha\n");
         assert_eq!(c[0].todo.as_deref(), Some("LATER"));
         assert_eq!(c[0].heading, "T > Rewire");
+    }
+
+    /// A planning line is metadata, like the tags and the TODO keyword beside
+    /// it, and must not reach the text that gets embedded: in a project file
+    /// nearly every heading carries one, so leaving them in would open most
+    /// chunks with a date that says nothing about what the passage is.
+    #[test]
+    fn a_planning_line_is_metadata_and_is_not_embedded() {
+        let c = chunks_of(
+            "#+title: T\n* Task\nDEADLINE: <2026-09-01 Tue>\n:PROPERTIES:\n:ID: abc\n:END:\n\
+             The mounts couple to the pulse tube.\n",
+        );
+        assert_eq!(c[0].text.trim(), "The mounts couple to the pulse tube.");
+        assert_eq!(c[0].id.as_deref(), Some("abc"), "the drawer below it still resolves");
+    }
+
+    /// One line may carry several, which is what `org-element-planning-parser`
+    /// loops over.
+    #[test]
+    fn several_planning_keywords_may_share_a_line() {
+        let c = chunks_of(
+            "#+title: T\n* Task\nSCHEDULED: <2026-08-20 Thu> DEADLINE: <2026-09-01 Tue>\nBody.\n",
+        );
+        assert_eq!(c[0].text.trim(), "Body.");
+    }
+
+    /// Position is the whole of what separates a deadline from a paragraph
+    /// about one, so both of these stay: org requires the line immediately
+    /// after the headline, and parses planning *before* the property drawer.
+    #[test]
+    fn a_deadline_anywhere_else_is_prose() {
+        let below = chunks_of("#+title: T\n* Task\nSome prose.\nDEADLINE: <2026-09-01 Tue>\n");
+        assert!(below[0].text.contains("DEADLINE:"), "not the line after the heading");
+
+        let after_drawer = chunks_of(
+            "#+title: T\n* Task\n:PROPERTIES:\n:ID: abc\n:END:\nDEADLINE: <2026-09-01 Tue>\n",
+        );
+        assert!(after_drawer[0].text.contains("DEADLINE:"), "planning precedes the drawer");
+    }
+
+    /// Org matches these case-sensitively — `org-element-planning-parser` binds
+    /// `case-fold-search` to nil — so a sentence that opens with the word is
+    /// prose.
+    #[test]
+    fn planning_keywords_are_matched_case_sensitively() {
+        let c = chunks_of("#+title: T\n* Task\nDeadline: we agreed on the first of September.\n");
+        assert!(c[0].text.contains("Deadline: we agreed"));
+    }
+
+    /// The two indexes want opposite things from a date, so the policy is split
+    /// the way `#+RESULTS:` is: no use to an embedding, an ordinary thing to
+    /// look up by word.
+    #[test]
+    fn planning_is_kept_for_words_and_dropped_for_meaning_by_default() {
+        let note = "#+title: T\n* Task\nDEADLINE: <2026-09-01 Tue>\nBody.\n";
+        let of = |target| {
+            chunk_file(Path::new("/v/n.org"), "n.org", note, None, &Config::default(), target)
+        };
+        assert!(!of(Target::Semantic)[0].text.contains("DEADLINE"), "noise to an embedding");
+        assert!(of(Target::Lexical)[0].text.contains("DEADLINE: <2026-09-01 Tue>"), "searchable");
+    }
+
+    /// And either side can be turned round, which is the point of it being
+    /// policy rather than a decision we made for everyone.
+    #[test]
+    fn planning_can_be_kept_or_dropped_on_either_side() {
+        let note = "#+title: T\n* Task\nDEADLINE: <2026-09-01 Tue>\nBody.\n";
+        let cfg = Config {
+            planning: PlanningPolicy { semantic: true, lexical: false },
+            ..Config::default()
+        };
+        let of = |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target);
+        assert!(of(Target::Semantic)[0].text.contains("DEADLINE"));
+        assert!(!of(Target::Lexical)[0].text.contains("DEADLINE"));
+
+        // And it reaches the hash of the index it governs, and only that one.
+        let d = Config::default();
+        assert_ne!(cfg.hash_for(Target::Semantic), d.hash_for(Target::Semantic));
+        assert_ne!(cfg.hash_for(Target::Lexical), d.hash_for(Target::Lexical));
+        let semantic_only =
+            Config { planning: PlanningPolicy { semantic: true, ..d.planning }, ..d.clone() };
+        assert_eq!(
+            semantic_only.hash_for(Target::Lexical),
+            d.hash_for(Target::Lexical),
+            "a semantic-only change must not cost a lexical rebuild"
+        );
+        assert!(semantic_only
+            .differences(&d, Target::Semantic)
+            .iter()
+            .any(|s| s.starts_with("planning.semantic:")));
     }
 
     /// Regression: org lets a keyword carry a fast-selection key and logging

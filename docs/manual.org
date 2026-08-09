@@ -555,6 +555,7 @@ edit it:
     "quote":   { "semantic": true,          "lexical": true },
     "verse":   { "semantic": true,          "lexical": true }
   },
+  "planning": { "semantic": false, "lexical": true },
   "exclude_tagged": ["noexport", "ARCHIVE"],
   "todo_keywords": ["TODO", "DONE"]
 }
@@ -567,6 +568,18 @@ it), =false= (drop it) or ="placeholder"=;
 would only make =[src]= a searchable word. Babel =#+RESULTS:= and bare =: =
 fixed-width lines count as output, not prose. Quote and verse stay in both ---
 they are prose someone chose to set off, not machine output.
+
+=planning= is a heading's =DEADLINE:= / =SCHEDULED:= / =CLOSED:= line, and is
+split by index for the same reason Babel output is. A date carries almost
+nothing an embedding can use, and in a project file where nearly every heading
+has one it would open most passages with the same shape of noise --- so it is
+dropped there. Looking one up by word is an ordinary thing to want, though, so
+the lexical index keeps it. Turn either round if your notes disagree.
+
+Only the real thing is taken: org counts a planning line only on the line
+*immediately* after the heading and before the property drawer, and matches the
+keywords case-sensitively. A paragraph that opens "Deadline: we agreed on the
+first" is prose and stays, in both indexes.
 
 =todo_keywords= is this vault's =org-todo-keywords=. It decides what a heading
 *says*: a keyword org knows is cut off the front of the title, and one it does
