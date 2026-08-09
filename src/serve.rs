@@ -145,6 +145,85 @@ impl Server {
         Ok(hits_json(&vault, &hits, k, s.baseline))
     }
 
+    /// `index` — rebuild either index, or both, without leaving the process.
+    ///
+    /// Spawning a CLI for this would pay the model load again, which is the one
+    /// cost this whole design exists to avoid: the resident model is lent to the
+    /// indexer, so re-embedding a note the editor just saved costs the embedding
+    /// and nothing else.
+    ///
+    /// The human-readable report goes to a sink — the caller gets the numbers.
+    fn index(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
+        let vault = PathBuf::from(
+            p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
+        );
+        let mode = p.get("mode").and_then(|v| v.as_str()).unwrap_or("semantic");
+        let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+        let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut out = io::sink();
+        let mut done = serde_json::Map::new();
+
+        if mode == "semantic" || mode == "both" {
+            let want = match p.get("model").and_then(|v| v.as_str()) {
+                Some(name) => model_named(name)?,
+                // Not `choose_index`: the first index for a vault has to be
+                // creatable, and nothing is built yet to choose among.
+                None => built_models(&vault)
+                    .first()
+                    .copied()
+                    .unwrap_or(model_named(DEFAULT_MODEL)?),
+            };
+            let key = (vault.clone(), want.name);
+            // Lend the resident model if this vault's index is already loaded.
+            let report = match self.semantic.get_mut(&key) {
+                Some(s) => {
+                    cmd_index(&vault, full, rehash, want, &mut out, Some(&mut s.model))?
+                }
+                None => cmd_index(&vault, full, rehash, want, &mut out, None)?,
+            };
+            // The vectors on disk have moved, so what is held in memory is now
+            // wrong — including the baseline, which is derived from them.
+            self.refresh(&key)?;
+            done.insert("semantic".into(), serde_json::to_value(report)?);
+            done.insert("model".into(), want.name.into());
+        }
+
+        if mode == "lexical" || mode == "both" {
+            let lang = match p.get("lang").and_then(|v| v.as_str()) {
+                Some(spec) => LangConfig::parse(spec),
+                None => LangConfig::default(),
+            };
+            let fold = p.get("fold").and_then(|v| v.as_bool()).unwrap_or(false);
+            prepare_lang(&lang)?;
+            let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &mut out)?;
+            self.lexical.remove(&vault);
+            done.insert("lexical".into(), serde_json::to_value(report)?);
+        }
+
+        if done.is_empty() {
+            return Err(anyhow!("unknown mode `{mode}`; use semantic, lexical or both"));
+        }
+        Ok(serde_json::Value::Object(done))
+    }
+
+    /// Re-read a vault's vectors and recompute its baseline, keeping the loaded
+    /// model.  Dropping the entry instead would be simpler and would throw away
+    /// the very thing worth keeping.
+    fn refresh(&mut self, key: &(PathBuf, &'static str)) -> Result<()> {
+        let Some(s) = self.semantic.get_mut(key) else { return Ok(()) };
+        let dir = semantic_dir(&key.0, s.which);
+        let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
+        let raw = fs::read(dir.join("vectors.f32"))?;
+        let vectors: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        s.baseline = Baseline::of(&vectors, s.which.dim);
+        s.chunks = chunks;
+        s.vectors = vectors;
+        Ok(())
+    }
+
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
     fn status(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
@@ -167,6 +246,7 @@ impl Server {
     fn dispatch(&mut self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
         match method {
             "search" => self.search(params),
+            "index" => self.index(params),
             "status" => self.status(params),
             // A resident process must be able to drop what it holds without
             // being restarted: an index rebuilt underneath it is otherwise

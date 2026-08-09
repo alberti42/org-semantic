@@ -123,6 +123,7 @@ Methods:
 | method | params | returns |
 |---|---|---|
 | `search` | `vault`, `query`, `k`, `mode` (`semantic`\|`lexical`), `model`, `any` | `{"hits": [...]}` |
+| `index` | `vault`, `mode` (`semantic`\|`lexical`\|`both`), `full`, `rehash`, `model`, `lang`, `fold` | what each index did, as numbers |
 | `status` | `vault` | which indexes are built, and which are loaded |
 | `reload` | — | drop cached indexes after a rebuild |
 | `shutdown` | — | exit |
@@ -135,6 +136,13 @@ moved or renamed.
 
 An empty query returns no hits rather than an error, so it is safe to send on
 every keystroke; debouncing is the editor's policy, not the server's.
+
+**Reindexing happens in-process too.** Spawning a CLI for it would pay the model
+load again, which is the cost the resident process exists to avoid — so the
+loaded model is lent to the indexer. Re-indexing a vault after saving one note
+takes ~95 ms and embeds only that note. The cached vectors and the score baseline
+are refreshed straight after, so the next query cannot answer from what was just
+replaced.
 
 ### Scores, and why the raw one is not worth showing
 

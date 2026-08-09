@@ -1721,7 +1721,14 @@ fn lex_manifest_path(dir: &Path) -> PathBuf {
 /// 512-token re-splitting — that limit is what BGE can read in one go, and BM25
 /// has no such bound.  Chunks here are therefore whole sections, which is why
 /// this needs neither a download nor a GPU-shaped wait.
-fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, fold: bool) -> Result<()> {
+fn cmd_index_lexical(
+    vault: &Path,
+    full: bool,
+    rehash: bool,
+    lang: &LangConfig,
+    fold: bool,
+    out: &mut dyn Write,
+) -> Result<IndexReport> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -1762,7 +1769,8 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
     }
 
     if old.is_some() {
-        println!(
+        writeln!(
+            out,
             "{} org files · {} by stamp · {} restamped · {} changed · {} new · {} removed",
             files.len(),
             scan.by_stamp,
@@ -1770,17 +1778,27 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
             scan.changed,
             scan.new,
             scan.dropped.len()
-        );
+        )?;
     } else {
-        println!("{} org files", files.len());
+        writeln!(out, "{} org files", files.len())?;
     }
 
+    let mut report = IndexReport {
+        files: files.len(),
+        chunks: chunks.len(),
+        changed: scan.changed,
+        new: scan.new,
+        dropped: scan.dropped.len(),
+        secs: t0.elapsed().as_secs_f64(),
+        ..Default::default()
+    };
     if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
-        println!("nothing changed; lexical index left as it is");
-        return Ok(());
+        writeln!(out, "nothing changed; lexical index left as it is")?;
+        report.unchanged = true;
+        return Ok(report);
     }
     if rebuilding && old.is_some() {
-        println!("  analyzer changed ({}); rebuilding", analyzer.key());
+        writeln!(out, "  analyzer changed ({}); rebuilding", analyzer.key())?;
     }
 
     lexical::sync(&dir, &chunks, &scan.dropped, rebuilding, &analyzer)?;
@@ -1793,15 +1811,48 @@ fn cmd_index_lexical(vault: &Path, full: bool, rehash: bool, lang: &LangConfig, 
             stamps: scan.stamps,
         })?,
     )?;
-    println!(
+    writeln!(
+        out,
         "lexical index: {} chunks written in {:.2}s",
         chunks.len(),
         t0.elapsed().as_secs_f64()
-    );
-    Ok(())
+    )?;
+    report.chunks = chunks.len();
+    report.secs = t0.elapsed().as_secs_f64();
+    Ok(report)
 }
 
-fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
+/// What an index run did, as data.
+///
+/// Returned rather than printed because `serve` shares this code and **stdout is
+/// its JSON-RPC transport** — a stray `println!` here would splice prose into the
+/// protocol and desynchronise the client.  The CLI renders this; the server
+/// hands it back as the reply.
+#[derive(Serialize, Default)]
+struct IndexReport {
+    files: usize,
+    chunks: usize,
+    embedded: usize,
+    /// Present only for the semantic index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resplit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<usize>,
+    changed: usize,
+    new: usize,
+    dropped: usize,
+    unchanged: bool,
+    secs: f64,
+}
+
+fn cmd_index(
+    vault: &Path,
+    full: bool,
+    rehash: bool,
+    m: &Model,
+    out: &mut dyn Write,
+    resident: Option<&mut TextEmbedding>,
+) -> Result<IndexReport> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -1863,39 +1914,62 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
     }
 
     if old.is_some() {
-        println!(
+        writeln!(
+            out,
             "{} org files · {by_stamp} by stamp · {by_hash} restamped · \
              {changed_files} changed · {new_files} new · {dropped} removed",
             files.len()
-        );
+        )?;
     } else {
-        println!("{} org files", files.len());
+        writeln!(out, "{} org files", files.len())?;
     }
     if resplit > 0 {
         eprintln!("  {resplit} sections ran past {TOKEN_LIMIT} tokens and were divided");
     }
-    println!(
+    writeln!(
+        out,
         "{} chunks · {} to embed · scanned in {:.2}s",
         chunks.len(),
         pending.len(),
         t0.elapsed().as_secs_f64()
-    );
+    )?;
+    let mut report = IndexReport {
+        files: files.len(),
+        chunks: chunks.len(),
+        embedded: pending.len(),
+        resplit: Some(resplit),
+        changed: changed_files,
+        new: new_files,
+        dropped,
+        secs: t0.elapsed().as_secs_f64(),
+        ..Default::default()
+    };
 
     // Only a run that changes nothing at all may skip the write.  Dropping a
     // deleted note, or merely refreshing stamps, produces no work to embed but
     // must still be persisted.
     let restamped = by_hash > 0 || old.as_ref().is_some_and(|ix| ix.stamps.len() != stamps.len());
     if pending.is_empty() && dropped == 0 && !restamped && old.is_some() {
-        println!("nothing changed; index left as it is");
-        return Ok(());
+        writeln!(out, "nothing changed; index left as it is")?;
+        report.unchanged = true;
+        return Ok(report);
     }
 
     if pending.is_empty() {
-        println!("no new text to embed; rewriting the manifest");
+        writeln!(out, "no new text to embed; rewriting the manifest")?;
     } else {
+        // A resident process already holds the model; loading a second copy
+        // would cost the 0.12–0.64 s this whole design exists to avoid.
         let t1 = Instant::now();
-        let mut model = model_with(m.which.clone(), None, false)?;
-        println!("model loaded in {:.2}s", t1.elapsed().as_secs_f64());
+        let mut owned;
+        let model: &mut TextEmbedding = match resident {
+            Some(m) => m,
+            None => {
+                owned = Some(model_with(m.which.clone(), None, false)?);
+                writeln!(out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
+                owned.as_mut().expect("just set")
+            }
+        };
 
         let t2 = Instant::now();
         // Heading path prepended so a passage carries the context it sits under.
@@ -1941,22 +2015,26 @@ fn cmd_index(vault: &Path, full: bool, rehash: bool, m: &Model) -> Result<()> {
             io::stderr().flush().ok();
         }
         eprintln!();
-        println!(
+        writeln!(
+            out,
             "embedded {} chunks in {:.1}s ({:.0}/s)",
             texts.len(),
             t2.elapsed().as_secs_f64(),
             texts.len() as f64 / t2.elapsed().as_secs_f64()
-        );
+        )?;
     }
 
     let written = save_index(&dir, m, &chunks, &vectors, hashes, stamps)?;
-    println!(
+    writeln!(
+        out,
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
         written as f64 / 1e6,
         t0.elapsed().as_secs_f64()
-    );
-    Ok(())
+    )?;
+    report.bytes = Some(written);
+    report.secs = t0.elapsed().as_secs_f64();
+    Ok(report)
 }
 
 /// Print hits grouped by note.
@@ -2586,12 +2664,13 @@ fn main() -> Result<()> {
                 Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
                 None => model_named(DEFAULT_MODEL)?,
             };
+            let mut out = io::stdout();
             if both || !lexical {
-                cmd_index(vault, full, rehash, model)?;
+                cmd_index(vault, full, rehash, model, &mut out, None)?;
             }
             if both || lexical {
                 prepare_lang(&lang)?;
-                cmd_index_lexical(vault, full, rehash, &lang, fold)?;
+                cmd_index_lexical(vault, full, rehash, &lang, fold, &mut out)?;
             }
             Ok(())
         }
@@ -2953,7 +3032,8 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+            .unwrap();
 
         let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
@@ -2972,7 +3052,8 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+            .unwrap();
         assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -3147,7 +3228,8 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &mut io::sink(), None)
+            .unwrap();
 
         let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(
