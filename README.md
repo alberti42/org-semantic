@@ -43,10 +43,7 @@ know nothing about org structure.
 org-semantic is one 34 MB binary. ONNX Runtime is statically linked; the only
 thing it ever downloads is the embedding model (129 MB, once, into your cache).
 
-**It is deliberately org-only.** Covering every markup format converges on the
-least common denominator — headings and paragraphs — which is where the
-generic tools already are, and where a dedicated one will always be better at
-its own format. Knowing it is org buys things a format-agnostic tool cannot
+**It is org-only.** Knowing the format buys things a format-agnostic tool cannot
 reach:
 
 - Property drawers stay out of the embedded text, so `:ID:` and `:MODIFIED:`
@@ -252,14 +249,12 @@ re-run only reads the notes *that* index is behind on. Both are incremental by
 default; `--full` rebuilds from scratch and `--rehash` re-reads every note,
 ignoring timestamps.
 
-The asymmetry is the point. Embedding is minutes and needs a 129 MB model; the
-lexical index is a second and needs nothing but the notes. Keeping them apart
-means editing a few notes and refreshing keyword search costs a second, and
-changing the folding or your language list no longer drags the embeddings through
-a rebuild they have no stake in — those settings are hashed per index, so they
-invalidate only the one they affect.
+Embedding takes minutes and a 129 MB model; the lexical index takes a second and
+nothing but the notes. So refreshing keyword search after editing a few notes
+costs a second, and changing the folding or your language list rebuilds only the
+lexical index — those settings are hashed per index.
 
-### Two rankings, deliberately unmixed
+### Two rankings, never merged
 
 Without a flag, `search` ranks by **meaning**, scoring the query's embedding
 against every chunk's. With `--lexical` it ranks by **words**, using
@@ -268,9 +263,9 @@ with a real query language: phrases, boolean operators, field boosts. Terms are
 ANDed by default, since OR would rank anything merely containing "oscillations"
 for the query "Rabi oscillations"; `--any` restores OR.
 
-One command, but never one merged result list. A phrase or a boolean means
-nothing to an embedding, so fusing the two would mix hits that honoured your
-query with hits that could not.
+One command, but never one merged result list: a phrase or a boolean means
+nothing to an embedding, so a fused list would mix hits that honoured your query
+with hits that could not.
 
 The difference is not academic. Searching your notes for the surname `Gehm`:
 
@@ -314,8 +309,7 @@ Subtrees tagged `:noexport:` or `:ARCHIVE:` are left out — org's own markers f
 "not for consumption" and "put this away". Both inherit, so the rule covers a
 whole subtree, children included.
 
-**Blocks are treated differently by each index, which is the point of having
-two.** Code embedded as prose pollutes a semantic search — a shell snippet lands
+**Blocks are treated differently by each index.** Code embedded as prose pollutes a semantic search — a shell snippet lands
 near queries it has nothing to do with — but exact match is precisely what you
 want when hunting a flag or a function name. So by default the body of a `src`
 block is not embedded, and *is* searchable by word:
@@ -508,10 +502,9 @@ rebuilt or deleted without disturbing the other — which is what makes
 is that the chunk text is stored twice; on this vault that is 4.9 MB against a
 9.7 MB vector file.
 
-They chunk slightly differently on purpose. The semantic index splits any section
-longer than 512 tokens, because that is what the embedding model reads in one
-go; BM25 has no such limit, so the lexical index keeps whole sections — 5757
-chunks against 6328.
+The two chunk differently. The semantic index splits any section longer than 512
+tokens, which is what the embedding model reads in one go; BM25 has no such
+limit, so the lexical index keeps whole sections — 5757 chunks against 6328.
 
 Add `/.org-semantic/` to the vault's `.gitignore`. All of it is derived — delete
 the directory and `org-semantic index` rebuilds it in one pass.
@@ -536,10 +529,10 @@ cheap enough to run on every Emacs start.
 
 ## Design
 
-**No ANN index, deliberately.** A thousand notes is 1.5M tokens and under 10 MB
-of `f32`. A brute-force dot product over all of it takes 1.4 ms and is exact.
-FAISS, HNSW and quantisers like TurboQuant address corpora three orders of
-magnitude larger, and trade recall for memory this problem does not lack.
+**No ANN index.** A thousand notes is 1.5M tokens and under 10 MB of `f32`, and
+a brute-force dot product over all of it takes 1.4 ms and is exact. FAISS, HNSW
+and quantisers like TurboQuant address corpora three orders of magnitude larger,
+trading recall for memory this problem does not lack.
 
 **Chunked by section, then paragraph, never past 512 tokens.** The limit is
 enforced with the tokenizer, not a character budget — this corpus runs 2.0
@@ -569,11 +562,9 @@ The rest of the roadmap is org depth rather than more formats: honouring
 `:noexport:` and archived subtrees, and treating `#+begin_src` blocks distinctly,
 since code embedded as prose pollutes results.
 
-Known gaps. The two modes are not fused into a single ranking — deliberately,
-since a phrase or a boolean means nothing to an embedding, so a combined result
-list would mix hits that honoured your query with hits that could not. If that is
-ever added it should be a third mode using reciprocal rank fusion, and only once
-there is evidence it beats picking the right one. Auto language detection is
+Known gaps. The two modes are not fused into a single ranking: a phrase or a
+boolean means nothing to an embedding, so a combined list would mix hits that
+honoured your query with hits that could not. Auto language detection is
 right on prose and guesses on notes that are almost entirely attachment links or
 shell snippets — 0.4% of chunks on the reference vault, and none once the
 languages are named with `--lang`. Re-split pieces of a long section share their
