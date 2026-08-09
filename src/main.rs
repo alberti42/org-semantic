@@ -73,8 +73,8 @@ usage:
   org-semantic index   <vault> [--full|--rehash] [--model NAME]
   org-semantic index   <vault> --lexical|--both [--full|--rehash]
                               [--lang en-US[,de-DE,…]|auto] [--fold]
-  org-semantic search  <vault> <query> [k] [--model NAME]
-  org-semantic search  <vault> <query> [k] --lexical [--any]
+  org-semantic search  <vault> <query> [k] [--model NAME] [--json]
+  org-semantic search  <vault> <query> [k] --lexical [--any] [--json]
   org-semantic chunks  <vault> <path-substring> [--lang …] [--model NAME]
   org-semantic tokens  <vault> [limit] [--model NAME]
   org-semantic models  [vault]
@@ -1087,9 +1087,9 @@ mod lexical {
         /// an empty field, which costs nothing, whereas dropping it would change
         /// the schema and force a rebuild for no gain.
         pub fn widen(previous: Option<&Analyzer>, chunks: &[Chunk], fold: bool) -> Self {
-            // Not via `from_chunks`: its empty-corpus fallback to `en` would be
-            // added to an existing set whenever a run has nothing stale, which
-            // is a schema change and so a needless rebuild.
+            // No fallback to `en` on an empty chunk list: a run with nothing
+            // stale would union it into an existing set, which reads as a
+            // schema change and forces a rebuild that changes nothing.
             let mut langs: Vec<String> =
                 chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
             if let Some(p) = previous {
