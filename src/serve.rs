@@ -30,18 +30,17 @@ struct Semantic {
     baseline: Option<Baseline>,
 }
 
-/// One vault's lexical index: only the analyzer needs caching, since tantivy
-/// memory-maps its own segments and the documents carry their own chunks.
-struct Lexical {
-    analyzer: lexical::Analyzer,
-}
-
 #[derive(Default)]
 struct Server {
     /// Keyed by vault and model, so several models can be served side by side
     /// exactly as they are stored.
+    ///
+    /// Only the semantic side is cached.  The lexical one was too, until it was
+    /// measured: a warm lexical query is 2–5 ms *including* opening the index,
+    /// because tantivy memory-maps its segments and the pages stay resident.
+    /// Caching its analyzer saved a 30-byte file read and bought a stale-state
+    /// bug to invalidate.
     semantic: HashMap<(PathBuf, &'static str), Semantic>,
-    lexical: HashMap<PathBuf, Lexical>,
 }
 
 impl Server {
@@ -72,17 +71,16 @@ impl Server {
         Ok(self.semantic.get_mut(&key).expect("just inserted"))
     }
 
-    fn lexical(&mut self, vault: &Path) -> Result<&Lexical> {
-        let key = vault.to_path_buf();
-        if !self.lexical.contains_key(&key) {
-            let dir = state_dir(vault);
-            let stored = lexical::stored_key(&dir)
-                .ok_or_else(|| anyhow!("no lexical index — run `index --lexical`"))?;
-            let analyzer = lexical::Analyzer::from_key(&stored)
-                .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
-            self.lexical.insert(key.clone(), Lexical { analyzer });
-        }
-        Ok(self.lexical.get(&key).expect("just inserted"))
+    /// The analyzer the lexical index was built with, read from beside it.
+    ///
+    /// Read per query rather than cached: it costs a 30-byte file read, and
+    /// reading it fresh means a rebuild under a different `--lang` or `--fold`
+    /// can never be answered with the previous one.
+    fn analyzer(vault: &Path) -> Result<lexical::Analyzer> {
+        let stored = lexical::stored_key(&state_dir(vault))
+            .ok_or_else(|| anyhow!("no lexical index — run `index --lexical`"))?;
+        lexical::Analyzer::from_key(&stored)
+            .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))
     }
 
     /// `search` — both modalities, one shape.
@@ -106,8 +104,8 @@ impl Server {
 
         if lexical_mode {
             let conjunction = !p.get("any").and_then(|v| v.as_bool()).unwrap_or(false);
-            let a = &self.lexical(&vault)?.analyzer;
-            let hits = lexical::search(&state_dir(&vault), &f, (k * 25).max(100), conjunction, a)?;
+            let a = Self::analyzer(&vault)?;
+            let hits = lexical::search(&state_dir(&vault), &f, (k * 25).max(100), conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
             return Ok(hits_json(&vault, &hits, k, None));
@@ -196,7 +194,6 @@ impl Server {
             let fold = p.get("fold").and_then(|v| v.as_bool()).unwrap_or(false);
             prepare_lang(&lang)?;
             let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &mut out)?;
-            self.lexical.remove(&vault);
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
@@ -253,7 +250,6 @@ impl Server {
             // served stale until the editor exits.
             "reload" => {
                 self.semantic.clear();
-                self.lexical.clear();
                 Ok(serde_json::json!({ "ok": true }))
             }
             _ => Err(anyhow!("unknown method `{method}`")),
