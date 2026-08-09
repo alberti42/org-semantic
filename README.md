@@ -1,7 +1,8 @@
 # org-semantic
 
 Search a tree of org-mode notes by meaning or by words. One static binary, no
-database, no Python, nothing listening on a port.
+database, no Python. It runs as a one-shot command, or stays resident for an
+editor — over a pipe, never a port.
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
