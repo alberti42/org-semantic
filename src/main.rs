@@ -84,9 +84,10 @@ notes by meaning, and a lexical one, which finds them by word.
   search <vault> <query> [k] [--model NAME] [--json]
          Rank by meaning: describe what you are after, not its words.
   search <vault> <query> [k] --lexical [--any] [--json]
-         Rank by word, with phrases and boolean operators.  Every term must
-         match; --any matches notes carrying any of them.  A query may
-         carry predicates:
+         Rank by word (BM25, over a per-language stemmed index).  Every
+         term must match; --any matches notes carrying any of them.
+         Phrases, AND/OR/NOT and parentheses follow tantivy's query
+         syntax.  A query may carry predicates:
            tag:x  -tag:x  dir:x  todo:x  lang:x   (lang: is lexical only)
 
   chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]

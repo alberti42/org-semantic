@@ -98,9 +98,10 @@ notes by meaning, and a lexical one, which finds them by word.
   search <vault> <query> [k] [--model NAME] [--json]
          Rank by meaning: describe what you are after, not its words.
   search <vault> <query> [k] --lexical [--any] [--json]
-         Rank by word, with phrases and boolean operators.  Every term must
-         match; --any matches notes carrying any of them.  A query may
-         carry predicates:
+         Rank by word (BM25, over a per-language stemmed index).  Every
+         term must match; --any matches notes carrying any of them.
+         Phrases, AND/OR/NOT and parentheses follow tantivy's query
+         syntax.  A query may carry predicates:
            tag:x  -tag:x  dir:x  todo:x  lang:x   (lang: is lexical only)
 
   chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
@@ -288,8 +289,12 @@ lexical index — those settings are hashed per index.
 
 Without a flag, `search` ranks by **meaning**, scoring the query's embedding
 against every chunk's. With `--lexical` it ranks by **words**, using
-[tantivy](https://github.com/quickwit-oss/tantivy) — BM25 over an inverted index,
-with a real query language: phrases, boolean operators, field boosts. Every term must
+[tantivy](https://github.com/quickwit-oss/tantivy) — BM25 over an inverted index
+whose text is stemmed per language, with a real query language: phrases,
+`AND`/`OR`/`NOT`, parentheses and field boosts, all following
+[tantivy's query syntax](https://docs.rs/tantivy/latest/tantivy/query/struct.QueryParser.html).
+A malformed query is reported as a syntax error rather than silently matching
+nothing. Every term must
 match, since matching any of them would rank anything merely containing
 "oscillations" for the query "Rabi oscillations"; `--any` asks for that looser
 match when you want it.
