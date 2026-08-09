@@ -224,15 +224,12 @@ listing what you have.
 (0.37–0.74 above); E5 compresses everything into roughly 0.73–0.93. Only the
 ranking carries meaning, never the absolute number.
 
-The list is deliberately short. fastembed offers forty models, but each family
-expects its own prefixes — BGE prefixes only the query, E5 prefixes the indexed
-passage too — and using the wrong convention costs retrieval quality with no
-error and no warning. The table carries each family's documented convention, so
-adding a model means looking its prefixes up rather than guessing; that is four
-lines.
-
-`bge-small-en` and `e5-small` have been run end-to-end. The base and large
-variants inherit their family's prefixes and have not been exercised here.
+fastembed offers forty models; these are the ones whose prefixes are known here.
+Each family expects its own — BGE prefixes only the query, E5 prefixes the
+indexed passage too — and the wrong convention costs retrieval quality silently,
+so a model is listed only once its prefixes have been checked. `bge-small-en` and
+`e5-small` have been run end-to-end; the base and large variants inherit their
+family's prefixes and have not been exercised here.
 
 ### Two indexes, built separately
 
@@ -413,10 +410,9 @@ part-way — the marker forces a chunk boundary, since a chunk carries exactly o
 language. Placed between sections it costs nothing; placed mid-section it splits
 that section in two.
 
-The keyword is always `ltex`, deliberately. Reusing ltex's own syntax is the
-point — one annotation serves both the grammar checker and the index instead of
-two that drift — and `# ltex: language=de-DE` is an ordinary org comment, so
-writing one costs nothing and requires no ltex.
+The keyword is always `ltex`. You do not need ltex installed to use it —
+`# ltex: language=de-DE` is an ordinary org comment — and if you do use it, the
+line you already wrote for grammar checking is the one this reads.
 
 **Language is a lexical concern.** It selects the stemmer that makes `Sprachen`
 find `Sprache`, and an embedding is not stemmed — so only `index --lexical`
