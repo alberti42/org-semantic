@@ -186,7 +186,7 @@ impl Server {
                         .map(|m| m.config),
                     &cfg,
                     previous.as_ref(),
-                    "semantic",
+                    Target::Semantic,
                 )?;
             }
             let key = (vault.clone(), want.name);
@@ -217,7 +217,7 @@ impl Server {
                         .map(|m| m.config),
                     &cfg,
                     previous.as_ref(),
-                    "lexical",
+                    Target::Lexical,
                 )?;
             }
             let report = cmd_index_lexical(&vault, full, rehash, &lang, fold, &cfg, &mut out)?;

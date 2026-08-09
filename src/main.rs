@@ -445,6 +445,30 @@ impl Config {
         content_hash(self.canonical().as_bytes())
     }
 
+    const KINDS: [&'static str; 5] = ["src", "example", "results", "quote", "verse"];
+
+    /// The policy **as one index sees it**, hashed.
+    ///
+    /// Per index, not global: `blocks.src.lexical` cannot affect an embedding,
+    /// so changing it must not force a re-embed.  A single hash over the whole
+    /// config made every lexical-only edit cost minutes on the semantic side.
+    fn hash_for(&self, target: Target) -> u64 {
+        let mut tags = self.exclude_tags.clone();
+        tags.sort();
+        tags.dedup();
+        // Excluded subtrees are the one setting both indexes share.
+        let mut key = format!("tags={}", tags.join(","));
+        for kind in Self::KINDS {
+            let p = self.blocks.of(kind);
+            let v = match target {
+                Target::Semantic => describe_semantic(p.semantic).to_string(),
+                Target::Lexical => p.lexical.to_string(),
+            };
+            key.push_str(&format!(";{kind}={v}"));
+        }
+        content_hash(key.as_bytes())
+    }
+
     /// Does a chunk carrying TAGS fall outside what should be indexed?
     fn excluded(&self, tags: &[String]) -> bool {
         tags.iter().any(|t| self.exclude_tags.iter().any(|x| x.eq_ignore_ascii_case(t)))
@@ -459,29 +483,41 @@ impl Config {
 
     /// What changed, in words, so an error can say which setting moved rather
     /// than that something did.
-    fn differences(&self, other: &Config) -> Vec<String> {
+    /// What changed *for this index*, in words.
+    ///
+    /// Compared canonically, or reordering a list would be reported as a change
+    /// it is not — the cached copy is sorted and a hand-written file need not
+    /// be.  Filtered by target, so an error about the semantic index never cites
+    /// a lexical-only setting.
+    fn differences(&self, other: &Config, target: Target) -> Vec<String> {
         let mut out = Vec::new();
-        if self.exclude_tags != other.exclude_tags {
+        let canon = |c: &Config| {
+            let mut t = c.exclude_tags.clone();
+            t.sort();
+            t.dedup();
+            t
+        };
+        let (mine, theirs) = (canon(self), canon(other));
+        if mine != theirs {
             out.push(format!(
                 "exclude_tags: was [{}], now [{}]",
-                other.exclude_tags.join(", "),
-                self.exclude_tags.join(", ")
+                theirs.join(", "),
+                mine.join(", ")
             ));
         }
-        for kind in ["src", "example", "results", "quote", "verse"] {
+        for kind in Self::KINDS {
             let (a, b) = (self.blocks.of(kind), other.blocks.of(kind));
-            if a.semantic != b.semantic {
-                out.push(format!(
+            match target {
+                Target::Semantic if a.semantic != b.semantic => out.push(format!(
                     "blocks.{kind}.semantic: was {}, now {}",
                     describe_semantic(b.semantic),
                     describe_semantic(a.semantic)
-                ));
-            }
-            if a.lexical != b.lexical {
-                out.push(format!(
+                )),
+                Target::Lexical if a.lexical != b.lexical => out.push(format!(
                     "blocks.{kind}.lexical: was {}, now {}",
                     b.lexical, a.lexical
-                ));
+                )),
+                _ => {}
             }
         }
         out
@@ -519,13 +555,22 @@ fn resolve_config(vault: &Path, given: Option<&Path>) -> Result<Config> {
 /// `git pull` brings a colleague's edit — and spending minutes re-embedding on
 /// something they did not do is exactly the surprise to avoid.  `--full` is the
 /// way to say yes.
-fn check_config(previous: Option<u64>, cfg: &Config, previous_cfg: Option<&Config>, what: &str) -> Result<()> {
+fn check_config(
+    previous: Option<u64>,
+    cfg: &Config,
+    previous_cfg: Option<&Config>,
+    target: Target,
+) -> Result<()> {
+    let what = match target {
+        Target::Semantic => "semantic",
+        Target::Lexical => "lexical",
+    };
     let Some(prev) = previous else { return Ok(()) };
-    if prev == cfg.hash() {
+    if prev == cfg.hash_for(target) {
         return Ok(());
     }
     let detail = previous_cfg
-        .map(|old| cfg.differences(old).join("; "))
+        .map(|old| cfg.differences(old, target).join("; "))
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| "the stored policy differs".into());
     Err(anyhow!(
@@ -1895,7 +1940,7 @@ fn save_index(
         dir.join("manifest.json"),
         serde_json::to_vec(&Manifest {
             version: INDEX_VERSION,
-            config: cfg.hash(),
+            config: cfg.hash_for(Target::Semantic),
             model: m.name.into(),
             dim: m.dim,
             files,
@@ -2146,7 +2191,7 @@ fn cmd_index_lexical(
         lex_manifest_path(&dir),
         serde_json::to_vec(&LexManifest {
             key: analyzer.key(),
-            config: cfg.hash(),
+            config: cfg.hash_for(Target::Lexical),
             files: scan.hashes,
             stamps: scan.stamps,
         })?,
@@ -3087,7 +3132,7 @@ fn main() -> Result<()> {
                             .map(|m| m.config),
                         &cfg,
                         previous.as_ref(),
-                        "semantic",
+                        Target::Semantic,
                     )?;
                 }
                 if both || lexical {
@@ -3096,7 +3141,7 @@ fn main() -> Result<()> {
                             .map(|m| m.config),
                         &cfg,
                         previous.as_ref(),
-                        "lexical",
+                        Target::Lexical,
                     )?;
                 }
             }
@@ -3605,14 +3650,37 @@ mod tests {
     fn a_changed_policy_is_refused_and_names_what_moved() {
         let old = Config::default();
         let new = Config { exclude_tags: vec![], ..Config::default() };
-        assert!(check_config(Some(old.hash()), &old, Some(&old), "semantic").is_ok());
-        let err = check_config(Some(old.hash()), &new, Some(&old), "semantic")
+        let t = Target::Semantic;
+        assert!(check_config(Some(old.hash_for(t)), &old, Some(&old), t).is_ok());
+        let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t)
             .unwrap_err()
             .to_string();
         assert!(err.contains("exclude_tags"), "names the setting: {err}");
         assert!(err.contains("--full"), "and how to proceed: {err}");
         // Nothing stored yet is not a mismatch.
-        assert!(check_config(None, &new, None, "semantic").is_ok());
+        assert!(check_config(None, &new, None, t).is_ok());
+
+        // A lexical-only change must not invalidate the semantic index: an
+        // embedding cannot be affected by what BM25 indexes.
+        let mut lex_only = Config::default();
+        lex_only.blocks.src.lexical = false;
+        assert_eq!(
+            lex_only.hash_for(Target::Semantic),
+            old.hash_for(Target::Semantic),
+            "a lexical-only edit must not cost a re-embed"
+        );
+        assert_ne!(lex_only.hash_for(Target::Lexical), old.hash_for(Target::Lexical));
+
+        // Reordering a list is not a change, and must not be reported as one.
+        let reordered = Config {
+            exclude_tags: vec!["ARCHIVE".into(), "noexport".into()],
+            ..Config::default()
+        };
+        assert!(
+            reordered.differences(&old, t).is_empty(),
+            "order is not a difference: {:?}",
+            reordered.differences(&old, t)
+        );
     }
 
     #[test]
