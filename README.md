@@ -91,7 +91,6 @@ notes by meaning, and a lexical one, which finds them by word.
   index  <vault> [--full|--rehash] [--model NAME] [--config FILE]
          Build the semantic index.  Minutes, and downloads a model once.
   index  <vault> --lexical|--both [--full|--rehash] [--config FILE]
-         [--lang en-US[,de-DE,...]|auto] [--fold-diacritics]
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
@@ -116,9 +115,11 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
-Which subtrees are skipped, and what happens to src and example blocks, is
-policy: a JSON file passed with --config, remembered afterwards so later runs
-need not repeat it.  Copy config.example.json and edit it.
+Everything about how a vault is indexed is policy, not flags: which languages
+it is written in, whether accents are folded, which subtrees are skipped, and
+what happens to src and example blocks.  It goes in a JSON file passed with
+--config, remembered afterwards so later runs need not repeat it.  Copy
+config.example.json and edit it.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
@@ -271,9 +272,8 @@ org-semantic index ~/notes --lexical       # BM25             1.3 s
 org-semantic index ~/notes --both          # both
 ```
 
-`--lang` and `--fold-diacritics` belong to the lexical index, which is the only
-one that has a use for a language: they choose the stemmer. Passing them to a
-semantic build is an error rather than a setting that does nothing.
+`languages` and `fold_diacritics` affect only the lexical index, which is the
+only one that has a use for a language: they choose the stemmer.
 
 They are separate artifacts with separate records of what they have seen, so each
 re-run only reads the notes *that* index is behind on. Both are incremental by
@@ -450,25 +450,20 @@ The keyword is always `ltex`. You do not need ltex installed to use it —
 line you already wrote for grammar checking is the one this reads.
 
 **Language is a lexical concern.** It selects the stemmer that makes `Sprachen`
-find `Sprache`, and an embedding is not stemmed — so only `index --lexical`
-takes `--lang`, and `lang:` narrows only `search --lexical`. Both say so rather
-than accepting a setting that would do nothing. Multilingual *semantic* search is
-a question about the embedding model, not about labels, and is answered by
-using a multilingual model.
+find `Sprache`, and an embedding is not stemmed — so it affects only the lexical
+index, and `lang:` narrows only `search --lexical`, which says so rather than
+accepting a predicate that would do nothing. Multilingual *semantic* search is a
+question about the embedding model, not about labels, and is answered by using a
+multilingual model.
 
-Otherwise `--lang` names the languages the vault is written in, and **how many
-you name decides everything else**:
+Otherwise `languages` names what the vault is written in, and **how many you name
+decides everything else**:
 
+```json
+"languages": ["en-US"]                       one language: every undeclared note is English
+"languages": ["en-US", "de-DE", "it-IT"]     several: each note is classified as one of these
+"languages": []                              classified with no restriction, all 176
 ```
---lang en-US                  one language: every undeclared note is English
---lang en-US,de-DE,it-IT      several: each note is classified as one of these
---lang auto                   classified with no restriction, all 176
-```
-
-`--lang` and `--fold-diacritics` are shorthand for the `languages` and
-`fold_diacritics` keys in the config, and **what you pass is cached with the rest
-of the policy**. Forgetting them on a later run reuses what you set; it does not
-quietly revert to English alone, which is what a plain flag used to do.
 
 Classification is per note rather than per chunk, since a chunk can be a two-line
 heading. It uses fastText's `lid.176` (917 kB), downloaded to
@@ -500,7 +495,7 @@ Lexical search stems each note in its own language: `oscillation` finds
 neither leaks into the other. Regional variants share a stemmer, so `de-DE` and
 `de-AT` are both German.
 
-`fold_diacritics` (or `--fold-diacritics`) folds accents, so `eleves` matches
+`fold_diacritics` folds accents, so `eleves` matches
 `élèves`. It is named for the case worth having; the filter is broader, mapping
 non-ASCII to ASCII generally, so `æ` becomes `ae` too. Off by default, and worth
 noting it does nothing for German — that stemmer already strips umlauts, so
@@ -608,7 +603,7 @@ boolean means nothing to an embedding, so a combined list would mix hits that
 honoured your query with hits that could not. Auto language detection is
 right on prose and guesses on notes that are almost entirely attachment links or
 shell snippets — 0.4% of chunks on the reference vault, and none once the
-languages are named with `--lang`. Re-split pieces of a long section share their
+languages are named in the policy. Re-split pieces of a long section share their
 section's line number.
 
 ## Related work

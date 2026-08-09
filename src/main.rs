@@ -77,7 +77,6 @@ notes by meaning, and a lexical one, which finds them by word.
   index  <vault> [--full|--rehash] [--model NAME] [--config FILE]
          Build the semantic index.  Minutes, and downloads a model once.
   index  <vault> --lexical|--both [--full|--rehash] [--config FILE]
-         [--lang en-US[,de-DE,...]|auto] [--fold-diacritics]
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
@@ -102,9 +101,11 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
-Which subtrees are skipped, and what happens to src and example blocks, is
-policy: a JSON file passed with --config, remembered afterwards so later runs
-need not repeat it.  Copy config.example.json and edit it.
+Everything about how a vault is indexed is policy, not flags: which languages
+it is written in, whether accents are folded, which subtrees are skipped, and
+what happens to src and example blocks.  It goes in a JSON file passed with
+--config, remembered afterwards so later runs need not repeat it.  Copy
+config.example.json and edit it.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.";
@@ -667,7 +668,9 @@ impl Default for LangConfig {
 }
 
 impl LangConfig {
-    /// `--lang en-US` / `--lang en-US,de-DE` / `--lang auto`.
+    /// From a comma-separated spelling, as the tests write it.  The policy file
+    /// gives an array, so nothing in production parses this.
+    #[cfg(test)]
     fn parse(spec: &str) -> Self {
         let languages = if spec.trim().eq_ignore_ascii_case(LANG_AUTO) {
             Vec::new()
@@ -2990,22 +2993,6 @@ fn stored_hash<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-/// Apply `--lang` and `--fold-diacritics` on top of a policy.
-///
-/// Flags are another way of saying the same thing the file says, not a separate
-/// channel: whatever they express is cached with the rest, so omitting them on
-/// the next run reuses the value rather than silently reverting to the default.
-/// Precedence is defaults, then the file, then the flags.
-fn apply_lang_flags(mut cfg: Config, args: &[String], from: usize) -> Config {
-    if let Some(v) = flag_value(args, from, "--lang") {
-        cfg.languages = LangConfig::parse(v).languages;
-    }
-    if args.iter().skip(from).any(|a| a == "--fold-diacritics") {
-        cfg.fold_diacritics = true;
-    }
-    cfg
-}
-
 fn model_arg(args: &[String], from: usize) -> Result<&'static Model> {
     match args.iter().skip(from).position(|a| a == "--model") {
         Some(i) => model_named(args.get(from + i + 1).map(String::as_str).unwrap_or("")),
@@ -3099,7 +3086,6 @@ fn cmd_lexical(
     query: &str,
     k: usize,
     conjunction: bool,
-    fold: bool,
     json: bool,
 ) -> Result<()> {
     let dir = state_dir(vault);
@@ -3111,13 +3097,6 @@ fn cmd_lexical(
     })?;
     let analyzer = lexical::Analyzer::from_key(&stored)
         .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
-    if analyzer.fold != fold {
-        eprintln!(
-            "  note: this index was built with --fold={}; rebuild to change it",
-            analyzer.fold
-        );
-    }
-
     let f = parse_query(query);
     if !f.is_empty() && !json {
         println!("filter: {}", describe_filters(&f));
@@ -3158,8 +3137,7 @@ fn main() -> Result<()> {
                 &args,
                 3,
                 &[
-                    "--full", "--rehash", "--lexical", "--both", "--lang", "--fold-diacritics",
-                    "--model", "--config",
+                    "--full", "--rehash", "--lexical", "--both", "--model", "--config",
                 ],
             )?;
             // Same convention as `search`: bare is semantic, `--lexical` is the
@@ -3167,24 +3145,12 @@ fn main() -> Result<()> {
             // `--both` is one command for the Emacs side to call.
             let lexical = args.iter().skip(3).any(|a| a == "--lexical");
             let both = args.iter().skip(3).any(|a| a == "--both");
-            // Language and folding configure stemming, which only the lexical
-            // index has.  Accepting them for a semantic build would be accepting
-            // settings that do nothing.
-            if !lexical && !both {
-                for a in args.iter().skip(3) {
-                    if a == "--lang" || a == "--fold-diacritics" {
-                        return Err(anyhow!(
-                            "{a} configures the lexical index; pass --lexical or --both"
-                        ));
-                    }
-                }
-            }
             let model = match args.iter().skip(3).position(|a| a == "--model") {
                 Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
                 None => model_named(DEFAULT_MODEL)?,
             };
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = apply_lang_flags(resolve_config(vault, given.as_deref())?, &args, 3);
+            let cfg = resolve_config(vault, given.as_deref())?;
             let lang = LangConfig { languages: cfg.languages.clone() };
             // The policy last indexed under, kept only so the error can say
             // which setting moved rather than that one did.
@@ -3234,7 +3200,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 4,
-                &["--lexical", "--any", "--fold-diacritics", "--json", "--model"],
+                &["--lexical", "--any", "--json", "--model"],
             )?;
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
@@ -3247,8 +3213,7 @@ fn main() -> Result<()> {
             };
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-                let fold = args.iter().skip(4).any(|a| a == "--fold-diacritics");
-                cmd_lexical(vault, query, k, conjunction, fold, json)
+                cmd_lexical(vault, query, k, conjunction, json)
             } else {
                 cmd_search(vault, query, k, want, json)
             }
@@ -3256,22 +3221,16 @@ fn main() -> Result<()> {
         Some("chunks") => {
             let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
-            reject_unknown_flags(&args, 3, &["--lang", "--model", "--config", "--lexical"])?;
+            reject_unknown_flags(&args, 3, &["--model", "--config", "--lexical"])?;
             // `--config` here is a dry run: try a policy without storing it or
             // paying for a reindex to find out what it would do.
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = apply_lang_flags(resolve_config(vault, given.as_deref())?, &args, 3);
+            let cfg = resolve_config(vault, given.as_deref())?;
             let lang = LangConfig { languages: cfg.languages.clone() };
             prepare_lang(&lang)?;
             let target = if args.iter().skip(3).any(|a| a == "--lexical") {
                 Target::Lexical
             } else {
-                // Same rule as `index`: a language picks a stemmer, and the
-                // semantic side has none.  Accepting it here would preview a
-                // setting that does nothing.
-                if args.iter().skip(3).any(|a| a == "--lang") {
-                    return Err(anyhow!("--lang previews the lexical index; add --lexical"));
-                }
                 Target::Semantic
             };
             cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target)
@@ -3751,18 +3710,14 @@ mod tests {
         assert_eq!(a.hash_for(Target::Semantic), b.hash_for(Target::Semantic));
         assert_ne!(a.hash_for(Target::Lexical), b.hash_for(Target::Lexical));
 
-        // A flag is another way of saying what the file says, merged on top and
-        // then cached — which is what stops `--lang` being forgotten and the
-        // index silently reverting to English alone.
-        let args: Vec<String> =
-            ["x", "index", "/v", "--lang", "en-US,de-DE", "--fold-diacritics"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        let merged = apply_lang_flags(Config::default(), &args, 3);
-        assert_eq!(merged.languages, vec!["en-US", "de-DE"]);
-        assert!(merged.fold_diacritics);
-        assert_eq!(merged.hash_for(Target::Semantic), a.hash_for(Target::Semantic));
+        // They are set only in the policy file, so there is one place to look
+        // and one thing to forget — which the cache then remembers for you.
+        let from_file: Config =
+            serde_json::from_str(r#"{"languages":["en-US","de-DE"],"fold_diacritics":true}"#)
+                .unwrap();
+        assert_eq!(from_file.languages, vec!["en-US", "de-DE"]);
+        assert!(from_file.fold_diacritics);
+        assert_eq!(from_file.hash_for(Target::Semantic), a.hash_for(Target::Semantic));
     }
 
     #[test]
