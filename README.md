@@ -88,7 +88,7 @@ org-semantic index   <dir> --lexical|--both [--full|--rehash]
                            [--lang en-US[,de-DE,…]|auto] [--fold]
 org-semantic search  <dir> <query> [k] [--model NAME] [--json]   by meaning
 org-semantic search  <dir> <query> [k] --lexical [--any] [--json]  by words
-org-semantic chunks  <dir> <path-substring> [--lang …] [--model NAME]
+org-semantic chunks  <dir> <path-substring> [--lexical] [--lang …] [--model NAME]
 org-semantic tokens  <dir> [limit] [--model NAME]     token-length distribution
 org-semantic models  [dir]                     models, and which are built here
 org-semantic serve                             JSON-RPC over stdio, for an editor
@@ -308,16 +308,56 @@ org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 
 ### What gets indexed
 
-By default, subtrees tagged `:noexport:` or `:ARCHIVE:` are left out — org's own
-markers for "not for consumption" and "put this away". Both inherit, so the rule
-covers a whole subtree, children included.
+Two things are decided by policy: which subtrees are indexed at all, and what
+happens to blocks.
 
-That is the only policy so far, and it lives in a file you own, named with
-`--config`:
+Subtrees tagged `:noexport:` or `:ARCHIVE:` are left out — org's own markers for
+"not for consumption" and "put this away". Both inherit, so the rule covers a
+whole subtree, children included.
+
+**Blocks are treated differently by each index, which is the point of having
+two.** Code embedded as prose pollutes a semantic search — a shell snippet lands
+near queries it has nothing to do with — but exact match is precisely what you
+want when hunting a flag or a function name. So by default the body of a `src`
+block is not embedded, and *is* searchable by word:
+
+```console
+$ org-semantic chunks ~/notes "smb" | tail -1
+    tail: "…autofs will pick it up.\n\n[src bash]\n\nAfterwards the volume survives…"
+
+$ org-semantic chunks ~/notes "smb" --lexical | tail -1
+    tail: "…mount_smbfs //user@server/share /Volumes/share -o nobrowse\n\nAfterwards…"
+```
+
+`"placeholder"` is why the first one still reads properly. Dropping the block
+outright would glue the paragraph before it to the one after — an adjacency the
+note never had — and lose the fact that a snippet was there at all, which is part
+of what the section is about. `[src bash]` keeps both, without forty lines of
+shell drowning the prose around it.
+
+The whole policy lives in a file you own, named with `--config`:
 
 ```json
-{ "exclude_tags": ["noexport", "ARCHIVE"] }
+{
+  "blocks": {
+    "src":     { "semantic": "placeholder", "lexical": true },
+    "example": { "semantic": "placeholder", "lexical": true },
+    "results": { "semantic": false,         "lexical": true },
+    "quote":   { "semantic": true,          "lexical": true },
+    "verse":   { "semantic": true,          "lexical": true }
+  },
+  "exclude_tags": ["noexport", "ARCHIVE"]
+}
 ```
+
+`semantic` takes `true` (embed it), `false` (drop it) or `"placeholder"`;
+`lexical` is a plain boolean, since labelling something in an exact-match index
+would only make `[src]` a searchable word. Babel `#+RESULTS:` and bare `: `
+fixed-width lines count as output, not prose. Quote and verse stay in both —
+they are prose someone chose to set off, not machine output.
+
+Those values are the defaults, so the block above describes what you get with no
+config at all.
 
 ```sh
 org-semantic index ~/notes --both --config ~/notes/indexing.json
@@ -344,7 +384,10 @@ Unknown keys are an error rather than ignored, for the same reason unknown flags
 are: a typo that does nothing looks exactly like a setting that does nothing.
 
 `chunks --config` applies a policy **without** storing it or reindexing, so you
-can see what a change would do before paying for it.
+can see what a change would do before paying for it. `chunks` previews the
+semantic index and `chunks --lexical` the word index — they no longer chunk the
+same way, so it shows one or the other rather than claiming to show "the"
+chunking.
 
 Over JSON-RPC the `index` method takes the same policy as a `config` object, so
 an editor can keep its own source of truth in whatever format suits it — a

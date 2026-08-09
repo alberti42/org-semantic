@@ -75,7 +75,8 @@ usage:
                               [--lang en-US[,de-DE,…]|auto] [--fold]
   org-semantic search  <vault> <query> [k] [--model NAME] [--json]
   org-semantic search  <vault> <query> [k] --lexical [--any] [--json]
-  org-semantic chunks  <vault> <path-substring> [--lang …] [--model NAME]
+  org-semantic chunks  <vault> <path-substring> [--lexical] [--lang …]
+                                                [--model NAME]
                                                 [--config FILE]
   org-semantic tokens  <vault> [limit] [--model NAME]
   org-semantic models  [vault]
@@ -308,6 +309,93 @@ fn rel_path(vault: &Path, f: &Path) -> String {
     f.strip_prefix(vault).unwrap_or(f).to_string_lossy().into_owned()
 }
 
+/// Which index is being built.  The two apply different block policies on
+/// purpose, so chunking has to know which one it is feeding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Target {
+    Semantic,
+    Lexical,
+}
+
+/// What becomes of a block's body in the semantic index.
+///
+/// `"placeholder"` is the one worth having: dropping a block outright glues the
+/// paragraph before it to the one after, which reads as an adjacency the note
+/// never had, and loses the fact that there *was* a snippet — which is part of
+/// what the section is about. Leaving `[src bash]` keeps the seam and the fact,
+/// without forty lines of shell drowning the prose around it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(untagged)]
+enum InSemantic {
+    /// `true` embeds the body, `false` drops it.
+    Body(bool),
+    Marker(Marker),
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Marker {
+    Placeholder,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct BlockPolicy {
+    semantic: InSemantic,
+    /// No placeholder here: labelling something in an exact-match index would
+    /// only make `[src]` a searchable term.
+    lexical: bool,
+}
+
+impl BlockPolicy {
+    const fn new(semantic: InSemantic, lexical: bool) -> Self {
+        BlockPolicy { semantic, lexical }
+    }
+}
+
+/// Per block kind.  A struct rather than a map so an unknown kind is a typo
+/// caught at parse time, not a rule that silently governs nothing.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+struct Blocks {
+    src: BlockPolicy,
+    example: BlockPolicy,
+    /// Babel output: generated, often long, and nobody looks for it by meaning.
+    results: BlockPolicy,
+    /// Quote and verse are prose someone chose to set off, not machine output,
+    /// so they stay in both.
+    quote: BlockPolicy,
+    verse: BlockPolicy,
+}
+
+impl Default for Blocks {
+    fn default() -> Self {
+        use InSemantic::{Body, Marker as M};
+        Blocks {
+            src: BlockPolicy::new(M(Marker::Placeholder), true),
+            example: BlockPolicy::new(M(Marker::Placeholder), true),
+            results: BlockPolicy::new(Body(false), true),
+            quote: BlockPolicy::new(Body(true), true),
+            verse: BlockPolicy::new(Body(true), true),
+        }
+    }
+}
+
+impl Blocks {
+    fn of(&self, kind: &str) -> BlockPolicy {
+        match kind {
+            "src" => self.src,
+            "example" => self.example,
+            "results" => self.results,
+            "quote" => self.quote,
+            "verse" => self.verse,
+            // An unrecognised block is prose until proven otherwise: better to
+            // index something unwanted than to drop a kind we never considered.
+            _ => BlockPolicy::new(InSemantic::Body(true), true),
+        }
+    }
+}
+
 /// Indexing policy: what in a vault is worth indexing at all.
 ///
 /// Kept in a file the user owns, wherever they like, and named with `--config`.
@@ -320,6 +408,8 @@ fn rel_path(vault: &Path, f: &Path) -> String {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(deny_unknown_fields, default)]
 struct Config {
+    /// What to do with each kind of block.
+    blocks: Blocks,
     /// Subtrees carrying any of these tags are not indexed.  `noexport` is org's
     /// own "not for consumption" marker and `ARCHIVE` its "put this away"; both
     /// inherit down the outline, which is what makes this a subtree rule rather
@@ -333,7 +423,10 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { exclude_tags: vec!["noexport".into(), "ARCHIVE".into()] }
+        Config {
+            blocks: Blocks::default(),
+            exclude_tags: vec!["noexport".into(), "ARCHIVE".into()],
+        }
     }
 }
 
@@ -344,7 +437,8 @@ impl Config {
         let mut tags = self.exclude_tags.clone();
         tags.sort();
         tags.dedup();
-        serde_json::to_string(&Config { exclude_tags: tags }).unwrap_or_default()
+        serde_json::to_string(&Config { blocks: self.blocks.clone(), exclude_tags: tags })
+            .unwrap_or_default()
     }
 
     fn hash(&self) -> u64 {
@@ -367,19 +461,38 @@ impl Config {
     /// than that something did.
     fn differences(&self, other: &Config) -> Vec<String> {
         let mut out = Vec::new();
-        let gone: Vec<&String> =
-            other.exclude_tags.iter().filter(|t| !self.exclude_tags.contains(t)).collect();
-        let added: Vec<&String> =
-            self.exclude_tags.iter().filter(|t| !other.exclude_tags.contains(t)).collect();
-        if !gone.is_empty() || !added.is_empty() {
+        if self.exclude_tags != other.exclude_tags {
             out.push(format!(
                 "exclude_tags: was [{}], now [{}]",
                 other.exclude_tags.join(", "),
                 self.exclude_tags.join(", ")
             ));
-            let _ = (&gone, &added);
+        }
+        for kind in ["src", "example", "results", "quote", "verse"] {
+            let (a, b) = (self.blocks.of(kind), other.blocks.of(kind));
+            if a.semantic != b.semantic {
+                out.push(format!(
+                    "blocks.{kind}.semantic: was {}, now {}",
+                    describe_semantic(b.semantic),
+                    describe_semantic(a.semantic)
+                ));
+            }
+            if a.lexical != b.lexical {
+                out.push(format!(
+                    "blocks.{kind}.lexical: was {}, now {}",
+                    b.lexical, a.lexical
+                ));
+            }
         }
         out
+    }
+}
+
+fn describe_semantic(v: InSemantic) -> &'static str {
+    match v {
+        InSemantic::Body(true) => "true",
+        InSemantic::Body(false) => "false",
+        InSemantic::Marker(_) => "\"placeholder\"",
     }
 }
 
@@ -596,12 +709,22 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 /// embedding is not stemmed, so classifying a note there would be labelling for
 /// its own sake.  Language belongs to the lexical index, which needs it to pick
 /// a stemmer.
+/// The line left where a block's body was: enough to say what stood here.
+fn placeholder(kind: &str, arg: &str) -> String {
+    if arg.is_empty() || arg.starts_with(':') {
+        format!("[{kind}]")
+    } else {
+        format!("[{kind} {arg}]")
+    }
+}
+
 fn chunk_file(
     path: &Path,
     rel: &str,
     text: &str,
     lang: Option<&LangConfig>,
     cfg: &Config,
+    target: Target,
 ) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
@@ -621,6 +744,11 @@ fn chunk_file(
     let mut cur_line = 1usize;
     let mut buf = String::new();
     let mut in_drawer = false;
+    // The block whose body we are inside, and whether to keep it.
+    let mut in_block: Option<bool> = None;
+    // `#+RESULTS:` and bare `: ` fixed-width lines are literal too, but have no
+    // `#+end_`; they run until something that is not one of them.
+    let mut literal_run: Option<bool> = None;
     let mut seen_heading = false;
     let mut cur_lang = lang.map(|l| l.undeclared().to_string()).unwrap_or_default();
 
@@ -747,6 +875,71 @@ fn chunk_file(
             cur_lang = cfg.accept_declared(&l, rel);
             continue;
         }
+        // Blocks: what happens to the body is policy, not prose.
+        if let Some(keep) = in_block {
+            if strip_prefix_ci(trimmed, "#+end_").is_some() {
+                in_block = None;
+            } else if keep {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "#+begin_") {
+            let mut words = rest.split_whitespace();
+            let kind = words.next().unwrap_or("").to_ascii_lowercase();
+            let arg = words.next().unwrap_or("");
+            let p = cfg.blocks.of(&kind);
+            in_block = Some(match target {
+                Target::Lexical => p.lexical,
+                Target::Semantic => p.semantic == InSemantic::Body(true),
+            });
+            if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
+                buf.push_str(&placeholder(&kind, arg));
+                buf.push('\n');
+            }
+            continue;
+        }
+
+        // A `#+RESULTS:` header, or a run of fixed-width lines, which org treats
+        // as literal exactly as an example block is.
+        let fixed = trimmed == ":" || trimmed.starts_with(": ");
+        if let Some(rest) = strip_prefix_ci(trimmed, "#+results:") {
+            let _ = rest;
+            let p = cfg.blocks.results;
+            let keep = match target {
+                Target::Lexical => p.lexical,
+                Target::Semantic => p.semantic == InSemantic::Body(true),
+            };
+            if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
+                buf.push_str(&placeholder("results", ""));
+                buf.push('\n');
+            }
+            literal_run = Some(keep);
+            continue;
+        }
+        if fixed {
+            let p = if literal_run.is_some() { cfg.blocks.results } else { cfg.blocks.example };
+            let keep = literal_run.unwrap_or(match target {
+                Target::Lexical => p.lexical,
+                Target::Semantic => p.semantic == InSemantic::Body(true),
+            });
+            if literal_run.is_none() {
+                if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
+                    // Once for the run, not once per line.
+                    buf.push_str(&placeholder("example", ""));
+                    buf.push('\n');
+                }
+                literal_run = Some(keep);
+            }
+            if keep {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            continue;
+        }
+        literal_run = None;
+
         // Other keywords, drawer ends and comments are markup, not prose.
         if trimmed.starts_with("#+") || trimmed.starts_with("# ") || trimmed == ":END:" {
             continue;
@@ -1895,7 +2088,7 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     for st in &scan.stale {
         let f = vault.join(&st.path);
-        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg));
+        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg, Target::Lexical));
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -1908,7 +2101,7 @@ fn cmd_index_lexical(
         for f in &files {
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
-                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg)),
+                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg, Target::Lexical)),
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
         }
@@ -2056,7 +2249,7 @@ fn cmd_index(
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
         let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, &path, text, None, cfg), &measure, TOKEN_LIMIT);
+            enforce_token_limit(chunk_file(f, &path, text, None, cfg, Target::Semantic), &measure, TOKEN_LIMIT);
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             pending.push(chunks.len());
@@ -2497,7 +2690,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default()));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default(), Target::Semantic));
         }
         if chunks.len() >= n {
             break;
@@ -2573,7 +2766,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default()));
+            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default(), Target::Semantic));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -2717,7 +2910,21 @@ fn vault_arg<'a>(args: &'a [String], usage: &str) -> Result<&'a Path> {
 
 /// Print the chunks a file produces, without embedding — for checking chunking
 /// decisions (boundaries, overlap, headings) without paying for a full index.
-fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model, cfg: &Config) -> Result<()> {
+/// Preview what an index will actually store, for the index you name.
+///
+/// The two differ in more than one way now — the semantic side re-splits at 512
+/// tokens and drops block bodies, the lexical side does neither — so a preview
+/// that showed one of them while claiming to show "the chunking" would be worse
+/// than none.  Bare is semantic, `--lexical` is the word index, as everywhere
+/// else.
+fn cmd_chunks(
+    vault: &Path,
+    needle: &str,
+    lang: &LangConfig,
+    m: &Model,
+    cfg: &Config,
+    target: Target,
+) -> Result<()> {
     let tok = tokenizer_for(m)?;
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -2727,7 +2934,14 @@ fn cmd_chunks(vault: &Path, needle: &str, lang: &LangConfig, m: &Model, cfg: &Co
         let measure = |s: &str| n_tokens(&tok, s);
         let (chunks, _, _) =
             enforce_token_limit(
-                chunk_file(f, &rel_path(vault, f), &text, Some(lang), cfg),
+                chunk_file(
+                    f,
+                    &rel_path(vault, f),
+                    &text,
+                    (target == Target::Lexical).then_some(lang),
+                    cfg,
+                    target,
+                ),
                 &measure,
                 TOKEN_LIMIT,
             );
@@ -2924,14 +3138,19 @@ fn main() -> Result<()> {
         Some("chunks") => {
             let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
-            reject_unknown_flags(&args, 3, &["--lang", "--model", "--config"])?;
+            reject_unknown_flags(&args, 3, &["--lang", "--model", "--config", "--lexical"])?;
             let lang = lang_args(&args, 3);
             prepare_lang(&lang)?;
             // `--config` here is a dry run: try a policy without storing it or
             // paying for a reindex to find out what it would do.
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
             let cfg = resolve_config(vault, given.as_deref())?;
-            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg)
+            let target = if args.iter().skip(3).any(|a| a == "--lexical") {
+                Target::Lexical
+            } else {
+                Target::Semantic
+            };
+            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target)
         }
         Some("serve") => serve::serve(),
         Some("models") => {
@@ -3024,7 +3243,7 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None, &Config::default())
+        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None, &Config::default(), Target::Semantic)
     }
 
     #[test]
@@ -3304,16 +3523,51 @@ mod tests {
         let text = "#+title: T\n* Public\nordinary prose here\n\
                     * Private :noexport:\nsecret prose here\n\
                     ** Deeper\nstill under the excluded parent\n";
-        let c = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &Config::default());
+        let c = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &Config::default(), Target::Semantic);
         let texts: Vec<&str> = c.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts.len(), 1, "only the public section survives: {texts:?}");
         assert!(texts[0].contains("ordinary"));
 
         // The exclusion is inherited, so it is the child that proves it works:
         // a per-heading rule would have kept "Deeper".
-        let keep = Config { exclude_tags: vec![] };
-        let all = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &keep);
+        let keep = Config { exclude_tags: vec![], ..Config::default() };
+        let all = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &keep, Target::Semantic);
         assert_eq!(all.len(), 3, "and nothing is dropped when nothing is excluded");
+    }
+
+    #[test]
+    fn a_block_body_is_embedded_or_labelled_by_policy() {
+        let text = "#+title: T\n* S\nbefore the snippet\n\n\
+                    #+begin_src bash\nrm -rf /tmp/x\n#+end_src\n\n\
+                    after the snippet\n";
+        let cfg = Config::default();
+        let sem = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Semantic);
+        let lex = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical);
+
+        // The body is not embedded, but the seam and the fact survive: without
+        // the placeholder the two paragraphs would read as adjacent.
+        assert!(!sem[0].text.contains("rm -rf"), "code is not embedded: {:?}", sem[0].text);
+        assert!(sem[0].text.contains("[src bash]"), "labelled: {:?}", sem[0].text);
+        assert!(sem[0].text.contains("before") && sem[0].text.contains("after"));
+
+        // Exact match is what lexical is for, so the body stays whole there.
+        assert!(lex[0].text.contains("rm -rf /tmp/x"), "{:?}", lex[0].text);
+        assert!(!lex[0].text.contains("[src"), "no label in an exact-match index");
+    }
+
+    #[test]
+    fn results_go_but_quotations_stay() {
+        let text = "#+title: T\n* S\nprose\n\n#+RESULTS:\n: mounted ok\n: 0 errors\n\n\
+                    #+begin_quote\nA quotation is prose set off.\n#+end_quote\n";
+        let cfg = Config::default();
+        let sem = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Semantic);
+        // Babel output is generated and nobody looks for it by meaning; a
+        // quotation is prose someone chose to set off.
+        assert!(!sem[0].text.contains("mounted ok"), "{:?}", sem[0].text);
+        assert!(sem[0].text.contains("quotation is prose"), "{:?}", sem[0].text);
+
+        let lex = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical);
+        assert!(lex[0].text.contains("mounted ok"), "still findable by word");
     }
 
     #[test]
@@ -3323,7 +3577,7 @@ mod tests {
             serde_json::from_str(r#"{"exclude_tags":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
         assert_eq!(a.hash(), b.hash(), "order and duplicates must not force a rebuild");
         assert_eq!(a.hash(), Config::default().hash(), "restating the defaults is free");
-        assert_ne!(a.hash(), Config { exclude_tags: vec![] }.hash(), "a real change is seen");
+        assert_ne!(a.hash(), Config { exclude_tags: vec![], ..Config::default() }.hash(), "a real change is seen");
 
         // A typo must not be a setting that silently does nothing.
         assert!(serde_json::from_str::<Config>(r#"{"exclude_tag":["x"]}"#).is_err());
@@ -3332,7 +3586,7 @@ mod tests {
     #[test]
     fn a_changed_policy_is_refused_and_names_what_moved() {
         let old = Config::default();
-        let new = Config { exclude_tags: vec![] };
+        let new = Config { exclude_tags: vec![], ..Config::default() };
         assert!(check_config(Some(old.hash()), &old, Some(&old), "semantic").is_ok());
         let err = check_config(Some(old.hash()), &new, Some(&old), "semantic")
             .unwrap_err()
@@ -3588,7 +3842,7 @@ mod tests {
 
     #[test]
     fn chunks_store_a_vault_relative_path() {
-        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None, &Config::default());
+        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None, &Config::default(), Target::Semantic);
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
 
@@ -3768,6 +4022,7 @@ mod tests {
             "#+title: T\n* English part\nalpha\n\n# ltex: language=de-DE\n* Deutscher Teil\nbeta\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
         assert_eq!(by("alpha").lang, "en-US", "the configured default");
@@ -3777,7 +4032,7 @@ mod tests {
     #[test]
     fn the_default_language_is_configurable() {
         let cfg = LangConfig::parse("it-IT");
-        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg), &Config::default());
+        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg), &Config::default(), Target::Lexical);
         assert_eq!(c[0].lang, "it-IT");
     }
 
@@ -3920,6 +4175,7 @@ mod tests {
             "#+title: Notiz\n* Abschnitt\nDie Wörter der deutschen Sprache sind manchmal sehr lang\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         assert_eq!(de[0].lang, "de");
         let en = chunk_file(
@@ -3928,6 +4184,7 @@ mod tests {
             "#+title: Note\n* Section\nThe damped oscillations of a trapped atom in the tweezer\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         assert_eq!(en[0].lang, "en");
     }
@@ -3943,6 +4200,7 @@ mod tests {
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n             # ltex: language=it-IT\n* Two\nThe text here is still English but declared Italian\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
@@ -3961,6 +4219,7 @@ mod tests {
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n# ltex: language=it-IT\n* Two\nQuesto paragrafo dichiara la propria lingua\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
@@ -3977,6 +4236,7 @@ mod tests {
             "#+title: N\n* One\nPlain English body text here\n\n# ltex: language=de-DE\n* Two\nDieser Abschnitt ist auf Deutsch geschrieben\n",
             Some(&cfg),
             &Config::default(),
+            Target::Lexical,
         );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("Plain").lang, "en-US");
@@ -3989,14 +4249,14 @@ mod tests {
         // would file the chunk under a language nothing ever searches.  The
         // first configured language is the vault's default and takes over.
         let body = "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
-        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")), &Config::default());
+        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")), &Config::default(), Target::Lexical);
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
-        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")), &Config::default());
+        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")), &Config::default(), Target::Lexical);
         assert_eq!(single[0].lang, "en-US");
 
         // Under `auto` there is no configured default, so it is classified.
-        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")), &Config::default());
+        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")), &Config::default(), Target::Lexical);
         assert_eq!(auto[0].lang, "en");
     }
 }
