@@ -59,10 +59,8 @@ impl Server {
                     chunks.len()
                 ));
             }
-            let vectors: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
+            let vectors: Vec<f32> =
+                raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             let model = model_with(m.which.clone(), None, false)?;
             let baseline = Baseline::of(&vectors, m.dim);
             self.semantic
@@ -175,8 +173,7 @@ impl Server {
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
         let cfg = match p.get("config") {
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|e| anyhow!("config: {e}"))?,
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
             None => resolve_config(&vault, None)?,
         };
         let previous = Config::read(&config_path(&state_dir(&vault))).ok();
@@ -186,10 +183,9 @@ impl Server {
                 Some(name) => model_named(name)?,
                 // Not `choose_index`: the first index for a vault has to be
                 // creatable, and nothing is built yet to choose among.
-                None => built_models(&vault)
-                    .first()
-                    .copied()
-                    .unwrap_or(model_named(DEFAULT_MODEL)?),
+                None => {
+                    built_models(&vault).first().copied().unwrap_or(model_named(DEFAULT_MODEL)?)
+                }
             };
             if !full {
                 check_config(
@@ -230,8 +226,15 @@ impl Server {
                     Target::Lexical,
                 )?;
             }
-            let report =
-                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut out)?;
+            let report = cmd_index_lexical(
+                &vault,
+                full,
+                rehash,
+                &lang,
+                cfg.fold_diacritics,
+                &cfg,
+                &mut out,
+            )?;
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
@@ -251,10 +254,8 @@ impl Server {
         let dir = semantic_dir(&key.0, s.which);
         let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
         let raw = fs::read(dir.join("vectors.f32"))?;
-        let vectors: Vec<f32> = raw
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
+        let vectors: Vec<f32> =
+            raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
         s.baseline = Baseline::of(&vectors, s.which.dim);
         s.chunks = chunks;
         s.vectors = vectors;

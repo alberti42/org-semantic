@@ -51,6 +51,10 @@ struct Model {
 /// BGE's query prefix, shared by the whole v1.5 English family.
 const BGE_QUERY: &str = "Represent this sentence for searching relevant passages: ";
 
+// Laid out as a table on purpose: the columns are what make a missing or
+// mismatched prefix visible at a glance, and that is the mistake this list
+// exists to prevent.  rustfmt would give each field its own line and lose it.
+#[rustfmt::skip]
 const MODELS: &[Model] = &[
     Model { name: "bge-small-en", which: EmbeddingModel::BGESmallENV15, dim: 384,
             query: BGE_QUERY, passage: "", about: "English" },
@@ -546,10 +550,8 @@ impl Config {
     }
 
     fn read(path: &Path) -> Result<Config> {
-        let bytes = fs::read(path)
-            .with_context(|| format!("reading config {}", path.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing config {}", path.display()))
+        let bytes = fs::read(path).with_context(|| format!("reading config {}", path.display()))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing config {}", path.display()))
     }
 
     /// What changed, in words, so an error can say which setting moved rather
@@ -599,10 +601,9 @@ impl Config {
                     describe_semantic(b.semantic),
                     describe_semantic(a.semantic)
                 )),
-                Target::Lexical if a.lexical != b.lexical => out.push(format!(
-                    "blocks.{kind}.lexical: was {}, now {}",
-                    b.lexical, a.lexical
-                )),
+                Target::Lexical if a.lexical != b.lexical => {
+                    out.push(format!("blocks.{kind}.lexical: was {}, now {}", b.lexical, a.lexical))
+                }
                 _ => {}
             }
         }
@@ -686,7 +687,6 @@ fn check_config(
 struct LangConfig {
     /// Mirrors `lsp-ltex-plus-language`, whose default is "en-US".
     languages: Vec<String>,
-
 }
 
 impl Default for LangConfig {
@@ -762,6 +762,8 @@ impl LangConfig {
 /// TODO keywords recognised when a file does not declare its own with
 /// `#+TODO:`.  An explicit set rather than an all-caps heuristic: headings like
 /// "GPU benchmarks" or "PID loop" would otherwise lose their first word.
+// Two lines, not ten: the split is the org convention, not-done before done.
+#[rustfmt::skip]
 const DEFAULT_TODO_KEYWORDS: &[&str] = &[
     "TODO", "NEXT", "STARTED", "WAITING", "HOLD", "SOMEDAY", "PROJ",
     "DONE", "CANCELLED", "CANCELED",
@@ -812,8 +814,7 @@ fn parse_headline(line: &str, todo_keywords: &[String]) -> Option<Headline> {
             let parts: Vec<&str> = last.trim_matches(':').split(':').collect();
             let ok = !parts.is_empty()
                 && parts.iter().all(|t| {
-                    !t.is_empty()
-                        && t.chars().all(|c| c.is_alphanumeric() || "_@#%-".contains(c))
+                    !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || "_@#%-".contains(c))
                 });
             if ok {
                 tags = parts.iter().map(|t| t.to_string()).collect();
@@ -873,10 +874,7 @@ fn chunk_file(
     let mut tag_stack: Vec<Vec<String>> = Vec::new();
     let mut todo_stack: Vec<Option<String>> = Vec::new();
     let mut prio_stack: Vec<Option<char>> = Vec::new();
-    let mut title = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let mut title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut file_tags: Vec<String> = Vec::new();
     let mut todo_keywords: Vec<String> =
         DEFAULT_TODO_KEYWORDS.iter().map(|s| s.to_string()).collect();
@@ -979,8 +977,19 @@ fn chunk_file(
         }
 
         if let Some(h) = parse_headline(line, &todo_keywords) {
-            flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
-                  &title, &file_tags, &cur_id, cur_line, &cur_lang);
+            flush(
+                &mut chunks,
+                &buf,
+                &stack,
+                &tag_stack,
+                &todo_stack,
+                &prio_stack,
+                &title,
+                &file_tags,
+                &cur_id,
+                cur_line,
+                &cur_lang,
+            );
             buf.clear();
             let depth = h.level.saturating_sub(1);
             stack.truncate(depth);
@@ -1010,8 +1019,19 @@ fn chunk_file(
         }
         // Takes effect from here on, so a note may switch language part-way.
         if let Some((cfg, l)) = lang.zip(ltex_language(line)) {
-            flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
-                  &title, &file_tags, &cur_id, cur_line, &cur_lang);
+            flush(
+                &mut chunks,
+                &buf,
+                &stack,
+                &tag_stack,
+                &todo_stack,
+                &prio_stack,
+                &title,
+                &file_tags,
+                &cur_id,
+                cur_line,
+                &cur_lang,
+            );
             buf.clear();
             cur_lang = cfg.accept_declared(&l, rel);
             continue;
@@ -1089,8 +1109,19 @@ fn chunk_file(
         buf.push_str(line);
         buf.push('\n');
     }
-    flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
-          &title, &file_tags, &cur_id, cur_line, &cur_lang);
+    flush(
+        &mut chunks,
+        &buf,
+        &stack,
+        &tag_stack,
+        &todo_stack,
+        &prio_stack,
+        &title,
+        &file_tags,
+        &cur_id,
+        cur_line,
+        &cur_lang,
+    );
 
     // Classification is deferred to here so it sees the note's prose rather than
     // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
@@ -1098,11 +1129,8 @@ fn chunk_file(
     // are replaced — an explicit `# ltex: language=…` always wins.
     if let Some(lang) = lang.filter(|l| l.detects()) {
         let undeclared = lang.undeclared();
-        let prose: Vec<&str> = chunks
-            .iter()
-            .filter(|c| c.lang == undeclared)
-            .map(|c| c.text.as_str())
-            .collect();
+        let prose: Vec<&str> =
+            chunks.iter().filter(|c| c.lang == undeclared).map(|c| c.text.as_str()).collect();
         if !prose.is_empty() {
             let detected = detect_lang(&prose.join("\n"), &lang.candidates());
             for c in chunks.iter_mut().filter(|c| c.lang == undeclared) {
@@ -1126,8 +1154,7 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     // `get` rather than a slice: the notes are full of em-dashes and arrows, and
     // a byte index that lands inside one would panic on a plain `s[..n]`.
     let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| &s[prefix.len()..])
+    head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
 }
 
 /// Begin each piece with the tail of the one before it, so an idea cut at a
@@ -1202,7 +1229,6 @@ fn split_long(body: &str) -> Vec<String> {
     }
     out
 }
-
 
 // ------------------------------------------------------- token-limit enforcement
 
@@ -1317,11 +1343,9 @@ fn hard_split(para: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec
 // ----------------------------------------------------------------- embedding
 
 fn xdg_cache() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache")
-        })
+    std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache")
+    })
 }
 
 fn cache_dir() -> PathBuf {
@@ -1333,9 +1357,8 @@ fn model_with(
     max_length: Option<usize>,
     coreml: bool,
 ) -> Result<TextEmbedding> {
-    let mut opts = InitOptions::new(which)
-        .with_cache_dir(cache_dir())
-        .with_show_download_progress(true);
+    let mut opts =
+        InitOptions::new(which).with_cache_dir(cache_dir()).with_show_download_progress(true);
     if let Some(n) = max_length {
         opts = opts.with_max_length(n);
     }
@@ -1417,8 +1440,7 @@ impl Filters {
 /// `lang:de-DE` finds only the one.
 fn lang_matches(c: &str, want: &str) -> bool {
     c.eq_ignore_ascii_case(want)
-        || c.to_ascii_lowercase()
-            .starts_with(&format!("{}-", want.to_ascii_lowercase()))
+        || c.to_ascii_lowercase().starts_with(&format!("{}-", want.to_ascii_lowercase()))
 }
 
 /// Is PATH inside directory D?  Compared component-wise so that `dir:03 Lit`
@@ -1504,8 +1526,8 @@ mod lexical {
     use tantivy::collector::TopDocs;
     use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
     use tantivy::schema::{
-        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED,
-        STRING, TEXT,
+        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+        TEXT,
     };
     use tantivy::tokenizer::{
         AsciiFoldingFilter, Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer,
@@ -1556,8 +1578,7 @@ mod lexical {
             // No fallback to `en` on an empty chunk list: a run with nothing
             // stale would union it into an existing set, which reads as a
             // schema change and forces a rebuild that changes nothing.
-            let mut langs: Vec<String> =
-                chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
+            let mut langs: Vec<String> = chunks.iter().map(|c| primary_subtag(&c.lang)).collect();
             if let Some(p) = previous {
                 langs.extend(p.langs.iter().cloned());
             }
@@ -1826,10 +1847,7 @@ mod lexical {
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let term = |field, v: &str| -> Box<dyn Query> {
-            Box::new(TermQuery::new(
-                Term::from_field_text(field, v),
-                IndexRecordOption::Basic,
-            ))
+            Box::new(TermQuery::new(Term::from_field_text(field, v), IndexRecordOption::Basic))
         };
         for t in &f.tags {
             clauses.push((Occur::Must, term(fl.tags, t)));
@@ -1911,11 +1929,6 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 /// than misread.
 const INDEX_VERSION: u32 = 3;
 
-/// Recorded so that changing the embedding model invalidates every vector.
-/// Vectors from two different models are not comparable, and mixing them
-/// silently degrades every search rather than failing.
-
-
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
 /// move mtime without touching content, and re-embedding on that would be
@@ -1939,6 +1952,9 @@ struct Manifest {
     /// Hash of the normalized `Config` this index was built under.
     #[serde(default)]
     config: u64,
+    /// Recorded so that changing the embedding model invalidates every vector.
+    /// Vectors from two different models are not comparable, and mixing them
+    /// silently degrades every search rather than failing.
     model: String,
     dim: usize,
     /// Absolute note path to a hash of its bytes.  Content rather than mtime:
@@ -2002,7 +2018,8 @@ struct LoadedIndex {
 /// `vectors.f32` are positionally coupled, so a mismatch does not fail loudly —
 /// it silently returns the wrong note for every query.
 fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
-    let manifest: Manifest = serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
     // A different model's vectors are not comparable with this one's, and a
     // different dimension cannot even be read, so either means a full rebuild.
     if manifest.version != INDEX_VERSION || manifest.model != m.name || manifest.dim != m.dim {
@@ -2012,7 +2029,8 @@ fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
         );
         return None;
     }
-    let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json")).ok()?).ok()?;
+    let chunks: Vec<Chunk> =
+        serde_json::from_slice(&fs::read(dir.join("chunks.json")).ok()?).ok()?;
     let raw = fs::read(dir.join("vectors.f32")).ok()?;
     if raw.len() != chunks.len() * m.dim * 4 {
         eprintln!(
@@ -2022,21 +2040,13 @@ fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
         );
         return None;
     }
-    let vectors: Vec<f32> = raw
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
+    let vectors: Vec<f32> =
+        raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     let mut by_path: std::collections::HashMap<String, Vec<usize>> = Default::default();
     for (i, c) in chunks.iter().enumerate() {
         by_path.entry(c.path.clone()).or_default().push(i);
     }
-    Some(LoadedIndex {
-        chunks,
-        vectors,
-        files: manifest.files,
-        stamps: manifest.stamps,
-        by_path,
-    })
+    Some(LoadedIndex { chunks, vectors, files: manifest.files, stamps: manifest.stamps, by_path })
 }
 
 fn save_index(
@@ -2085,10 +2095,7 @@ fn semantic_dir(vault: &Path, m: &Model) -> PathBuf {
 
 /// Which models have a semantic index built for this vault.
 fn built_models(vault: &Path) -> Vec<&'static Model> {
-    MODELS
-        .iter()
-        .filter(|m| semantic_dir(vault, m).join("manifest.json").exists())
-        .collect()
+    MODELS.iter().filter(|m| semantic_dir(vault, m).join("manifest.json").exists()).collect()
 }
 
 fn state_dir(vault: &Path) -> PathBuf {
@@ -2120,18 +2127,16 @@ struct Scan {
     new: usize,
 }
 
+/// What a previous run recorded about the notes it saw: a content hash and a
+/// `(mtime, size)` stamp, each keyed by vault-relative path.  Borrowed from
+/// whichever manifest the caller loaded, since the two indexes keep their own.
+type Seen<'a> =
+    (&'a std::collections::BTreeMap<String, u64>, &'a std::collections::BTreeMap<String, Stamp>);
+
 /// Three outcomes per note, cheapest first: its stamp matches, so it is not even
 /// read; its stamp moved but its bytes hash the same, so it is read and reused;
 /// or it is genuinely new or changed, and the caller must redo its work.
-fn scan_vault(
-    vault: &Path,
-    files: &[PathBuf],
-    prev: Option<(
-        &std::collections::BTreeMap<String, u64>,
-        &std::collections::BTreeMap<String, Stamp>,
-    )>,
-    rehash: bool,
-) -> Scan {
+fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: bool) -> Scan {
     let mut sc = Scan {
         hashes: Default::default(),
         stamps: Default::default(),
@@ -2265,7 +2270,9 @@ fn cmd_index_lexical(
         for f in &files {
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
-                Ok(text) => chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg, Target::Lexical)),
+                Ok(text) => {
+                    chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg, Target::Lexical))
+                }
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
         }
@@ -2377,18 +2384,21 @@ fn cmd_index(
     let old = if full { None } else { load_index(&dir, m) };
 
     let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
-    let Scan { hashes, stamps, reuse, stale, dropped, by_stamp, by_hash, changed: changed_files, new: new_files } =
-        scan;
+    let Scan {
+        hashes,
+        stamps,
+        reuse,
+        stale,
+        dropped,
+        by_stamp,
+        by_hash,
+        changed: changed_files,
+        new: new_files,
+    } = scan;
     let dropped = dropped.len();
 
     // Loaded only if something actually needs chunking.
-    let tok = if stale.is_empty() {
-        None
-    } else {
-        Some(
-            tokenizer_for(m)?,
-        )
-    };
+    let tok = if stale.is_empty() { None } else { Some(tokenizer_for(m)?) };
 
     // Assembled in file order with a slot per chunk.  Reused notes copy their
     // vectors straight across; stale ones leave zeroed slots that the embedding
@@ -2438,8 +2448,11 @@ fn cmd_index(
         let Some(text) = stale_text.get(path.as_str()) else { continue };
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
-        let (cs, n, lens) =
-            enforce_token_limit(chunk_file(f, &path, text, None, cfg, Target::Semantic), &measure, TOKEN_LIMIT);
+        let (cs, n, lens) = enforce_token_limit(
+            chunk_file(f, &path, text, None, cfg, Target::Semantic),
+            &measure,
+            TOKEN_LIMIT,
+        );
         resplit += n;
         for (c, len) in cs.into_iter().zip(lens) {
             // Confirmed against the strings themselves: the key only finds the
@@ -2459,7 +2472,7 @@ fn cmd_index(
                     pending.push(chunks.len());
                     pending_len.push(len);
                     chunks.push(c);
-                    vectors.extend(std::iter::repeat(0.0).take(m.dim));
+                    vectors.extend(std::iter::repeat_n(0.0, m.dim));
                 }
             }
         }
@@ -2481,11 +2494,8 @@ fn cmd_index(
     // The carried count is what makes a large note cheap to edit, so it is
     // worth saying out loud rather than leaving as an unexplained small number
     // next to a file the user knows they changed.
-    let reused_here = if carried > 0 {
-        format!(" · {carried} unchanged within them")
-    } else {
-        String::new()
-    };
+    let reused_here =
+        if carried > 0 { format!(" · {carried} unchanged within them") } else { String::new() };
     writeln!(
         out,
         "{} chunks · {} to embed{reused_here} · scanned in {:.2}s",
@@ -2555,9 +2565,7 @@ fn cmd_index(
         let (mut done, mut tokens_done) = (0usize, 0usize);
         for group in order.chunks(BATCH) {
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
-            let vs = model
-                .embed(&batch, Some(BATCH))
-                .map_err(|e| anyhow!("embedding: {e}"))?;
+            let vs = model.embed(&batch, Some(BATCH)).map_err(|e| anyhow!("embedding: {e}"))?;
             for (&i, mut v) in group.iter().zip(vs) {
                 normalize(&mut v);
                 let slot = pending[i] * m.dim;
@@ -2724,7 +2732,12 @@ fn select<'a>(scored: &[(f32, &'a Chunk)], lim: Limits) -> Vec<Group<'a>> {
 /// anything: an absolute path so it need not know where the vault is, the
 /// `:ID:` when there is one so it can jump through `org-id` and survive the note
 /// moving, and the line as the fallback when there is not.
-fn hits_json(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, base: Option<Baseline>) -> serde_json::Value {
+fn hits_json(
+    vault: &Path,
+    scored: &[(f32, &Chunk)],
+    lim: Limits,
+    base: Option<Baseline>,
+) -> serde_json::Value {
     let hits: Vec<serde_json::Value> = select(scored, lim)
         .iter()
         .flat_map(|g| g.hits.iter())
@@ -2789,16 +2802,12 @@ fn report(scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
         }
         if !c.tags.is_empty() || c.todo.is_some() {
             let todo = c.todo.as_deref().map(|t| format!("{t} ")).unwrap_or_default();
-            let tags = if c.tags.is_empty() {
-                String::new()
-            } else {
-                format!(":{}:", c.tags.join(":"))
-            };
+            let tags =
+                if c.tags.is_empty() { String::new() } else { format!(":{}:", c.tags.join(":")) };
             println!("       {todo}{tags}");
         }
         for (score, c) in &g.hits {
-            let preview: String =
-                c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
+            let preview: String = c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
             // Several passages here means one section outran `MAX_CHARS` and was
             // divided; they are numbered by line so they can be told apart.
             // Raw score: within one node every passage shares the same offset,
@@ -2861,22 +2870,23 @@ fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static M
     }
 }
 
-fn cmd_search(vault: &Path, query: &str, lim: Limits, want: Option<&'static Model>, json: bool) -> Result<()> {
+fn cmd_search(
+    vault: &Path,
+    query: &str,
+    lim: Limits,
+    want: Option<&'static Model>,
+    json: bool,
+) -> Result<()> {
     let m = choose_index(vault, want)?;
     let dir = semantic_dir(vault, m);
     let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
     let raw = fs::read(dir.join("vectors.f32"))?;
     let n = raw.len() / (m.dim * 4);
     if n != chunks.len() {
-        return Err(anyhow!(
-            "index is inconsistent: {n} vectors for {} chunks",
-            chunks.len()
-        ));
+        return Err(anyhow!("index is inconsistent: {n} vectors for {} chunks", chunks.len()));
     }
-    let vectors: Vec<f32> = raw
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
+    let vectors: Vec<f32> =
+        raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
 
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
@@ -2889,11 +2899,7 @@ fn cmd_search(vault: &Path, query: &str, lim: Limits, want: Option<&'static Mode
     }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&chunks[i])).collect();
     if !f.is_empty() && !json {
-        println!(
-            "filter: {} → {} of {n} chunks",
-            describe_filters(&f),
-            candidates.len()
-        );
+        println!("filter: {} → {} of {n} chunks", describe_filters(&f), candidates.len());
     }
     if candidates.is_empty() {
         // No match is an answer, not an error: a caller reading JSON gets an
@@ -2959,7 +2965,14 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default(), Target::Semantic));
+            chunks.extend(chunk_file(
+                f,
+                &rel_path(vault, f),
+                &text,
+                None,
+                &Config::default(),
+                Target::Semantic,
+            ));
         }
         if chunks.len() >= n {
             break;
@@ -2979,10 +2992,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
         lens[lens.len() - 1]
     );
 
-    let texts: Vec<String> = chunks
-        .iter()
-        .map(|c| format!("{}\n{}", c.heading, c.text))
-        .collect();
+    let texts: Vec<String> = chunks.iter().map(|c| format!("{}\n{}", c.heading, c.text)).collect();
 
     // One configuration per process: an ORT session that is merely dropped does
     // not necessarily return its arena, and running four in a row was enough to
@@ -2990,8 +3000,12 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let configs: Vec<(&str, EmbeddingModel, Option<usize>, bool)> = match which_config {
         "cpu512" => vec![("CPU  f32 max_len 512", EmbeddingModel::BGESmallENV15, Some(512), false)],
         "cpu256" => vec![("CPU  f32 max_len 256", EmbeddingModel::BGESmallENV15, Some(256), false)],
-        "coreml512" => vec![("CoreML f32 max_len 512", EmbeddingModel::BGESmallENV15, Some(512), true)],
-        "coreml256" => vec![("CoreML f32 max_len 256", EmbeddingModel::BGESmallENV15, Some(256), true)],
+        "coreml512" => {
+            vec![("CoreML f32 max_len 512", EmbeddingModel::BGESmallENV15, Some(512), true)]
+        }
+        "coreml256" => {
+            vec![("CoreML f32 max_len 256", EmbeddingModel::BGESmallENV15, Some(256), true)]
+        }
         other => return Err(anyhow!("unknown config {other}")),
     };
     for (label, which, max_len, coreml) in configs {
@@ -3035,7 +3049,14 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
-            chunks.extend(chunk_file(f, &rel_path(vault, f), &text, None, &Config::default(), Target::Semantic));
+            chunks.extend(chunk_file(
+                f,
+                &rel_path(vault, f),
+                &text,
+                None,
+                &Config::default(),
+                Target::Semantic,
+            ));
         }
     }
     // Same splitting the index applies, so this reports what is actually
@@ -3058,13 +3079,20 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let lost: usize = over.iter().map(|(t, _)| t - limit).sum();
     let total: usize = sorted.iter().sum();
 
-    println!("{n} chunks · tokens: median {} · p90 {} · p99 {} · max {}",
-             sorted[n / 2], sorted[n * 9 / 10], sorted[n * 99 / 100], sorted[n - 1]);
+    println!(
+        "{n} chunks · tokens: median {} · p90 {} · p99 {} · max {}",
+        sorted[n / 2],
+        sorted[n * 9 / 10],
+        sorted[n * 99 / 100],
+        sorted[n - 1]
+    );
     println!("total {total} tokens · {} chunks over {limit} ({:.1}%) · {lost} tokens truncated ({:.2}% of corpus)",
              over.len(), 100.0 * over.len() as f64 / n as f64,
              100.0 * lost as f64 / total as f64);
-    println!("chars-per-token overall: {:.2}",
-             texts.iter().map(|t| t.len()).sum::<usize>() as f64 / total as f64);
+    println!(
+        "chars-per-token overall: {:.2}",
+        texts.iter().map(|t| t.len()).sum::<usize>() as f64 / total as f64
+    );
     for (t, i) in over.iter().take(8) {
         println!("  {t} tokens · {} chars · {}", texts[*i].len(), chunks[*i].heading);
     }
@@ -3222,8 +3250,17 @@ fn cmd_chunks(
                 c.heading.split(" > ").last().unwrap_or("")
             );
             println!("    head: {:?}", &c.text.chars().take(60).collect::<String>());
-            println!("    tail: {:?}", &c.text.chars().rev().take(60).collect::<String>()
-                                          .chars().rev().collect::<String>());
+            println!(
+                "    tail: {:?}",
+                &c.text
+                    .chars()
+                    .rev()
+                    .take(60)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            );
         }
     }
     Ok(())
@@ -3248,9 +3285,8 @@ fn cmd_lexical(
     // The analyzer comes from the index's own metadata, not from the corpus:
     // tokens produced by one analyzer cannot be queried with another, and the
     // stored key is the only record of which one built this index.
-    let stored = lexical::stored_key(&dir).ok_or_else(|| {
-        anyhow!("no lexical index in {} — run `index --lexical`", dir.display())
-    })?;
+    let stored = lexical::stored_key(&dir)
+        .ok_or_else(|| anyhow!("no lexical index in {} — run `index --lexical`", dir.display()))?;
     let analyzer = lexical::Analyzer::from_key(&stored)
         .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
     let f = parse_query(query);
@@ -3294,9 +3330,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 3,
-                &[
-                    "--full", "--rehash", "--lexical", "--both", "--model", "--config",
-                ],
+                &["--full", "--rehash", "--lexical", "--both", "--model", "--config"],
             )?;
             // Same convention as `search`: bare is semantic, `--lexical` is the
             // word index, and the two are separate artifacts built separately.
@@ -3416,10 +3450,11 @@ fn main() -> Result<()> {
         Some("models") => {
             reject_unknown_flags(&args, 2, &[])?;
             // With a vault, say which of them are actually built for it.
-            let built = args.get(2).map(|v| {
-                built_models(Path::new(v)).iter().map(|m| m.name).collect::<Vec<_>>()
-            });
-            println!("{:<14} {:>5}  {:<14}  {}", "name", "dim", "trained on", "status");
+            let built = args
+                .get(2)
+                .map(|v| built_models(Path::new(v)).iter().map(|m| m.name).collect::<Vec<_>>());
+            // `status` inline, as in the row below, so the two formats match.
+            println!("{:<14} {:>5}  {:<14}  status", "name", "dim", "trained on");
             for m in MODELS {
                 let status = match &built {
                     Some(b) if b.contains(&m.name) => "built",
@@ -3427,10 +3462,7 @@ fn main() -> Result<()> {
                     None => "",
                 };
                 let dflt = if m.name == DEFAULT_MODEL { "default" } else { "" };
-                println!(
-                    "{:<14} {:>5}  {:<14}  {status} {dflt}",
-                    m.name, m.dim, m.about
-                );
+                println!("{:<14} {:>5}  {:<14}  {status} {dflt}", m.name, m.dim, m.about);
             }
             if built.is_none() {
                 println!("\nPass a vault to see which are built for it.");
@@ -3479,7 +3511,7 @@ mod tests {
     }
 
     fn para(word: &str, n: usize) -> String {
-        std::iter::repeat(word).take(n).collect::<Vec<_>>().join(" ")
+        std::iter::repeat_n(word, n).collect::<Vec<_>>().join(" ")
     }
 
     // ---------------------------------------------------------- primitives
@@ -3506,7 +3538,14 @@ mod tests {
     // ------------------------------------------------------------ chunking
 
     fn chunks_of(text: &str) -> Vec<Chunk> {
-        chunk_file(Path::new("/vault/Note.org"), "Note.org", text, None, &Config::default(), Target::Semantic)
+        chunk_file(
+            Path::new("/vault/Note.org"),
+            "Note.org",
+            text,
+            None,
+            &Config::default(),
+            Target::Semantic,
+        )
     }
 
     #[test]
@@ -3661,7 +3700,7 @@ mod tests {
     #[test]
     fn hard_split_never_cuts_inside_a_character() {
         // All multi-byte, so a naive byte cut would panic or corrupt.
-        let para = std::iter::repeat("é→ü ").take(400).collect::<String>();
+        let para = "é→ü ".repeat(400);
         let pieces = hard_split(&para, &words, 30);
         assert_eq!(pieces.concat(), para);
     }
@@ -3713,13 +3752,12 @@ mod tests {
             });
             files.insert((*p).to_string(), content_hash(&fs::read(dir.join(p)).unwrap()));
         }
-        let stamps = paths
-            .iter()
-            .map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap()))
-            .collect();
+        let stamps =
+            paths.iter().map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap())).collect();
         let m = model_named(DEFAULT_MODEL).unwrap();
         let vectors = vec![0.0f32; chunks.len() * m.dim];
-        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps).unwrap();
+        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps)
+            .unwrap();
     }
 
     /// Seed an index holding the chunks the vault really produces, so that the
@@ -3739,13 +3777,12 @@ mod tests {
             chunks.extend(chunk_file(&abs, p, &text, None, &Config::default(), Target::Semantic));
             files.insert((*p).to_string(), content_hash(text.as_bytes()));
         }
-        let stamps = paths
-            .iter()
-            .map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap()))
-            .collect();
+        let stamps =
+            paths.iter().map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap())).collect();
         let vectors: Vec<f32> =
             (0..chunks.len()).flat_map(|i| std::iter::repeat_n(i as f32 + 1.0, m.dim)).collect();
-        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps).unwrap();
+        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps)
+            .unwrap();
     }
 
     /// A note whose bytes changed but whose passages did not: every vector is
@@ -3799,7 +3836,8 @@ mod tests {
         }
         fs::write(&abs, &body).unwrap();
         seed_real(&v, &[a.as_str()]);
-        let seeded = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().chunks.len();
+        let seeded =
+            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().chunks.len();
 
         // Insert at the top: every line number below it moves, but a line is
         // metadata and no passage's text changed.
@@ -3816,10 +3854,8 @@ mod tests {
             .enumerate()
             .map(|(i, c)| (chunk_key(&c.heading, &c.text), i))
             .collect();
-        let missing = fresh
-            .iter()
-            .filter(|c| !cached.contains_key(&chunk_key(&c.heading, &c.text)))
-            .count();
+        let missing =
+            fresh.iter().filter(|c| !cached.contains_key(&chunk_key(&c.heading, &c.text))).count();
 
         assert_eq!(fresh.len(), seeded + 1, "the note gained exactly one passage");
         assert_eq!(missing, 1, "only the new passage may need embedding");
@@ -3836,10 +3872,19 @@ mod tests {
         seed(&v, &[a.as_str(), b.as_str()]);
 
         fs::remove_file(v.join(&b)).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
-            .unwrap();
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &Config::default(),
+            &mut io::sink(),
+            None,
+        )
+        .unwrap();
 
-        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
+        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap())
+            .expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
         assert_eq!(ix.chunks[0].path, a);
         assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
@@ -3856,8 +3901,16 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
-            .unwrap();
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &Config::default(),
+            &mut io::sink(),
+            None,
+        )
+        .unwrap();
         assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
     }
 
@@ -3889,7 +3942,14 @@ mod tests {
         let text = "#+title: T\n* Public\nordinary prose here\n\
                     * Private :noexport:\nsecret prose here\n\
                     ** Deeper\nstill under the excluded parent\n";
-        let c = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &Config::default(), Target::Semantic);
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            text,
+            None,
+            &Config::default(),
+            Target::Semantic,
+        );
         let texts: Vec<&str> = c.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts.len(), 1, "only the public section survives: {texts:?}");
         assert!(texts[0].contains("ordinary"));
@@ -3974,7 +4034,8 @@ mod tests {
 
     #[test]
     fn a_policy_is_compared_by_meaning_not_by_bytes() {
-        let a: Config = serde_json::from_str(r#"{"exclude_tagged":["noexport","ARCHIVE"]}"#).unwrap();
+        let a: Config =
+            serde_json::from_str(r#"{"exclude_tagged":["noexport","ARCHIVE"]}"#).unwrap();
         let b: Config =
             serde_json::from_str(r#"{"exclude_tagged":["ARCHIVE","noexport","ARCHIVE"]}"#).unwrap();
         for t in [Target::Semantic, Target::Lexical] {
@@ -4031,9 +4092,7 @@ mod tests {
         let new = Config { exclude_tagged: vec![], ..Config::default() };
         let t = Target::Semantic;
         assert!(check_config(Some(old.hash_for(t)), &old, Some(&old), t).is_ok());
-        let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t)
-            .unwrap_err()
-            .to_string();
+        let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t).unwrap_err().to_string();
         assert!(err.contains("exclude_tagged"), "names the setting: {err}");
         assert!(err.contains("--full"), "and how to proceed: {err}");
         // Nothing stored yet is not a mismatch.
@@ -4087,8 +4146,10 @@ mod tests {
     fn a_flag_is_not_a_vault() {
         // `index --model e5-small` used to take `--model` as the vault and fail
         // several layers down with "No such file or directory".
-        let args: Vec<String> =
-            ["org-semantic", "index", "--model", "e5-small"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["org-semantic", "index", "--model", "e5-small"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let err = vault_arg(&args, "index <vault>").unwrap_err().to_string();
         assert!(err.contains("--model"), "names what it got: {err}");
         assert!(err.contains("usage"), "and how to fix it: {err}");
@@ -4130,7 +4191,7 @@ mod tests {
         let mut same = Vec::new();
         for _ in 0..dim {
             same.push(1.0f32);
-            same.extend(std::iter::repeat(0.0).take(dim - 1));
+            same.extend(std::iter::repeat_n(0.0, dim - 1));
         }
         let b2 = Baseline::of(&same, dim).unwrap();
         assert!((b2.mean - 1.0).abs() < 1e-6, "floor at 1.0: {}", b2.mean);
@@ -4224,7 +4285,8 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        let old_stamp = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
+        let old_stamp =
+            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
         let abs = v.join(&a);
 
         // Move mtime without touching content.
@@ -4232,8 +4294,16 @@ mod tests {
         let body = fs::read(&abs).unwrap();
         fs::write(&abs, &body).unwrap();
 
-        cmd_index(&v, false, false, model_named(DEFAULT_MODEL).unwrap(), &Config::default(), &mut io::sink(), None)
-            .unwrap();
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &Config::default(),
+            &mut io::sink(),
+            None,
+        )
+        .unwrap();
 
         let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(
@@ -4324,11 +4394,8 @@ mod tests {
     /// contributing nodes, and a file beyond it contributes none.
     #[test]
     fn the_file_cap_counts_notes() {
-        let cs = vec![
-            at("a.org", "A > One", 1),
-            at("b.org", "B > One", 1),
-            at("a.org", "A > Two", 9),
-        ];
+        let cs =
+            vec![at("a.org", "A > One", 1), at("b.org", "B > One", 1), at("a.org", "A > Two", 9)];
         let g = select(&ranked(&cs), Limits { files: 1, per_file: 5 });
         assert_eq!(g.len(), 2, "both of a.org's nodes, none of b.org's");
         assert!(g.iter().all(|x| x.path == "a.org"));
@@ -4402,7 +4469,14 @@ mod tests {
 
     #[test]
     fn chunks_store_a_vault_relative_path() {
-        let c = chunk_file(Path::new("/vault/sub/Note.org"), "sub/Note.org", "#+title: T\nbody\n", None, &Config::default(), Target::Semantic);
+        let c = chunk_file(
+            Path::new("/vault/sub/Note.org"),
+            "sub/Note.org",
+            "#+title: T\nbody\n",
+            None,
+            &Config::default(),
+            Target::Semantic,
+        );
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
 
@@ -4494,12 +4568,28 @@ mod tests {
         let a = note(&v, "alpha");
         let b = note(&v, "beta");
         let chunks = vec![
-            Chunk { path: a.clone(), id: None, heading: "alpha".into(), line: 1,
-                    tags: vec!["physics".into()], todo: None, priority: None, lang: "en-US".into(),
-                    text: "the quick brown fox".into() },
-            Chunk { path: b.clone(), id: None, heading: "beta".into(), line: 1,
-                    tags: vec!["german".into()], todo: None, priority: None, lang: "en-US".into(),
-                    text: "der schnelle braune Fuchs".into() },
+            Chunk {
+                path: a.clone(),
+                id: None,
+                heading: "alpha".into(),
+                line: 1,
+                tags: vec!["physics".into()],
+                todo: None,
+                priority: None,
+                lang: "en-US".into(),
+                text: "the quick brown fox".into(),
+            },
+            Chunk {
+                path: b.clone(),
+                id: None,
+                heading: "beta".into(),
+                line: 1,
+                tags: vec!["german".into()],
+                todo: None,
+                priority: None,
+                lang: "en-US".into(),
+                text: "der schnelle braune Fuchs".into(),
+            },
         ];
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
@@ -4529,8 +4619,15 @@ mod tests {
         let a = note(&v, "alpha");
         let b = note(&v, "beta");
         let mk = |p: &str, t: &str| Chunk {
-            path: p.into(), id: None, heading: p.into(), line: 1,
-            tags: vec![], todo: None, priority: None, lang: "en-US".into(), text: t.into(),
+            path: p.into(),
+            id: None,
+            heading: p.into(),
+            line: 1,
+            tags: vec![],
+            todo: None,
+            priority: None,
+            lang: "en-US".into(),
+            text: t.into(),
         };
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
@@ -4544,9 +4641,12 @@ mod tests {
         // the notes it is not touching.
         let changed = vec![mk(&b, "crimson bear")];
         let an2 = lexical::Analyzer::widen(Some(&an), &changed, false);
-        lexical::sync(&dir, &changed, &[a.clone()], false, &an2).unwrap();
+        lexical::sync(&dir, &changed, std::slice::from_ref(&a), false, &an2).unwrap();
         assert!(lexical::search(&dir, &parse_query("brown"), 10, true, &an2).unwrap().is_empty());
-        assert_eq!(lexical::search(&dir, &parse_query("crimson"), 10, true, &an2).unwrap().len(), 1);
+        assert_eq!(
+            lexical::search(&dir, &parse_query("crimson"), 10, true, &an2).unwrap().len(),
+            1
+        );
         assert_eq!(lexical::doc_count(&dir, &an2).unwrap(), 1);
     }
 
@@ -4592,7 +4692,14 @@ mod tests {
     #[test]
     fn the_default_language_is_configurable() {
         let cfg = LangConfig::parse("it-IT");
-        let c = chunk_file(Path::new("/v/N.org"), "N.org", "#+title: T\nciao\n", Some(&cfg), &Config::default(), Target::Lexical);
+        let c = chunk_file(
+            Path::new("/v/N.org"),
+            "N.org",
+            "#+title: T\nciao\n",
+            Some(&cfg),
+            &Config::default(),
+            Target::Lexical,
+        );
         assert_eq!(c[0].lang, "it-IT");
     }
 
@@ -4631,9 +4738,15 @@ mod tests {
         let en = note(&v, "en");
         let de = note(&v, "de");
         let mk = |p: &str, lang: &str, t: &str| Chunk {
-            path: p.into(), id: None, heading: p.into(), line: 1,
-            tags: vec![], todo: None, priority: None,
-            lang: lang.into(), text: t.into(),
+            path: p.into(),
+            id: None,
+            heading: p.into(),
+            line: 1,
+            tags: vec![],
+            todo: None,
+            priority: None,
+            lang: lang.into(),
+            text: t.into(),
         };
         let chunks = vec![
             mk(&en, "en-US", "the damped oscillations of a trapped atom"),
@@ -4645,9 +4758,7 @@ mod tests {
         assert_eq!(an.langs, vec!["de", "en"], "derived from the corpus");
         lexical::sync(&dir, &chunks, &[], true, &an).unwrap();
 
-        let hits = |q: &str| {
-            lexical::search(&dir, &parse_query(q), 10, true, &an).unwrap().len()
-        };
+        let hits = |q: &str| lexical::search(&dir, &parse_query(q), 10, true, &an).unwrap().len();
         assert_eq!(hits("oscillation"), 1, "English stemming: singular finds plural");
         assert_eq!(hits("Sprachen"), 1, "German stemming: plural finds singular");
         assert_eq!(hits("lang:de Sprachen"), 1);
@@ -4661,13 +4772,22 @@ mod tests {
 
     #[test]
     fn detect_lang_returns_two_letter_codes() {
-        assert_eq!(detect_lang("The quick brown fox jumps over the lazy dog again and again", &[]), "en");
         assert_eq!(
-            detect_lang("Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert", &[]),
+            detect_lang("The quick brown fox jumps over the lazy dog again and again", &[]),
+            "en"
+        );
+        assert_eq!(
+            detect_lang(
+                "Die Wörter der deutschen Sprache sind manchmal sehr lang und kompliziert",
+                &[]
+            ),
             "de"
         );
         assert_eq!(
-            detect_lang("Les élèves de la classe ont étudié la théorie pendant toute la semaine", &[]),
+            detect_lang(
+                "Les élèves de la classe ont étudié la théorie pendant toute la semaine",
+                &[]
+            ),
             "fr"
         );
     }
@@ -4808,19 +4928,40 @@ mod tests {
         // `klingon` is a typo far more often than a language, and honouring it
         // would file the chunk under a language nothing ever searches.  The
         // first configured language is the vault's default and takes over.
-        let body = "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
-        let listed = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("de-DE,en-US")), &Config::default(), Target::Lexical);
+        let body =
+            "#+title: N\n* One\n# ltex: language=klingon\nBody text under a bogus declaration\n";
+        let listed = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            body,
+            Some(&LangConfig::parse("de-DE,en-US")),
+            &Config::default(),
+            Target::Lexical,
+        );
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
-        let single = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("en-US")), &Config::default(), Target::Lexical);
+        let single = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            body,
+            Some(&LangConfig::parse("en-US")),
+            &Config::default(),
+            Target::Lexical,
+        );
         assert_eq!(single[0].lang, "en-US");
 
         // Under `auto` there is no configured default, so it is classified.
-        let auto = chunk_file(Path::new("/v/n.org"), "n.org", body, Some(&LangConfig::parse("auto")), &Config::default(), Target::Lexical);
+        let auto = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            body,
+            Some(&LangConfig::parse("auto")),
+            &Config::default(),
+            Target::Lexical,
+        );
         assert_eq!(auto[0].lang, "en");
     }
 }
-
 
 #[cfg(test)]
 mod prefix_check {
@@ -4890,7 +5031,13 @@ mod prefix_check {
             let without = score(m.which.clone(), "", "");
             println!(
                 "{:<14} prefixed {}/{} margin {:+.3}   bare {}/{} margin {:+.3}",
-                m.name, with.0, QUERIES.len(), with.1, without.0, QUERIES.len(), without.1
+                m.name,
+                with.0,
+                QUERIES.len(),
+                with.1,
+                without.0,
+                QUERIES.len(),
+                without.1
             );
         }
     }
