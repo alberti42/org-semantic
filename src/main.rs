@@ -3698,14 +3698,15 @@ mod tests {
     fn an_unreadable_cached_policy_falls_back_rather_than_bricking() {
         let v = scratch("stale-policy");
         fs::create_dir_all(state_dir(&v)).unwrap();
-        // What a schema change leaves behind: our own file, no longer parseable.
-        fs::write(config_path(&state_dir(&v)), r#"{"exclude_tags":["noexport"]}"#).unwrap();
+        // Whatever a schema change leaves behind: our own file, no longer
+        // parseable.  The key is not a former name — nothing knows about those.
+        fs::write(config_path(&state_dir(&v)), r#"{"from_an_older_schema":1}"#).unwrap();
         let cfg = resolve_config(&v, None).expect("a stale cache must not brick every command");
         assert_eq!(cfg, Config::default());
 
         // A file the caller named is a different matter: that is their typo.
         let named = v.join("theirs.json");
-        fs::write(&named, r#"{"exclude_tags":["noexport"]}"#).unwrap();
+        fs::write(&named, r#"{"from_an_older_schema":1}"#).unwrap();
         assert!(resolve_config(&v, Some(&named)).is_err());
     }
 
