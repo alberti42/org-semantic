@@ -665,17 +665,24 @@ fn resolve_config(vault: &Path, given: Option<&Path>) -> Result<Config> {
     Ok(Config::default())
 }
 
-/// Refuse to index over an index built under a different policy.
+/// Refuse to act on an index built under a different policy.
 ///
 /// Not a silent rebuild: a config file can change without the user acting — a
 /// `git pull` brings a colleague's edit — and spending minutes re-embedding on
-/// something they did not do is exactly the surprise to avoid.  `--full` is the
-/// way to say yes.
+/// something they did not do is exactly the surprise to avoid.
+///
+/// REMEDY is how the caller can say yes, which differs by caller: `--full` for
+/// the CLI, a reindex request for an editor that has just been told its own
+/// settings no longer match the index it is searching.
+/// How the CLI says yes.  `serve` names its own, since an editor has no flags.
+const CLI_REMEDY: &str = "pass --full to rebuild under the new one";
+
 fn check_config(
     previous: Option<u64>,
     cfg: &Config,
     previous_cfg: Option<&Config>,
     target: Target,
+    remedy: &str,
 ) -> Result<()> {
     let what = match target {
         Target::Semantic => "semantic",
@@ -698,7 +705,7 @@ fn check_config(
         });
     Err(anyhow!(
         "the {what} index was built under a different policy — {detail}\n\
-         pass --full to rebuild under the new one, or restore the previous setting"
+         {remedy}, or restore the previous setting"
     ))
 }
 
@@ -3420,6 +3427,7 @@ fn main() -> Result<()> {
                         &cfg,
                         previous.as_ref(),
                         Target::Semantic,
+                        CLI_REMEDY,
                     )?;
                 }
                 if both || lexical {
@@ -3429,6 +3437,7 @@ fn main() -> Result<()> {
                         &cfg,
                         previous.as_ref(),
                         Target::Lexical,
+                        CLI_REMEDY,
                     )?;
                 }
             }
@@ -4156,12 +4165,14 @@ mod tests {
         let old = Config::default();
         let new = Config { exclude_tagged: vec![], ..Config::default() };
         let t = Target::Semantic;
-        assert!(check_config(Some(old.hash_for(t)), &old, Some(&old), t).is_ok());
-        let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t).unwrap_err().to_string();
+        assert!(check_config(Some(old.hash_for(t)), &old, Some(&old), t, CLI_REMEDY).is_ok());
+        let err = check_config(Some(old.hash_for(t)), &new, Some(&old), t, CLI_REMEDY)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("exclude_tagged"), "names the setting: {err}");
         assert!(err.contains("--full"), "and how to proceed: {err}");
         // Nothing stored yet is not a mismatch.
-        assert!(check_config(None, &new, None, t).is_ok());
+        assert!(check_config(None, &new, None, t, CLI_REMEDY).is_ok());
 
         // A lexical-only change must not invalidate the semantic index: an
         // embedding cannot be affected by what BM25 indexes.

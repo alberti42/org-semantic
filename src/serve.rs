@@ -17,6 +17,10 @@
 
 use crate::*;
 use std::collections::HashMap;
+
+/// How an editor says yes: it has no flags, so it calls `index` with `full`.
+/// Phrased as something a client can put in front of a user verbatim.
+const SERVE_REMEDY: &str = "reindex with `full` to rebuild under the new one";
 use std::io::BufRead;
 
 /// One vault's semantic index, with the model that reads it, kept loaded.
@@ -103,11 +107,41 @@ impl Server {
                 .max(1) as usize,
         };
         let lexical_mode = p.get("mode").and_then(|v| v.as_str()) == Some("lexical");
+        let want = match p.get("model").and_then(|v| v.as_str()) {
+            Some(name) => Some(model_named(name)?),
+            None => None,
+        };
 
         let f = parse_query(query);
         if f.text.trim().is_empty() && f.is_empty() {
             // An empty query is not an error while someone is still typing.
             return Ok(serde_json::json!({ "hits": [] }));
+        }
+
+        // An editor that derives its policy from its own settings — Emacs
+        // reading `org-todo-keywords` — can send it with every query, and learn
+        // here that those settings have drifted from what the index was built
+        // under.  Answering anyway would answer from chunks split by rules the
+        // caller no longer holds.
+        //
+        // Checked, never applied: `search` writes nothing, so the remedy is a
+        // reindex the user has to agree to.  A client sending this per keystroke
+        // must latch the resulting error into one prompt rather than one per
+        // keypress — the condition holds until they act on it.
+        if let Some(v) = p.get("config") {
+            let cfg: Config =
+                serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?;
+            let stored = Config::read(&config_path(&state_dir(&vault))).ok();
+            let (previous, target) = if lexical_mode {
+                let h = stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
+                    .map(|m| m.config);
+                (h, Target::Lexical)
+            } else {
+                let dir = semantic_dir(&vault, choose_index(&vault, want)?);
+                let h = stored_hash::<Manifest>(&dir.join("manifest.json")).map(|m| m.config);
+                (h, Target::Semantic)
+            };
+            check_config(previous, &cfg, stored.as_ref(), target, SERVE_REMEDY)?;
         }
 
         if lexical_mode {
@@ -123,10 +157,6 @@ impl Server {
         if !f.langs.is_empty() {
             return Err(anyhow!("lang: narrows the lexical index only"));
         }
-        let want = match p.get("model").and_then(|v| v.as_str()) {
-            Some(name) => Some(model_named(name)?),
-            None => None,
-        };
         let s = self.semantic(&vault, want)?;
         let dim = s.which.dim;
         let candidates: Vec<usize> =
@@ -194,6 +224,7 @@ impl Server {
                     &cfg,
                     previous.as_ref(),
                     Target::Semantic,
+                    SERVE_REMEDY,
                 )?;
             }
             let key = (vault.clone(), want.name);
@@ -224,6 +255,7 @@ impl Server {
                     &cfg,
                     previous.as_ref(),
                     Target::Lexical,
+                    SERVE_REMEDY,
                 )?;
             }
             let report = cmd_index_lexical(

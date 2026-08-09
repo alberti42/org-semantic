@@ -195,7 +195,7 @@ Methods:
 
 | method     | params                                                                                   | returns                                       |
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =search=   | =vault=, =query=, =k=, =perFile=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...]}=                             |
+| =search=   | =vault=, =query=, =k=, =perFile=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}=                             |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers               |
 | =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
@@ -211,6 +211,12 @@ showing such a vault raises the second.
 
 An empty query returns no hits rather than an error, so it is safe to send on
 every keystroke; debouncing is the editor's policy, not the server's.
+
+=config= is optional on =search=, and when present it is *checked against what
+the index was built under* --- see
+[[#what-gets-indexed][what gets indexed]] for what that is for and what a client
+should do with the error. Leaving it out searches whatever is there, which is
+what the CLI does.
 
 *Reindexing happens in-process too.* Spawning a CLI for it would pay the model
 load again, which is the cost the resident process exists to avoid --- so the
@@ -617,10 +623,27 @@ than by hand: the editor already knows the answer, so it can send it.
                     (default-value 'org-todo-keywords)))
 #+end_src
 
-Send it with =index=, not with every =search=: the policy is sticky and a change
-is refused, so a mismatch is a question worth putting to the user --- /your
-=org-todo-keywords= changed, reindex to match?/ --- rather than a silent rebuild
-they did not ask for.
+*=search= takes =config= too, and checks it.* A client whose policy comes from
+the user's own settings should send it with every query, not only when
+indexing --- settings change between one search and the next, and an index built
+under the old ones answers from passages split by rules the user no longer
+holds. The check is a hash comparison, so it costs nothing per query.
+
+On a mismatch the query fails rather than answering, and the error names the
+setting:
+
+#+begin_src console
+the semantic index was built under a different policy —
+todo_keywords: was [DONE, TODO], now [DONE, NEXT, TODO]
+reindex with `full` to rebuild under the new one, or restore the previous setting
+#+end_src
+
+which is what a client turns into /your =org-todo-keywords= changed since this
+vault was indexed --- reindex?/ Nothing is rebuilt without that answer. Two
+things a client should get right: send the policy on =search= as well as
+=index=, and *latch the error into one prompt* --- the mismatch holds until the
+user acts, so a client searching as you type would otherwise raise it on every
+keystroke.
 
 ** Languages
 :PROPERTIES:
