@@ -89,5 +89,5 @@ starting from [`config.example.json`](config.example.json).
 - [Related work](https://alberti42.github.io/org-semantic/#related-work)
 - [Licence](https://alberti42.github.io/org-semantic/#licence) — MIT
 
-The site is generated from [`README.org`](README.org), which is the canonical
-documentation; `make html` builds it locally into `public/`.
+The site is generated from [`docs/manual.org`](docs/manual.org), which is the
+canonical documentation; `make html` builds it locally into `public/`.

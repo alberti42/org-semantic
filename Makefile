@@ -1,7 +1,7 @@
 # org-semantic — build, test, and the documentation site.
 #
-# The Rust side is plain cargo; `make html` exports README.org to a themed
-# single-page site for GitHub Pages, the way ghostel does it.
+# The Rust side is plain cargo; `make html` exports docs/manual.org to a themed
+# single-page site for GitHub Pages.
 
 .PHONY: all build test lint html clean
 
@@ -17,13 +17,16 @@ lint:
 	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
 
-# Emacs exports README.org to public/index.html.  htmlize gives the source
+# Emacs exports docs/manual.org to public/index.html.  htmlize gives the source
 # blocks their syntax highlighting; without it they render as plain text.
+#
+# The output path is expanded before the buffer is opened: inside it,
+# default-directory is docs/, so a relative path would land in docs/public/.
 DOC_THEME_FILES := $(shell find docs/org-html-themes -type f)
 
 html: public/index.html
 
-public/index.html: README.org $(DOC_THEME_FILES)
+public/index.html: docs/manual.org $(DOC_THEME_FILES)
 	@mkdir -p public
 	emacs --batch --no-init-file \
 		--eval "(progn \
@@ -40,8 +43,9 @@ public/index.html: README.org $(DOC_THEME_FILES)
 		              org-html-validation-link nil \
 		              org-export-with-broken-links t \
 		              org-html-htmlize-output-type 'css)" \
-		--eval "(with-current-buffer (find-file-noselect \"README.org\") \
-		          (org-export-to-file 'html \"public/index.html\"))"
+		--eval "(let ((out (expand-file-name \"public/index.html\"))) \
+		          (with-current-buffer (find-file-noselect \"docs/manual.org\") \
+		            (org-export-to-file 'html out)))"
 	cp -R docs/org-html-themes/src public/
 
 clean:

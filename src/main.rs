@@ -3676,6 +3676,31 @@ mod tests {
     /// must be the defaults, or it silently changes their index the moment they
     /// pass it.  `include_str!` means a stale example fails the build, not a
     /// user's run.
+    /// README.md is the GitHub landing page; `docs/manual.org` is the manual the
+    /// site is built from. They share a tagline and the worked example, and
+    /// those drifted apart once already — so they are compared here rather than
+    /// remembered.
+    #[test]
+    fn the_landing_page_agrees_with_the_manual() {
+        let md = include_str!("../README.md");
+        let org = include_str!("../docs/manual.org");
+        let strip = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let tagline = "Search a tree of org-mode notes by meaning or by words.";
+        assert!(md.contains(tagline) && org.contains(tagline), "the tagline moved");
+
+        // The demo is the part carrying real numbers, so it rots fastest.
+        let block = |s: &str, open: &str| {
+            let start = s.find(open).expect("no console block") + open.len();
+            strip(&s[start..][..s[start..].find("```").or(s[start..].find("#+end_src")).unwrap()])
+        };
+        assert_eq!(
+            block(md, "```console\n"),
+            block(org, "#+begin_src console\n"),
+            "the worked example differs between the two READMEs"
+        );
+    }
+
     #[test]
     fn the_example_config_is_exactly_the_defaults() {
         let text = include_str!("../config.example.json");
