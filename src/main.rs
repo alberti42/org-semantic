@@ -270,18 +270,26 @@ fn detect_lang(prose: &str, candidates: &[&str]) -> String {
 /// spelled as ltex-ls-plus spells it.
 const LANG_AUTO: &str = "auto";
 
+/// The magic-comment keyword, spelled as ltex-ls-plus spells it.
+const LTEX_KEYWORD: &str = "ltex";
+
 /// Read a language from an ltex magic comment, e.g. `# ltex: language=de-DE`.
 ///
 /// Deliberately ltex-ls-plus' syntax rather than something new: a note that
 /// declares its language for grammar checking has already said what this needs
 /// to know, and one annotation serving both is better than two that can drift.
-/// The keyword is configurable for anyone not using ltex.
+/// Fixed at `ltex` rather than configurable.  A custom keyword would defeat the
+/// reason for reusing ltex's syntax — that one annotation serves both the
+/// grammar checker and this — and, unlike `--lang` and `--fold`, it is recorded
+/// nowhere, so forgetting it on a later incremental run would parse the notes it
+/// touches differently from the ones it does not.  `# ltex: language=de-DE` is an
+/// org comment; writing one costs nothing and requires no ltex.
 ///
 /// Applies from its own line onward, as ltex does, so a note may switch
 /// part-way.
-fn ltex_language(line: &str, keyword: &str) -> Option<String> {
+fn ltex_language(line: &str) -> Option<String> {
     let t = line.trim().trim_start_matches('#').trim();
-    let rest = strip_prefix_ci(t, &format!("{keyword}:"))?;
+    let rest = strip_prefix_ci(t, &format!("{LTEX_KEYWORD}:"))?;
     for part in rest.split_whitespace() {
         if let Some(v) = strip_prefix_ci(part, "language=") {
             let v = v.trim().trim_matches('"');
@@ -312,13 +320,12 @@ fn rel_path(vault: &Path, f: &Path) -> String {
 struct LangConfig {
     /// Mirrors `lsp-ltex-plus-language`, whose default is "en-US".
     languages: Vec<String>,
-    /// Magic-comment keyword, `ltex` unless someone wants their own.
-    keyword: String,
+
 }
 
 impl Default for LangConfig {
     fn default() -> Self {
-        LangConfig { languages: vec!["en-US".into()], keyword: "ltex".into() }
+        LangConfig { languages: vec!["en-US".into()] }
     }
 }
 
@@ -330,7 +337,7 @@ impl LangConfig {
         } else {
             spec.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
         };
-        LangConfig { languages, keyword: "ltex".into() }
+        LangConfig { languages }
     }
 
     /// Does a note without its own declaration need classifying?
@@ -608,7 +615,7 @@ fn chunk_file(path: &Path, rel: &str, text: &str, lang: Option<&LangConfig>) -> 
             continue;
         }
         // Takes effect from here on, so a note may switch language part-way.
-        if let Some((cfg, l)) = lang.zip(ltex_language(line, lang.map_or("", |l| &l.keyword))) {
+        if let Some((cfg, l)) = lang.zip(ltex_language(line)) {
             flush(&mut chunks, &buf, &stack, &tag_stack, &todo_stack, &prio_stack,
                   &title, &file_tags, &cur_id, cur_line, &cur_lang);
             buf.clear();
@@ -2510,6 +2517,37 @@ fn tokenizer_for(m: &Model) -> Result<tokenizers::Tokenizer> {
 /// with "No such file or directory".
 /// `--model NAME` from the arguments, or the default.  FROM is where this
 /// subcommand's flags start.
+/// Reject a flag this subcommand does not take, rather than ignoring it.
+///
+/// A flag that is silently dropped looks exactly like a flag that had no effect,
+/// which has already cost this project twice: `--fold` was accepted and ignored
+/// for a whole session, and `--lang-keyword` outlived its own removal. Values
+/// are never scanned, only tokens starting with `--`.
+fn reject_unknown_flags(args: &[String], from: usize, allowed: &[&str]) -> Result<()> {
+    for a in args.iter().skip(from) {
+        if a.starts_with("--") && !allowed.contains(&a.as_str()) {
+            return Err(anyhow!(
+                "unknown option `{a}`; this command takes {}",
+                allowed.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `--lang`, read the same way wherever it appears.
+fn lang_args(args: &[String], from: usize) -> LangConfig {
+    let mut lang = LangConfig::default();
+    for (i, a) in args.iter().enumerate().skip(from) {
+        if a == "--lang" {
+            if let Some(v) = args.get(i + 1) {
+                lang = LangConfig::parse(v);
+            }
+        }
+    }
+    lang
+}
+
 fn model_arg(args: &[String], from: usize) -> Result<&'static Model> {
     match args.iter().skip(from).position(|a| a == "--model") {
         Some(i) => model_named(args.get(from + i + 1).map(String::as_str).unwrap_or("")),
@@ -2628,22 +2666,12 @@ fn main() -> Result<()> {
             // `--rehash` reads and hashes every note, ignoring stamps: the
             // backstop for a change that left mtime untouched.
             let rehash = args.iter().skip(3).any(|a| a == "--rehash");
-            let mut lang = LangConfig::default();
-            for (i, a) in args.iter().enumerate().skip(3) {
-                match a.as_str() {
-                    "--lang" => {
-                        if let Some(v) = args.get(i + 1) {
-                            lang = LangConfig { keyword: lang.keyword, ..LangConfig::parse(v) };
-                        }
-                    }
-                    "--lang-keyword" => {
-                        if let Some(v) = args.get(i + 1) {
-                            lang.keyword = v.clone();
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            reject_unknown_flags(
+                &args,
+                3,
+                &["--full", "--rehash", "--lexical", "--both", "--lang", "--fold", "--model"],
+            )?;
+            let lang = lang_args(&args, 3);
             // Accent folding, so `Worter` matches `Wörter`.  Off unless asked
             // for: it maps `ö` to `o`, and the transliteration a German speaker
             // would actually type is `Woerter`, which this does not produce.
@@ -2658,7 +2686,7 @@ fn main() -> Result<()> {
             // settings that do nothing.
             if !lexical && !both {
                 for a in args.iter().skip(3) {
-                    if a == "--lang" || a == "--fold" || a == "--lang-keyword" {
+                    if a == "--lang" || a == "--fold" {
                         return Err(anyhow!(
                             "{a} configures the lexical index; pass --lexical or --both"
                         ));
@@ -2688,6 +2716,11 @@ fn main() -> Result<()> {
             // One command, two rankings, never mixed.  A shared entry point is
             // not the same as a fused result list: `--lexical` returns purely
             // word-ranked hits, `search` alone purely meaning-ranked ones.
+            reject_unknown_flags(
+                &args,
+                4,
+                &["--lexical", "--any", "--fold", "--json", "--model"],
+            )?;
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
             // parse back out.
@@ -2708,14 +2741,8 @@ fn main() -> Result<()> {
         Some("chunks") => {
             let vault = vault_arg(&args, "chunks <vault> <path-substring>")?;
             let needle = args.get(3).map(String::as_str).unwrap_or("");
-            let mut lang = LangConfig::default();
-            for (i, a) in args.iter().enumerate().skip(3) {
-                if a == "--lang" {
-                    if let Some(v) = args.get(i + 1) {
-                        lang = LangConfig::parse(v);
-                    }
-                }
-            }
+            reject_unknown_flags(&args, 3, &["--lang", "--model"])?;
+            let lang = lang_args(&args, 3);
             prepare_lang(&lang)?;
             cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?)
         }
@@ -3083,6 +3110,22 @@ mod tests {
         let other = model_named("e5-large").unwrap();
         assert_ne!(other.dim, model_named(DEFAULT_MODEL).unwrap().dim);
         assert!(load_index(&state_dir(&v), other).is_none());
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_rather_than_ignored() {
+        let args: Vec<String> =
+            ["org-semantic", "index", "/v", "--fulll"].iter().map(|s| s.to_string()).collect();
+        let err = reject_unknown_flags(&args, 3, &["--full", "--model"]).unwrap_err().to_string();
+        assert!(err.contains("--fulll"), "names the offender: {err}");
+        assert!(err.contains("--full"), "and lists what is accepted: {err}");
+
+        // Values are not flags, and must not be mistaken for them.
+        let ok: Vec<String> = ["org-semantic", "index", "/v", "--model", "e5-small"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(reject_unknown_flags(&ok, 3, &["--full", "--model"]).is_ok());
     }
 
     #[test]
@@ -3465,19 +3508,20 @@ mod tests {
 
     #[test]
     fn ltex_magic_comment_is_read() {
-        assert_eq!(ltex_language("# ltex: language=de-DE", "ltex").as_deref(), Some("de-DE"));
-        assert_eq!(ltex_language("#ltex: language=fr", "ltex").as_deref(), Some("fr"));
+        assert_eq!(ltex_language("# ltex: language=de-DE").as_deref(), Some("de-DE"));
+        assert_eq!(ltex_language("#ltex: language=fr").as_deref(), Some("fr"));
         assert_eq!(
-            ltex_language("# ltex: language=de-DE enabled=false", "ltex").as_deref(),
+            ltex_language("# ltex: language=de-DE enabled=false").as_deref(),
             Some("de-DE"),
             "other ltex settings on the line are ignored, not tripped over"
         );
-        assert_eq!(ltex_language("# ltex: enabled=false", "ltex"), None);
-        assert_eq!(ltex_language("# just a comment", "ltex"), None);
+        assert_eq!(ltex_language("# ltex: enabled=false"), None);
+        assert_eq!(ltex_language("# just a comment"), None);
         assert_eq!(
-            ltex_language("# spell: language=it", "spell").as_deref(),
-            Some("it"),
-            "the keyword is configurable"
+            ltex_language("# spell: language=it"),
+            None,
+            "only ltex's keyword: a custom one would be an annotation serving \
+             nothing but this tool, and is recorded nowhere"
         );
     }
 

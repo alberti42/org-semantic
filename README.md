@@ -317,7 +317,12 @@ A note declares its language the way ltex-ls-plus already asks for it:
 That takes effect from its own line onward, as ltex does, so a note may switch
 part-way — the marker forces a chunk boundary, since a chunk carries exactly one
 language. Placed between sections it costs nothing; placed mid-section it splits
-that section in two. The keyword is `--lang-keyword`, if you don't use ltex.
+that section in two.
+
+The keyword is always `ltex`, deliberately. Reusing ltex's own syntax is the
+point — one annotation serves both the grammar checker and the index instead of
+two that drift — and `# ltex: language=de-DE` is an ordinary org comment, so
+writing one costs nothing and requires no ltex.
 
 **Language is a lexical concern.** It selects the stemmer that makes `Sprachen`
 find `Sprache`, and an embedding is not stemmed — so only `index --lexical`
