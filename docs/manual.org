@@ -225,6 +225,13 @@ holds for both modalities.
 embedded; it is not a navigation anchor. =id= is an extra for the vaults that
 carry them.
 
+=text= is the passage, *read from the note when you search* rather than stored
+in the index --- so it is the real document, code blocks and tables included,
+not the filtered version that was embedded. =startLine= and =endLine= give the
+same range, for a client that would rather read or highlight it itself. A note
+that has moved since it was indexed yields an empty =text= rather than stale
+lines.
+
 One consequence of =line= naming the section: a section long enough to be
 divided yields several passages reporting the same =path= and =line=. They are
 distinct hits with distinct =text= at one address, which is the right answer
@@ -809,29 +816,36 @@ modified* --- org-semantic only reads them.
 
 | path                                           | 951-note vault | what it is                                                          |
 |------------------------------------------------+----------------+---------------------------------------------------------------------|
-| =.org-semantic/semantic/<model>/chunks.json=   | 6.0 MB         | every chunk: text, heading path, line, =:ID:=, tags, TODO           |
+| =.org-semantic/semantic/<model>/chunks.json=   | ~2 MB          | per chunk: heading path, line, the lines it came from, =:ID:=, tags |
 | =.org-semantic/semantic/<model>/vectors.f32=   | 9.7 MB         | one embedding per chunk, in the same order (384--1024 floats)       |
 | =.org-semantic/semantic/<model>/manifest.json= | 0.2 MB         | what that model's index has seen: per-note hash and =(mtime, size)= |
-| =.org-semantic/tantivy/=                       | 4.9 MB         | the lexical index, including its own copy of each chunk             |
+| =.org-semantic/tantivy/=                       | ~2 MB          | the lexical index                                                   |
 | =.org-semantic/lexical.json=                   | 0.2 MB         | the same, for the lexical index                                     |
-|                                                | *21 MB*        |                                                                     |
+
+*Your prose is not copied into the index.* A chunk records *where* it came from
+--- the note and a range of lines --- not what it said. That is a fraction of the
+size, and it is also truer: a preview is read from the note itself, so a code
+block appears in full even though the index deliberately replaced it with
+=[src bash]= before embedding.
+
+It costs a handful of file reads per query, for the handful of hits actually
+being shown, and it means a preview can be missing if a note has moved since it
+was indexed --- which is the honest answer in that case, rather than showing text
+that is no longer there.
 
 One directory per model, each complete in itself. The chunk table is duplicated
 rather than shared because a vector is paired to its chunk *by position*: a
 shared table would silently go stale for every model you did not index in that
 run, and a same-count-different-content mismatch is exactly what a length check
-cannot catch. 6 MB is a small price for being unable to get that wrong.
+cannot catch.
 
 *The two indexes are independent.* Each carries everything its own hits need
 and its own record of which notes it is behind on, so either can be built,
 rebuilt or deleted without disturbing the other --- which is what makes
-=index --lexical= a one-second operation rather than a ten-minute one. The cost
-is that the chunk text is stored twice; on this vault that is 4.9 MB against a
-9.7 MB vector file.
+=index --lexical= a one-second operation rather than a ten-minute one.
 
-The two chunk differently. The semantic index splits any section longer than 512
-tokens, which is what the embedding model reads in one go; BM25 has no such
-limit, so the lexical index keeps whole sections --- 5757 chunks against 6328.
+The two chunk differently, because they are bounded by different things --- see
+=chunk= in the policy above.
 
 Add =/.org-semantic/= to the vault's =.gitignore=. All of it is derived --- delete
 the directory and =org-semantic index= rebuilds it in one pass.

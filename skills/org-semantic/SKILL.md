@@ -72,8 +72,10 @@ Each hit is an object:
   the outline path, for saying *where* a hit is in prose. `id` is an org-id only
   when the note carries one, and it is the *nearest enclosing* node's — in a
   large file every hit may report the same one, so never use it as an address.
-- `text` is the passage itself, so you usually need not open the file. Read it
-  when you need surrounding context.
+- `text` is the passage itself, **read from the note at search time**, so it is
+  the real document — code blocks and tables appear in full, not as the
+  placeholders the index embedded. You usually need not open the file. It is
+  empty if the note has moved since indexing; that is the signal to reindex.
 
 ## When every hit comes from the same file
 

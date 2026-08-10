@@ -197,6 +197,25 @@ struct Chunk {
     /// Language code in effect here, from a `# ltex: language=de-DE` comment or
     /// the configured default.
     lang: String,
+    /// FNV over what was embedded, `chunk_key(heading, text)`.
+    ///
+    /// The identity of a passage now that the text itself is not written down:
+    /// it is what the per-passage vector reuse matches on. Eight bytes where the
+    /// text averaged 624 characters. There is nothing left to confirm a hit
+    /// against, so a 64-bit collision would attach the wrong vector — about
+    /// 1e-14 over a corpus this size, and the same risk the manifest's per-file
+    /// hashes have always carried.
+    #[serde(default)]
+    hash: u64,
+    /// The passage as it was indexed — placeholders in place of block bodies,
+    /// drawers and keywords gone.
+    ///
+    /// **Never written to disk.** It exists while a note is being indexed,
+    /// because it has to be embedded and handed to tantivy, and is empty on
+    /// anything read back: a result's text is read from the file over
+    /// `start_line..=end_line`, which is both smaller and *truer* — the code a
+    /// `[src bash]` stands for is in the file.
+    #[serde(skip)]
     text: String,
 }
 
@@ -1173,6 +1192,7 @@ fn chunk_file(
                 todo: todo.clone(),
                 priority,
                 lang: lang.to_string(),
+                hash: chunk_key(&heading, &piece.text),
                 text: piece.text,
             });
         }
@@ -2182,7 +2202,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 4;
+const INDEX_VERSION: u32 = 5;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -2690,7 +2710,7 @@ fn cmd_index(
     let mut cached: std::collections::HashMap<u64, usize> = Default::default();
     if let Some(ix) = &old {
         for (i, c) in ix.chunks.iter().enumerate() {
-            cached.entry(chunk_key(&c.heading, &c.text)).or_insert(i);
+            cached.entry(c.hash).or_insert(i);
         }
     }
     let mut carried = 0usize;
@@ -2727,12 +2747,10 @@ fn cmd_index(
                 prev_line = Some(c.line);
                 counted = false;
             }
-            // Confirmed against the strings themselves: the key only finds the
-            // candidate, so a hash collision cannot attach the wrong vector.
-            let hit = cached.get(&chunk_key(&c.heading, &c.text)).copied().filter(|&j| {
-                let old = &old.as_ref().expect("no cache without an old index").chunks[j];
-                old.heading == c.heading && old.text == c.text
-            });
+            // The hash *is* the identity now.  It used to be confirmed against
+            // the strings, but the strings are no longer on disk — see the note
+            // on `Chunk::hash` for what that costs.
+            let hit = cached.get(&c.hash).copied();
             match hit {
                 Some(j) => {
                     let ix = old.as_ref().expect("no cache without an old index");
@@ -3003,6 +3021,33 @@ fn select<'a>(scored: &[(f32, &'a Chunk)], lim: Limits) -> Vec<Group<'a>> {
     groups
 }
 
+/// Notes opened while rendering one result list, so a file holding several hits
+/// is read once.
+type Notes = std::collections::HashMap<String, Option<Vec<String>>>;
+
+/// Read a passage back out of the note it came from.
+///
+/// The index records *where* a passage was, not what it said, so this is where a
+/// result gets its text — and what comes back is the real document. The code a
+/// `[src bash]` placeholder stands for is in the file, so it appears here even
+/// though it never reached the index.
+///
+/// A file that has moved or shrunk since indexing yields nothing rather than an
+/// error or the wrong lines: an index a little behind its vault should still
+/// answer, visibly missing a preview rather than inventing one.
+fn passage(vault: &Path, c: &Chunk, notes: &mut Notes) -> String {
+    let lines = notes.entry(c.path.clone()).or_insert_with(|| {
+        fs::read_to_string(vault.join(&c.path))
+            .ok()
+            .map(|s| s.lines().map(str::to_string).collect())
+    });
+    let Some(lines) = lines else { return String::new() };
+    if c.start_line == 0 || c.start_line > c.end_line || c.end_line > lines.len() {
+        return String::new();
+    }
+    lines[c.start_line - 1..c.end_line].join("\n")
+}
+
 /// Everything an editor needs to show a hit and jump to it, without parsing
 /// anything: an absolute path so it need not know where the vault is, the
 /// `:ID:` when there is one so it can jump through `org-id` and survive the note
@@ -3013,6 +3058,7 @@ fn hits_json(
     lim: Limits,
     base: Option<Baseline>,
 ) -> serde_json::Value {
+    let mut notes = Notes::new();
     let hits: Vec<serde_json::Value> = select(scored, lim)
         .iter()
         .flat_map(|g| g.hits.iter())
@@ -3031,6 +3077,10 @@ fn hits_json(
                 "path": c.path,
                 "file": vault.join(&c.path),
                 "line": c.line,
+                // The lines this passage was built from, so a client can read
+                // or highlight the region itself rather than trusting `text`.
+                "startLine": c.start_line,
+                "endLine": c.end_line,
                 "id": c.id,
                 "title": title,
                 "section": section,
@@ -3040,7 +3090,9 @@ fn hits_json(
                 "priority": c.priority.map(|p| p.to_string()),
                 // Null rather than "" on semantic hits, which carry no language.
                 "lang": (!c.lang.is_empty()).then_some(&c.lang),
-                "text": c.text,
+                // Read from the note, not from the index: the real passage,
+                // code blocks and all.
+                "text": passage(vault, c, &mut notes),
             })
         })
         .collect();
@@ -3055,8 +3107,9 @@ fn hits_json(
 /// under BGE and 0.80 under E5 — so it cannot be read without that context.
 /// BM25 has no such floor, so lexical hits pass `None` and show their score
 /// alone.
-fn report(scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
+fn report(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
     let groups = select(scored, lim);
+    let mut notes = Notes::new();
     // The headline figure, where notes are compared with each other.
     let rank = |s: f32| match baseline {
         Some(b) => format!("{s:.3} ({:+.1}σ)", b.z(s)),
@@ -3082,7 +3135,11 @@ fn report(scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
             println!("       {todo}{tags}");
         }
         for (score, c) in &g.hits {
-            let preview: String = c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
+            let preview: String = passage(vault, c, &mut notes)
+                .split_whitespace()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join(" ");
             // Several passages here means one section outran the budget and was
             // divided; they are numbered by line so they can be told apart.
             // Raw score: within one node every passage shares the same offset,
@@ -3219,7 +3276,7 @@ fn cmd_search(
         println!("{}", hits_json(vault, &hits, lim, baseline));
         return Ok(());
     }
-    report(&hits, lim, baseline.as_ref());
+    report(vault, &hits, lim, baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -3592,7 +3649,7 @@ fn cmd_lexical(
         println!("no match");
         return Ok(());
     }
-    report(&hits, lim, None);
+    report(vault, &hits, lim, None);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
@@ -4184,6 +4241,7 @@ mod tests {
                 todo: None,
                 priority: None,
                 lang: "en-US".into(),
+                hash: 0,
                 text: "body".into(),
             });
             files.insert((*p).to_string(), content_hash(&fs::read(dir.join(p)).unwrap()));
@@ -4293,14 +4351,11 @@ mod tests {
         let fresh =
             chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic, &unsplit);
         let old = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
-        let cached: std::collections::HashMap<u64, usize> = old
-            .chunks
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (chunk_key(&c.heading, &c.text), i))
-            .collect();
-        let missing =
-            fresh.iter().filter(|c| !cached.contains_key(&chunk_key(&c.heading, &c.text))).count();
+        // Matched on the stored hash, as the indexer does — the old index no
+        // longer carries the text to compare against.
+        let cached: std::collections::HashMap<u64, usize> =
+            old.chunks.iter().enumerate().map(|(i, c)| (c.hash, i)).collect();
+        let missing = fresh.iter().filter(|c| !cached.contains_key(&c.hash)).count();
 
         assert_eq!(fresh.len(), seeded + 1, "the note gained exactly one passage");
         assert_eq!(missing, 1, "only the new passage may need embedding");
@@ -4802,6 +4857,7 @@ mod tests {
             todo: None,
             priority: None,
             lang: String::new(),
+            hash: 0,
             text: format!("body at {line}"),
         }
     }
@@ -5149,6 +5205,7 @@ mod tests {
             todo: todo.map(str::to_string),
             priority: None,
             lang: "en-US".into(),
+            hash: 0,
             text: "body".into(),
         }
     }
@@ -5236,6 +5293,7 @@ mod tests {
                 todo: None,
                 priority: None,
                 lang: "en-US".into(),
+                hash: 0,
                 text: "the quick brown fox".into(),
             },
             Chunk {
@@ -5249,6 +5307,7 @@ mod tests {
                 todo: None,
                 priority: None,
                 lang: "en-US".into(),
+                hash: 0,
                 text: "der schnelle braune Fuchs".into(),
             },
         ];
@@ -5259,11 +5318,14 @@ mod tests {
         assert_eq!(lexical::doc_count(&dir, &an).unwrap(), 2);
 
         // The hit carries the chunk itself: nothing else has to be loaded to
-        // know what matched, which is what lets the two indexes stand apart.
+        // know *which* passage matched, which is what lets the two indexes stand
+        // apart.  Not its text — that is stored nowhere and read from the note,
+        // so what comes back is where to look rather than what was said.
         let hits = lexical::search(&dir, &parse_query("brown"), 10, true, &an).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1.path, a, "the hit carries its own chunk");
-        assert_eq!(hits[0].1.text, "the quick brown fox");
+        assert_eq!(hits[0].1.heading, "alpha");
+        assert!(hits[0].1.text.is_empty(), "text is never read back out of the index");
 
         // A predicate must constrain the lexical side exactly as it does the
         // semantic one, or the two modes disagree about what was searched.
@@ -5290,6 +5352,7 @@ mod tests {
             todo: None,
             priority: None,
             lang: "en-US".into(),
+            hash: 0,
             text: t.into(),
         };
         let dir = state_dir(&v);
@@ -5413,6 +5476,7 @@ mod tests {
             todo: None,
             priority: None,
             lang: lang.into(),
+            hash: 0,
             text: t.into(),
         };
         let chunks = vec![
