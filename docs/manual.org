@@ -17,11 +17,11 @@ $ org-semantic index ~/notes --both
   638 sections were divided to fit the 350-token budget
 6522 chunks · 6522 to embed · scanned in 5.0s
 model loaded in 0.8s
-  embedding 6522/6522 · 33 chunk/s · 6.5k tok/s · eta 0s
-embedded 6522 chunks in 196.4s (33/s)
-wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 202.2s total
+  embedding 6522/6522 · 35 chunk/s · 6.9k tok/s · eta 0s
+embedded 6522 chunks in 186.8s (35/s)
+wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 192.9s total
 951 org files
-lexical index: 5958 chunks written in 1.2s
+lexical index: 5809 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
