@@ -199,8 +199,13 @@ impl Server {
     /// indexer, so re-embedding a note the editor just saved costs the embedding
     /// and nothing else.
     ///
-    /// The human-readable report goes to a sink — the caller gets the numbers.
-    fn index(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
+    /// The human-readable report goes to a sink — the caller gets the numbers,
+    /// and, while the work runs, `$/progress` notifications under TOKEN.
+    fn index(
+        &mut self,
+        p: &serde_json::Value,
+        token: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
@@ -211,6 +216,7 @@ impl Server {
         // stderr is a pipe nobody has correlated with this request.  What the
         // CLI would print is carried back as `remarks` instead.
         let mut j = Journal::quiet();
+        watch(&mut j, token);
         let mut done = serde_json::Map::new();
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
@@ -338,10 +344,17 @@ impl Server {
         }))
     }
 
-    fn dispatch(&mut self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+    /// TOKEN is the request's id, which doubles as the progress token: a
+    /// notification has none, and nothing to correlate a report with.
+    fn dispatch(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+        token: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         match method {
             "search" => self.search(params),
-            "index" => self.index(params),
+            "index" => self.index(params, token),
             "status" => self.status(params),
             // A resident process must be able to drop what it holds without
             // being restarted: an index rebuilt underneath it is otherwise
@@ -353,6 +366,56 @@ impl Server {
             _ => Err(anyhow!("unknown method `{method}`")),
         }
     }
+}
+
+/// Send at most one report per this long, for the phases whose unit is a file.
+///
+/// Not a display decision — that is the client's. This is flow control: a scan
+/// and a chunking pass over a thousand notes are ~2,000 reports of ~200 bytes in
+/// a few seconds, against a pipe of 16 kB that only the editor can drain. At
+/// this rate the stream is under 2 kB/s and the buffer takes most of a minute to
+/// fill rather than half a second.
+const FLOOR: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Report the work as it happens, under the id the caller is already waiting on.
+///
+/// The token is that id rather than one negotiated first: LSP's
+/// `window/workDoneProgress/create` is a server→**client** request, and
+/// answering it would mean re-entering `read_message` from inside `index`, which
+/// this one-request-at-a-time loop forbids. There is nothing to negotiate — the
+/// client holds the id already.
+///
+/// There is no `begin` or `end` either. An `index` that fails answers with an
+/// error and would skip its `end`, leaving a client holding a token for ever.
+/// The contract has no such hole: one report per completed unit, a change of
+/// `target` or `phase` ends the previous run of them, and the response — result
+/// or error — ends the last.
+fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
+    // A notification has no id, and an explicit `"id": null` is not one either.
+    // Whether *that* deserves a reply is a separate question this must not
+    // silently answer, which is why the test is here and not in the loop.
+    let Some(tok) = token.filter(|t| !t.is_null()).cloned() else { return };
+    let mut gone = false;
+    let mut sent = Instant::now() - FLOOR;
+    j.watch = Some(Box::new(move |p: &Progress| {
+        // The embedding batch *is* the unit — ~1.8 s apart on a large vault —
+        // so it is never withheld.  Nor is the last report of any phase, or a
+        // client would be left rendering 6,400 of 6,522 for ever.
+        let paced = p.phase != "embed" && !p.last;
+        if gone || (paced && sent.elapsed() < FLOOR) {
+            return;
+        }
+        sent = Instant::now();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0", "method": "$/progress",
+            "params": { "token": tok, "value": p },
+        });
+        // Rust leaves SIGPIPE ignored, so a client that has gone away would
+        // otherwise mean minutes of collecting write errors nobody will read.
+        if write_message(&msg).is_err() {
+            gone = true;
+        }
+    }));
 }
 
 /// Read one LSP-framed message: headers, blank line, then exactly
@@ -411,7 +474,11 @@ pub fn serve() -> Result<()> {
             return Ok(());
         }
         let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
-        let result = server.dispatch(method, &params);
+        // Borrowed, not cloned: the borrow ends when `dispatch` returns, so
+        // `id` is still movable into the reply below.  An `index` sent as a
+        // notification therefore reports nothing, with no branch to write —
+        // correct, since there is no token to report under.
+        let result = server.dispatch(method, &params, id.as_ref());
         // A notification (no id) expects no reply, not even for an error.
         let Some(id) = id else { continue };
         write_message(&match result {

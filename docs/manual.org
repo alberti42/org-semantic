@@ -200,7 +200,7 @@ Methods:
 | method     | params                                                                                   | returns                                       |
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
-| =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers               |
+| =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
 | =shutdown= | ---                                                                                      | exit                                          |
@@ -310,6 +310,75 @@ taking the message apart.
 =message= stays the human sentence, unchanged, and is written to be shown as-is.
 It never names a command-line flag, because the person reading it in an editor
 has no command line to type one on.
+
+*** Watching an index happen
+:PROPERTIES:
+:CUSTOM_ID: progress
+:END:
+
+A full reindex takes minutes. While it runs, =index= sends =$/progress=
+notifications so you are not staring at a pipe:
+
+#+begin_src json
+{ "jsonrpc": "2.0", "method": "$/progress",
+  "params": { "token": 7,
+              "value": { "kind": "report", "target": "semantic", "phase": "embed",
+                         "unit": "chunks", "done": 256, "total": 800,
+                         "tokens": 5120, "ofTokens": 17434, "secs": 0.68 } } }
+#+end_src
+
+*The token is the request's own id*, so there is nothing to set up first. LSP
+would have the server ask for a token with =window/workDoneProgress/create=;
+that is a server-to-client /request/, and answering it would mean reading a
+reply from inside a request already being served, which this server does not do.
+You are waiting on the id already --- it is the token.
+
+*There is no =begin= or =end=.* An =index= that fails answers with an error, and
+would skip its =end= --- leaving you holding a token nothing will ever close.
+The rule instead:
+
+#+begin_quote
+One report per completed unit of work. A change of =target= or =phase= ends the
+previous run of reports. The response --- result /or/ error --- ends the last.
+#+end_quote
+
+| field                | |
+|----------------------+--------------------------------------------------------|
+| =target=, =phase=    | which index, and which part of building it              |
+| =unit=               | what =done= and =total= count --- "files", "chunks"     |
+| =done=, =total=      | comparable *only* within one =(target, phase)= pair     |
+| =tokens=, =ofTokens= | embedding only                                          |
+| =bytes=              | a download's size; there is no =total= to climb         |
+| =secs=               | seconds into /this phase/                               |
+| =last=               | the final report of its phase                           |
+
+No percentage, no rate, no estimate: those are yours to compute and yours to
+decide how often to show. The phases are =scan=, =chunk=, =embed= and
+=download=, and =mode: "both"= runs =scan= and =chunk= once per index --- which
+is why every report says which one it belongs to.
+
+Rates are chosen for the pipe, not for your display. Embedding reports *once per
+batch*, about every two seconds on a large vault. Scanning and chunking count
+files, which is far too fine a unit to send one by one, so they are held to one
+report per 100 ms --- except the =last= of a phase, which always goes, so you
+never end up rendering 6,400 of 6,522 for ever.
+
+A =download= report has a size and no total. Nothing counts up towards it:
+fastembed hands over no increments, and a bar frozen at nought for four minutes
+reads as a crash. Show a spinner and the size.
+
+#+begin_quote
+*The timeout will bite you before any of this does.*
+=jsonrpc-default-request-timeout= is *10 seconds*, and a reindex takes minutes.
+Progress notifications do not reset it --- neither LSP nor =jsonrpc.el= has such
+a rule --- so =jsonrpc-request= gives up long before the index finishes, and you
+will write the =$/progress= handler and still see nothing. Use
+=jsonrpc-async-request=, or pass an explicit =:timeout=.
+#+end_quote
+
+None of this makes an index cancellable. The server reads its next message only
+after finishing the current one, so a =$/cancelRequest= sent during an index is
+not seen until the index is over.
 
 *** Warnings that do not stop the run
 :PROPERTIES:
