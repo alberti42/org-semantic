@@ -397,11 +397,22 @@ fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
     let Some(tok) = token.filter(|t| !t.is_null()).cloned() else { return };
     let mut gone = false;
     let mut sent = Instant::now() - FLOOR;
+    let mut running: Option<(&'static str, &'static str)> = None;
     j.watch = Some(Box::new(move |p: &Progress| {
+        // Only reports *within* a run of them are thinned.  A phase change is
+        // not repetition — it is the news — and the protocol says as much: a
+        // change of `target` or `phase` is what ends the previous run.
+        //
+        // Dropping one cost the whole point of this channel once already: a
+        // cold `download`, which is announced exactly once and means minutes of
+        // network, landed half a millisecond after the scan's closing report
+        // and was thinned away as though it were more of the same.
+        let opening = running != Some((p.target, p.phase));
+        running = Some((p.target, p.phase));
         // The embedding batch *is* the unit — ~1.8 s apart on a large vault —
-        // so it is never withheld.  Nor is the last report of any phase, or a
+        // so it is never withheld.  Nor is the last report of a phase, or a
         // client would be left rendering 6,400 of 6,522 for ever.
-        let paced = p.phase != "embed" && !p.last;
+        let paced = p.phase != "embed" && !p.last && !opening;
         if gone || (paced && sent.elapsed() < FLOOR) {
             return;
         }
