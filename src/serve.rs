@@ -8,9 +8,10 @@
 //!
 //! Framing is LSP's — `Content-Length: N\r\n\r\n<body>` — chosen because Emacs
 //! ships `jsonrpc.el` (what Eglot runs on), so the editor side needs no protocol
-//! code at all: request/response correlation, async notifications and
-//! cancellation come for free over a plain `make-process` pipe.  No socket, no
-//! port, no authentication, and the server's lifetime is the editor's.
+//! code at all: request/response correlation and async notifications come for
+//! free over a plain `make-process` pipe.  No socket, no port, no
+//! authentication, and the server's lifetime is the editor's.  Cancellation is
+//! the one thing that does not ride the pipe — see `mod interrupt`.
 //!
 //! Requests are served one at a time.  At ~10 ms each that is not a queue worth
 //! managing, and it keeps every borrow of the cached indexes trivially sound.
@@ -461,6 +462,9 @@ fn write_message(v: &serde_json::Value) -> Result<()> {
 }
 
 pub fn serve() -> Result<()> {
+    // Only here.  On the CLI, Ctrl-C must keep ending the program rather than
+    // politely finishing the phase it is in.
+    interrupt::listen();
     let mut server = Server::default();
     let stdin = io::stdin();
     let mut r = stdin.lock();
@@ -485,6 +489,9 @@ pub fn serve() -> Result<()> {
             return Ok(());
         }
         let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        // A signal that landed while nothing was running belongs to nothing, and
+        // must not cancel whatever is asked for next.
+        interrupt::rearm();
         // Borrowed, not cloned: the borrow ends when `dispatch` returns, so
         // `id` is still movable into the reply below.  An `index` sent as a
         // notification therefore reports nothing, with no branch to write —
@@ -501,8 +508,10 @@ pub fn serve() -> Result<()> {
             // whatever that label promises.  Its absence is meaningful: an error
             // with no `data` is one to show, not one to act on.
             Err(e) => {
-                let mut err = serde_json::json!({ "code": -32000, "message": e.to_string() });
-                if let Some(f) = e.downcast_ref::<Fault>() {
+                let labelled = e.downcast_ref::<Fault>();
+                let code = labelled.map_or(-32000, Fault::code);
+                let mut err = serde_json::json!({ "code": code, "message": e.to_string() });
+                if let Some(f) = labelled {
                     err["data"] = serde_json::to_value(f).unwrap_or(serde_json::Value::Null);
                 }
                 serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": err })

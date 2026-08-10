@@ -44,6 +44,26 @@ fn messages(raw: &[u8]) -> Vec<Value> {
     out
 }
 
+/// One framed message, read as it arrives, or `None` at end of stream.
+///
+/// A byte at a time, which is wasteful and exactly right here: it must not read
+/// past the message it returns, because the caller acts on that message while
+/// the server is still working.
+fn read_one(r: &mut impl std::io::Read) -> Option<Value> {
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut b = [0u8; 1];
+        if r.read(&mut b).ok()? == 0 {
+            return None;
+        }
+        head.push(b[0]);
+    }
+    let n: usize = std::str::from_utf8(&head).ok()?.rsplit(':').next()?.trim().parse().ok()?;
+    let mut body = vec![0u8; n];
+    r.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
 /// Send REQUESTS to a fresh server and return everything it said, notifications
 /// included. CACHE, when given, becomes its `XDG_CACHE_HOME` — which is how a
 /// first run on a bare machine is staged.
@@ -270,6 +290,99 @@ fn warnings_ride_the_reply() {
         remarks.iter().filter(|r| r["kind"] == "unreadable-file").collect();
     assert_eq!(unreadable.len(), 1, "named once, not once per pass: {remarks:?}");
     assert_eq!(unreadable[0]["path"], "broken.org", "vault-relative, as a hit is");
+}
+
+// --------------------------------------------------------------- cancellation
+
+/// Stopping a run that is already under way.
+///
+/// A signal rather than `$/cancelRequest`, because the server is inside the
+/// index for the whole of it and does not read its next message until the
+/// current one is answered — a cancellation over the pipe would arrive after
+/// the thing it cancels.
+///
+/// Timed off the server's own first report rather than off a sleep: it says
+/// when it has started, so nothing here guesses about whether the signal landed
+/// mid-run. A sleep did guess, and guessed wrong — 3,000 notes index in under
+/// half a second, which was less than the 400 ms it waited.
+#[test]
+#[cfg(unix)]
+fn a_signal_stops_a_run_that_is_under_way() {
+    let v = vault("cancel", 3000);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    stdin
+        .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
+                                   "params": { "vault": v, "mode": "lexical", "full": true } })))
+        .unwrap();
+    stdin.flush().unwrap();
+
+    let first = read_one(&mut stdout).expect("it reports before it finishes");
+    assert_eq!(first["method"], "$/progress", "and that is the first thing it says: {first:?}");
+    assert!(
+        Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap().success(),
+        "the server was there to be signalled"
+    );
+
+    // It answers rather than dies: one request ended, not the session.
+    stdin.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 8, "method": "shutdown" }))).unwrap();
+    drop(stdin);
+    let mut msgs = vec![first];
+    while let Some(m) = read_one(&mut stdout) {
+        msgs.push(m);
+    }
+    child.wait().unwrap();
+
+    let reply = msgs.iter().find(|m| m["id"] == 7).expect("the cancelled index still answered");
+    assert_eq!(reply["error"]["code"], -32800, "LSP's RequestCancelled: {reply:?}");
+    assert_eq!(reply["error"]["data"]["kind"], "cancelled");
+    assert!(
+        msgs.iter().any(|m| m["id"] == 8),
+        "and the session survived it — one request ended, not the server"
+    );
+    assert!(
+        !v.join(".org-semantic").join("lexical.json").exists(),
+        "nothing half-written: the checks sit between units, never inside one"
+    );
+}
+
+/// A signal that arrives while nothing is running belongs to nothing. Without
+/// rearming, it would cancel whatever was asked for next.
+#[test]
+#[cfg(unix)]
+fn a_signal_between_requests_does_not_poison_the_next_one() {
+    let v = vault("rearm", 4);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+
+    // Idle: nothing is in flight to cancel.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    stdin
+        .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
+                                   "params": { "vault": v, "mode": "lexical", "full": true } })))
+        .unwrap();
+    stdin.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 8, "method": "shutdown" }))).unwrap();
+    drop(stdin);
+    let msgs = messages(&child.wait_with_output().unwrap().stdout);
+
+    let reply = msgs.iter().find(|m| m["id"] == 7).expect("a reply");
+    assert!(reply.get("result").is_some(), "the next request runs normally: {reply:?}");
 }
 
 // ------------------------------------------------------- what a cold machine sees

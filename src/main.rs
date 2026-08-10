@@ -63,6 +63,20 @@ struct Fault {
     data: serde_json::Value,
 }
 
+impl Fault {
+    /// The JSON-RPC code this goes out under.
+    ///
+    /// One kind earns its own: a cancelled run is not a failure of the request
+    /// but the answer to one, and LSP already has a number for that. Everything
+    /// else is an application error, told apart by `kind` rather than by code.
+    fn code(&self) -> i32 {
+        match self.kind {
+            "cancelled" => -32800,
+            _ => -32000,
+        }
+    }
+}
+
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
@@ -309,6 +323,82 @@ struct Journal {
     /// Named apart from the `progress` method on purpose — `j.watch = …` beside
     /// `j.progress(&p)` reads as two different things, which they are.
     watch: Option<Watcher>,
+}
+
+/// Stopping a run that is already under way.
+///
+/// Not `$/cancelRequest`: `serve()` is inside `index` for the whole of it and
+/// does not read its next message until the current one is answered, so a
+/// cancellation sent over the pipe would arrive after the thing it cancels.
+/// A signal does not queue behind the work.
+///
+/// It carries no id, which is only unambiguous because requests are served one
+/// at a time — it stops **the run in flight**. Say so in the manual, or a
+/// client author will look for the protocol message and find nothing.
+///
+/// The handler does two things and both are async-signal-safe: a store, and on a
+/// second signal a `signal`/`raise` pair. Nothing is allocated and no lock is
+/// taken, because a handler may interrupt code holding either.
+#[cfg(unix)]
+mod interrupt {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static STOP: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn asked_to_stop(sig: libc::c_int) {
+        if STOP.swap(true, Ordering::SeqCst) {
+            // Asked twice.  The first request is only honoured between units of
+            // work, so a wait with no units — a model download, mid-flight — is
+            // deaf to it.  Restore the default and re-raise: the second Ctrl-C
+            // means what it has always meant.
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+        }
+    }
+
+    /// Installed by `serve` and nowhere else.  On the CLI, Ctrl-C must keep
+    /// ending the program rather than politely finishing the phase it is in.
+    pub fn listen() {
+        unsafe { libc::signal(libc::SIGINT, asked_to_stop as libc::sighandler_t) };
+    }
+
+    /// Called as each request begins.  Without it a signal landing just after
+    /// one run ends would cancel the next one before it started.
+    pub fn rearm() {
+        STOP.store(false, Ordering::SeqCst);
+    }
+
+    pub fn asked() -> bool {
+        STOP.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(not(unix))]
+mod interrupt {
+    pub fn listen() {}
+    pub fn rearm() {}
+    pub fn asked() -> bool {
+        false
+    }
+}
+
+/// Give up if the caller has asked to stop.
+///
+/// Called between units of work and never inside one, so an abandoned run
+/// leaves the previous index exactly as it was: every check sits before a chunk
+/// is read or a batch embedded, and none of them is anywhere near `save_index`
+/// or tantivy's commit.
+fn stop_requested() -> Result<()> {
+    if interrupt::asked() {
+        return Err(fault(
+            "cancelled",
+            serde_json::json!({}),
+            "the run was cancelled before it finished".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A size as someone would say it aloud.  Decimal units, because that is what a
@@ -3148,7 +3238,7 @@ fn scan_vault(
     rehash: bool,
     target: &'static str,
     j: &mut Journal,
-) -> Scan {
+) -> Result<Scan> {
     let t0 = Instant::now();
     let mut sc = Scan {
         hashes: Default::default(),
@@ -3164,6 +3254,7 @@ fn scan_vault(
     };
 
     for (i, f) in files.iter().enumerate() {
+        stop_requested()?;
         // At the top of the body: every path below can `continue`, and a
         // counter bumped at the bottom would under-report by exactly the number
         // of notes that did not change — nearly all of them, on the runs where
@@ -3229,7 +3320,7 @@ fn scan_vault(
     if let Some((files, _)) = prev {
         sc.dropped = files.keys().filter(|p| !sc.hashes.contains_key(*p)).cloned().collect();
     }
-    sc
+    Ok(sc)
 }
 
 /// What the lexical index has seen.  Kept apart from `manifest.json` on purpose:
@@ -3283,7 +3374,7 @@ fn cmd_index_lexical(
         rehash,
         "lexical",
         j,
-    );
+    )?;
 
     // Chunk only what changed.  The languages of those notes may introduce a
     // field the schema does not have, and a schema change means the whole index
@@ -3296,6 +3387,7 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut speculative = Journal::quiet();
     for st in &scan.stale {
+        stop_requested()?;
         let f = vault.join(&st.path);
         chunks.extend(chunk_file(
             &f,
@@ -3317,6 +3409,7 @@ fn cmd_index_lexical(
         chunks.clear();
         let t_chunk = Instant::now();
         for (i, f) in files.iter().enumerate() {
+            stop_requested()?;
             j.progress(
                 &Progress::new("lexical", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
                     .of(files.len()),
@@ -3475,7 +3568,7 @@ fn cmd_index(
         rehash,
         "semantic",
         j,
-    );
+    )?;
     report_unreadable(&scan, j);
     let Scan {
         hashes,
@@ -3548,6 +3641,7 @@ fn cmd_index(
 
     let t_chunk = Instant::now();
     for (i, f) in files.iter().enumerate() {
+        stop_requested()?;
         // Reported here, at the top, and never below: both branches under this
         // one leave the body early, so a counter at the bottom would skip every
         // note that did not change.  (Mind the `j` a few lines down — it is a
@@ -3751,6 +3845,7 @@ fn cmd_index(
         const BATCH: usize = 64;
         let (mut done, mut tokens_done) = (0usize, 0usize);
         for group in order.chunks(BATCH) {
+            stop_requested()?;
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
             let vs = model.embed(&batch, Some(BATCH)).map_err(|e| anyhow!("embedding: {e}"))?;
             for (&i, mut v) in group.iter().zip(vs) {
@@ -5689,7 +5784,7 @@ mod tests {
         org_files(&v, &mut files).unwrap();
         files.sort();
 
-        let scan = scan_vault(&v, &files, None, false, "lexical", &mut Journal::quiet());
+        let scan = scan_vault(&v, &files, None, false, "lexical", &mut Journal::quiet()).unwrap();
         let mut j = Journal::quiet();
         report_unreadable(&scan, &mut j);
         let rs = j.drain();

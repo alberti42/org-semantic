@@ -37,5 +37,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 
+# For `serve`'s interrupt handler only.  Already in the tree by way of half the
+# dependencies above, so naming it here compiles nothing new.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
