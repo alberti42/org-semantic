@@ -146,6 +146,140 @@ impl Remark {
 /// notes should not ship four hundred remarks each time.
 const REMARK_CAP: usize = 50;
 
+/// One completed unit of work, as it happens.
+///
+/// Raw counts only.  Rate, percentage and eta are display decisions and belong
+/// to whoever is doing the displaying — the CLI derives them in `printed()`, a
+/// client derives whatever it likes, and neither is imposed on the other.
+///
+/// There is no `begin`/`end` pair.  An `index` that fails answers with an error
+/// and would skip its `end`, leaving a client holding a token forever, so the
+/// contract has no bookkeeping to get wrong instead: **one report per completed
+/// unit; a change of `target` or `phase` ends the previous run of reports; the
+/// response — result or error — ends the last.**
+#[derive(Serialize)]
+struct Progress {
+    /// Constant today.  Present so the envelope is LSP's, not so it varies.
+    kind: &'static str,
+    /// Which index this belongs to.  A literal at every site, because
+    /// `cmd_index` is semantic-only and `cmd_index_lexical` lexical-only —
+    /// unlike `Remark::target`, which `serve` stamps afterwards, a notification
+    /// is already on the wire by then.  Without it a client watching `chunk`
+    /// sees the count reach the file total, reset, and climb again, since the
+    /// two indexes chunk the same notes separately.
+    target: &'static str,
+    phase: &'static str,
+    /// What `done` and `total` count — "files", "chunks".  Carried rather than
+    /// left implicit because the phases count different things, so the numbers
+    /// are comparable only within one `(target, phase)` pair and a client
+    /// should not have to learn that from prose.
+    unit: &'static str,
+    done: usize,
+    /// Absent when the work cannot be counted, which is what a download is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<usize>,
+    #[serde(rename = "ofTokens", skip_serializing_if = "Option::is_none")]
+    of_tokens: Option<usize>,
+    /// How large this work is when that is known but not countable.
+    /// Deliberately **not** `total`: `total` is a denominator `done` climbs
+    /// towards, and a bar frozen at nought for four minutes reads as a hang.
+    /// This is a fact to state beside a spinner — "about 465 MB".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<u64>,
+    /// Seconds into *this phase*.  Not reconstructible by a client, whose clock
+    /// starts when it sent the request — which includes the scan.  Named as
+    /// `IndexReport.secs` is.
+    secs: f64,
+    /// The last report of its phase, so a client can close a spinner without
+    /// comparing `done` to `total`, and a send-rate floor knows what never to
+    /// drop.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    last: bool,
+}
+
+impl Progress {
+    fn new(
+        target: &'static str,
+        phase: &'static str,
+        unit: &'static str,
+        done: usize,
+        secs: f64,
+    ) -> Self {
+        Progress {
+            kind: "report",
+            target,
+            phase,
+            unit,
+            done,
+            total: None,
+            tokens: None,
+            of_tokens: None,
+            bytes: None,
+            secs,
+            last: false,
+        }
+    }
+
+    fn of(mut self, total: usize) -> Self {
+        self.total = Some(total);
+        self
+    }
+
+    fn tokens(mut self, done: usize, total: usize) -> Self {
+        self.tokens = Some(done);
+        self.of_tokens = Some(total);
+        self
+    }
+
+    fn sized(mut self, bytes: u64) -> Self {
+        self.bytes = Some(bytes);
+        self
+    }
+
+    fn last(mut self) -> Self {
+        self.last = true;
+        self
+    }
+
+    /// As the CLI draws it, in place.
+    ///
+    /// Built from the fields that are *present*, never from a match on `phase`:
+    /// a phase carrying token counts gets a rate and an estimate and one that
+    /// does not gets neither, so this never has to learn which phases exist.
+    fn printed(&self) -> String {
+        use std::fmt::Write as _;
+        let el = self.secs.max(1e-3);
+        let mut s = format!("  {} ", self.phase);
+        match self.total {
+            Some(t) => {
+                let _ =
+                    write!(s, "{}/{t} {} · {:.0}/s", self.done, self.unit, self.done as f64 / el);
+            }
+            // Indeterminate: say how big, if that is known, and nothing else.
+            None => match self.bytes {
+                Some(b) => {
+                    let _ = write!(s, "· {:.0} MB", b as f64 / 1e6);
+                }
+                None => s.push('…'),
+            },
+        }
+        if let (Some(got), Some(all)) = (self.tokens, self.of_tokens) {
+            let tps = (got as f64 / el).max(1.0);
+            let _ = write!(s, " · {:.1}k tok/s · eta {:.0}s", tps / 1e3, (all - got) as f64 / tps);
+        }
+        // Erases the tail of a longer previous line.
+        s.push_str("   ");
+        s
+    }
+}
+
+/// Somebody watching the work happen.  `FnMut` rather than `Fn` so a transport
+/// can keep its own state — when it last wrote, whether the far end is still
+/// there — as plain captured locals instead of cells.
+type Watcher = Box<dyn FnMut(&Progress)>;
+
 /// Where a run's prose goes, and what it hands back as data.
 ///
 /// Two writers rather than one because the CLI has always had two: the running
@@ -165,6 +299,13 @@ struct Journal {
     remarks: Vec<Remark>,
     /// Per kind, including what the cap dropped.
     counts: std::collections::HashMap<&'static str, usize>,
+    /// Where a completed unit of work goes for a caller that wants it as data
+    /// rather than as a bar.  `None` on the CLI, where the bar is the whole
+    /// story; `serve` installs one that writes a `$/progress` notification.
+    ///
+    /// Named apart from the `progress` method on purpose — `j.watch = …` beside
+    /// `j.progress(&p)` reads as two different things, which they are.
+    watch: Option<Watcher>,
 }
 
 /// Whether anything may draw on the terminal.
@@ -190,7 +331,38 @@ impl Journal {
     }
 
     fn with(out: Box<dyn Write>, warn: Box<dyn Write>) -> Self {
-        Journal { out, warn, tty: false, remarks: Vec::new(), counts: Default::default() }
+        Journal {
+            out,
+            warn,
+            tty: false,
+            remarks: Vec::new(),
+            counts: Default::default(),
+            watch: None,
+        }
+    }
+
+    /// A unit of work finished.  Drawn in place for a terminal, handed on to
+    /// whoever is watching — the two are the same event, so they cannot drift.
+    ///
+    /// How *often* to draw or send is not decided here: the terminal wants
+    /// every one, and a transport that writes into a pipe it cannot drain has
+    /// its own reasons, which belong to that transport.
+    fn progress(&mut self, p: &Progress) {
+        if self.tty {
+            let _ = write!(self.warn, "\r{}", p.printed());
+            let _ = self.warn.flush();
+        }
+        if let Some(w) = &mut self.watch {
+            w(p);
+        }
+    }
+
+    /// Close a phase's line on the terminal, so the next thing printed does not
+    /// land on it.  Nothing to send: `Progress::last` already said so.
+    fn progress_done(&mut self) {
+        if self.tty {
+            let _ = writeln!(self.warn);
+        }
     }
 
     /// Print it and record it, so the terminal reads as it always did and a
@@ -262,6 +434,17 @@ struct Model {
     passage: &'static str,
     /// Languages it was trained on, for `--model list`.
     about: &'static str,
+    /// Roughly what a first run has to download, for setting an expectation
+    /// before a wait of minutes.  Not a denominator — fastembed gives no
+    /// increments, so nothing counts up towards this.
+    ///
+    /// A curated claim like the prefixes above, and for the same reason:
+    /// asking Hugging Face is worse.  `intfloat/multilingual-e5-large` reports
+    /// `onnx/model.onnx` as 545,850 bytes, and the weights are in a sibling
+    /// `model.onnx_data` of 2.2 GB — a precise answer, off by four thousand.
+    /// Half the repos also ship eight quantised variants and only fastembed
+    /// knows which it takes.
+    bytes: u64,
 }
 
 /// BGE's query prefix, shared by the whole v1.5 English family.
@@ -273,19 +456,19 @@ const BGE_QUERY: &str = "Represent this sentence for searching relevant passages
 #[rustfmt::skip]
 const MODELS: &[Model] = &[
     Model { name: "bge-small-en", which: EmbeddingModel::BGESmallENV15, dim: 384,
-            query: BGE_QUERY, passage: "", about: "English" },
+            query: BGE_QUERY, passage: "", about: "English", bytes: 133_000_000 },
     Model { name: "bge-base-en", which: EmbeddingModel::BGEBaseENV15, dim: 768,
-            query: BGE_QUERY, passage: "", about: "English" },
+            query: BGE_QUERY, passage: "", about: "English", bytes: 436_000_000 },
     Model { name: "bge-large-en", which: EmbeddingModel::BGELargeENV15, dim: 1024,
-            query: BGE_QUERY, passage: "", about: "English" },
+            query: BGE_QUERY, passage: "", about: "English", bytes: 1_337_000_000 },
     // E5 is asymmetric: both sides carry a prefix, and omitting the passage one
     // is the quiet mistake this table exists to prevent.
     Model { name: "e5-small", which: EmbeddingModel::MultilingualE5Small, dim: 384,
-            query: "query: ", passage: "passage: ", about: "100 languages" },
+            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 470_000_000 },
     Model { name: "e5-base", which: EmbeddingModel::MultilingualE5Base, dim: 768,
-            query: "query: ", passage: "passage: ", about: "100 languages" },
+            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 1_110_000_000 },
     Model { name: "e5-large", which: EmbeddingModel::MultilingualE5Large, dim: 1024,
-            query: "query: ", passage: "passage: ", about: "100 languages" },
+            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 2_236_000_000 },
 ];
 
 const USAGE: &str = "\
@@ -483,6 +666,9 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// keeps it out of the distribution so ShareAlike never engages.
 const LID_URL: &str = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz";
 
+/// What that download costs, for saying so before it starts.
+const LID_BYTES: u64 = 917_000;
+
 /// The classifier and the set of languages it knows.
 ///
 /// The languages are read from the model rather than listed here, so the two can
@@ -556,8 +742,15 @@ fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
     // five-second index took ninety.  Recorded, not remarked — `classifier`
     // announces it live on the terminal as it happens.
     let fetching = !lid_path().exists();
+    if fetching {
+        // Said *before* the wait, not after it — that is the whole point of a
+        // progress channel.  No `total`: `ureq` reads the body in one call, so
+        // there are no increments to count, only a size to state.
+        j.progress(&Progress::new("lexical", "download", "bytes", 0, 0.0).sized(LID_BYTES));
+    }
     let lid = classifier()?;
     if fetching {
+        j.progress_done();
         j.record(Remark::new(
             "model-downloaded",
             "the language classifier was fetched before this run could start".into(),
@@ -2938,7 +3131,19 @@ type Seen<'a> =
 /// Three outcomes per note, cheapest first: its stamp matches, so it is not even
 /// read; its stamp moved but its bytes hash the same, so it is read and reused;
 /// or it is genuinely new or changed, and the caller must redo its work.
-fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: bool) -> Scan {
+/// Takes a journal to *report progress* and for nothing else — this is still the
+/// one filesystem-only helper here, and the files it could not read still travel
+/// out on `Scan::unreadable` for the caller to remark on, because the caller is
+/// the one that knows which index it is scanning for.
+fn scan_vault(
+    vault: &Path,
+    files: &[PathBuf],
+    prev: Option<Seen<'_>>,
+    rehash: bool,
+    target: &'static str,
+    j: &mut Journal,
+) -> Scan {
+    let t0 = Instant::now();
     let mut sc = Scan {
         hashes: Default::default(),
         stamps: Default::default(),
@@ -2952,7 +3157,14 @@ fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: b
         new: 0,
     };
 
-    for f in files {
+    for (i, f) in files.iter().enumerate() {
+        // At the top of the body: every path below can `continue`, and a
+        // counter bumped at the bottom would under-report by exactly the number
+        // of notes that did not change — nearly all of them, on the runs where
+        // this is the whole of the wait.
+        j.progress(
+            &Progress::new(target, "scan", "files", i, t0.elapsed().as_secs_f64()).of(files.len()),
+        );
         let path = rel_path(vault, f);
         let stamp = stamp_of(f);
 
@@ -3000,6 +3212,13 @@ fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: b
             }
         }
     }
+
+    j.progress(
+        &Progress::new(target, "scan", "files", files.len(), t0.elapsed().as_secs_f64())
+            .of(files.len())
+            .last(),
+    );
+    j.progress_done();
 
     if let Some((files, _)) = prev {
         sc.dropped = files.keys().filter(|p| !sc.hashes.contains_key(*p)).cloned().collect();
@@ -3051,7 +3270,14 @@ fn cmd_index_lexical(
         .flatten()
         .and_then(|b| serde_json::from_slice(&b).ok());
 
-    let scan = scan_vault(vault, &files, old.as_ref().map(|m| (&m.files, &m.stamps)), rehash);
+    let scan = scan_vault(
+        vault,
+        &files,
+        old.as_ref().map(|m| (&m.files, &m.stamps)),
+        rehash,
+        "lexical",
+        j,
+    );
 
     // Chunk only what changed.  The languages of those notes may introduce a
     // field the schema does not have, and a schema change means the whole index
@@ -3083,7 +3309,12 @@ fn cmd_index_lexical(
     // A rebuild has to see every note, not only the changed ones.
     if rebuilding {
         chunks.clear();
-        for f in &files {
+        let t_chunk = Instant::now();
+        for (i, f) in files.iter().enumerate() {
+            j.progress(
+                &Progress::new("lexical", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
+                    .of(files.len()),
+            );
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
                 Ok(text) => chunks.extend(chunk_file(
@@ -3098,6 +3329,18 @@ fn cmd_index_lexical(
                 Err(e) => j.remark(unreadable_note(&path, &e.to_string())),
             }
         }
+        j.progress(
+            &Progress::new(
+                "lexical",
+                "chunk",
+                "files",
+                files.len(),
+                t_chunk.elapsed().as_secs_f64(),
+            )
+            .of(files.len())
+            .last(),
+        );
+        j.progress_done();
     } else {
         // Nothing was discarded, so the speculative pass is the real one.
         // Reported here rather than beside the scan for the same reason: a
@@ -3219,7 +3462,14 @@ fn cmd_index(
     let dir = semantic_dir(vault, m);
     let old = if full { None } else { load_index(&dir, m, j) };
 
-    let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
+    let scan = scan_vault(
+        vault,
+        &files,
+        old.as_ref().map(|ix| (&ix.files, &ix.stamps)),
+        rehash,
+        "semantic",
+        j,
+    );
     report_unreadable(&scan, j);
     let Scan {
         hashes,
@@ -3235,8 +3485,28 @@ fn cmd_index(
     } = scan;
     let dropped = dropped.len();
 
-    // Loaded only if something actually needs chunking.
-    let tok = if stale.is_empty() { None } else { Some(tokenizer_for(m)?) };
+    // Loaded only if something actually needs chunking.  A missing tokenizer is
+    // the one warning that the *model* is about to be fetched — hundreds of
+    // megabytes, before any of the work below starts — so it is said in advance
+    // rather than explained afterwards.  fastembed offers no increments, only
+    // the size, which is why this carries `bytes` and no `total`.
+    let tok = if stale.is_empty() {
+        None
+    } else {
+        let cold = find_tokenizer(m).is_err();
+        if cold {
+            j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).sized(m.bytes));
+        }
+        let t = tokenizer_for(m)?;
+        if cold {
+            j.progress_done();
+            j.record(Remark::new(
+                "model-downloaded",
+                format!("{} was fetched before this run could start", m.name),
+            ));
+        }
+        Some(t)
+    };
 
     // Assembled in file order with a slot per chunk.  Reused notes copy their
     // vectors straight across; stale ones leave zeroed slots that the embedding
@@ -3272,7 +3542,17 @@ fn cmd_index(
     }
     let mut carried = 0usize;
 
-    for f in &files {
+    let t_chunk = Instant::now();
+    for (i, f) in files.iter().enumerate() {
+        // Reported here, at the top, and never below: both branches under this
+        // one leave the body early, so a counter at the bottom would skip every
+        // note that did not change.  (Mind the `j` a few lines down — it is a
+        // slot index shadowing the journal, which is why nothing may report
+        // from inside that branch.)
+        j.progress(
+            &Progress::new("semantic", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
+                .of(files.len()),
+        );
         let path = rel_path(vault, f);
         if reused.contains(path.as_str()) {
             if let Some(ix) = &old {
@@ -3328,6 +3608,12 @@ fn cmd_index(
             }
         }
     }
+    j.progress(
+        &Progress::new("semantic", "chunk", "files", files.len(), t_chunk.elapsed().as_secs_f64())
+            .of(files.len())
+            .last(),
+    );
+    j.progress_done();
 
     if old.is_some() {
         writeln!(
@@ -3473,27 +3759,15 @@ fn cmd_index(
             let el = t2.elapsed().as_secs_f64();
             // Tokens per second is near flat once padding is gone, so remaining
             // work divided by it is an estimate rather than an extrapolation.
-            let tps = (tokens_done as f64 / el).max(1.0);
-            // Through the journal, and only onto a terminal.  This used to be a
-            // bare `eprint!`, which went to the process's own stderr whatever
-            // the caller was — so `serve` drew a carriage-returned bar into a
-            // pipe it shares with the protocol, for a client that had no way to
-            // know which request it belonged to.
-            if j.tty {
-                let _ = write!(
-                    j.warn,
-                    "\r  embedding {done}/{} · {:.0} chunk/s · {:.1}k tok/s · eta {:.0}s   ",
-                    texts.len(),
-                    done as f64 / el,
-                    tps / 1000.0,
-                    (total_tokens - tokens_done) as f64 / tps
-                );
-                let _ = j.warn.flush();
-            }
+            // One report per completed batch — the unit the work is actually
+            // done in, ~1.8 s apart on a large vault.  Nothing here decides how
+            // often that is drawn or sent; the terminal takes every one.
+            let p = Progress::new("semantic", "embed", "chunks", done, el)
+                .of(texts.len())
+                .tokens(tokens_done, total_tokens);
+            j.progress(&if done == texts.len() { p.last() } else { p });
         }
-        if j.tty {
-            let _ = writeln!(j.warn);
-        }
+        j.progress_done();
         writeln!(
             j.out,
             "embedded {} chunks in {:.1}s ({:.0}/s)",
@@ -5378,7 +5652,7 @@ mod tests {
         org_files(&v, &mut files).unwrap();
         files.sort();
 
-        let scan = scan_vault(&v, &files, None, false);
+        let scan = scan_vault(&v, &files, None, false, "lexical", &mut Journal::quiet());
         let mut j = Journal::quiet();
         report_unreadable(&scan, &mut j);
         let rs = j.drain();
@@ -5388,6 +5662,44 @@ mod tests {
         // that happened to be on hand.
         assert_eq!(rs[0].path.as_deref(), Some("broken.org"));
         assert!(scan.stale.iter().any(|s| s.path == "fine.org"), "the rest is still scanned");
+    }
+
+    /// The bar and the notification are one event rendered twice, so a hook
+    /// hears exactly what the terminal is shown — no more, no fewer.
+    #[test]
+    fn what_the_terminal_draws_is_what_a_watcher_hears() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut j = Journal::quiet();
+        let sink = seen.clone();
+        j.watch = Some(Box::new(move |p| sink.borrow_mut().push((p.phase, p.done, p.last))));
+        for i in 0..3 {
+            j.progress(&Progress::new("semantic", "embed", "chunks", i, 0.1).of(3));
+        }
+        j.progress(&Progress::new("semantic", "embed", "chunks", 3, 0.1).of(3).last());
+        assert_eq!(
+            *seen.borrow(),
+            [("embed", 0, false), ("embed", 1, false), ("embed", 2, false), ("embed", 3, true)]
+        );
+    }
+
+    /// `printed()` reads the fields that are there rather than switching on the
+    /// phase, which is what keeps it from having to learn the phases.
+    #[test]
+    fn a_bar_shows_a_rate_only_where_there_is_something_to_rate() {
+        let counted = Progress::new("semantic", "embed", "chunks", 64, 2.0).of(128);
+        assert!(counted.printed().contains("64/128 chunks"));
+        assert!(!counted.printed().contains("tok/s"), "no tokens given, no token rate");
+
+        let with_tokens = counted.tokens(1000, 4000);
+        assert!(with_tokens.printed().contains("tok/s"));
+        assert!(with_tokens.printed().contains("eta"));
+
+        // A download has a size but no denominator, so it must not render as a
+        // bar sitting at zero — that reads as a hang.
+        let fetching = Progress::new("semantic", "download", "bytes", 0, 0.0).sized(470_000_000);
+        let s = fetching.printed();
+        assert!(s.contains("470 MB"), "says how big: {s}");
+        assert!(!s.contains('/'), "and shows no fraction: {s}");
     }
 
     /// An editor calls `index` on every save, so a vault full of one problem
