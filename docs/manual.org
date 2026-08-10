@@ -822,8 +822,15 @@ reindex with `full` to rebuild under the new one, or restore the previous settin
 #+end_src
 
 which is what a client turns into /your =org-todo-keywords= changed since this
-vault was indexed --- reindex?/ Nothing is rebuilt without that answer. Two
-things a client should get right: send the policy on =search= as well as
+vault was indexed --- reindex?/ Nothing is rebuilt without that answer.
+
+It does not have to read that sentence to do so. Over JSON-RPC the same failure
+arrives labelled =config-drift=, with the settings that moved as a list of
+names --- see
+[[#errors-a-client-acts-on][errors you are meant to act on]]. The message is for
+showing; the label and the names are for deciding.
+
+Two things a client should get right: send the policy on =search= as well as
 =index=, and *latch the error into one prompt* --- the mismatch holds until the
 user acts, so a client searching as you type would otherwise raise it on every
 keystroke.
