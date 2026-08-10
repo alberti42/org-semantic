@@ -5731,6 +5731,138 @@ mod tests {
         }
     }
 
+    /// One report as a test cares about it.
+    #[derive(Debug, PartialEq)]
+    struct Seen {
+        target: &'static str,
+        phase: &'static str,
+        done: usize,
+        total: Option<usize>,
+        last: bool,
+    }
+
+    /// A journal that keeps every report a run made, for asserting on what it
+    /// announced rather than on what it returned.
+    fn watched() -> (Journal, std::rc::Rc<std::cell::RefCell<Vec<Seen>>>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut j = Journal::quiet();
+        let sink = log.clone();
+        j.watch = Some(Box::new(move |p| {
+            sink.borrow_mut().push(Seen {
+                target: p.target,
+                phase: p.phase,
+                done: p.done,
+                total: p.total,
+                last: p.last,
+            })
+        }));
+        (j, log)
+    }
+
+    /// The phase order a client renders, and the guarantee it renders against:
+    /// every phase ends at its total, exactly once.
+    #[test]
+    fn a_lexical_index_announces_each_phase_and_finishes_it() {
+        let v = scratch("progress-lexical");
+        for n in ["a", "b", "c"] {
+            note(&v, n);
+        }
+        let (mut j, log) = watched();
+        cmd_index_lexical(
+            &v,
+            true,
+            false,
+            &LangConfig::default(),
+            false,
+            &Config::default(),
+            &mut j,
+        )
+        .unwrap();
+
+        let seen = log.borrow();
+        let order: Vec<&str> = seen.iter().map(|s| s.phase).fold(Vec::new(), |mut a, p| {
+            if a.last() != Some(&p) {
+                a.push(p);
+            }
+            a
+        });
+        assert_eq!(order, ["scan", "chunk"], "in the order the work happens");
+        assert!(seen.iter().all(|s| s.target == "lexical"), "each says which index it is");
+        // A warm cache must not announce a download it is not doing.
+        assert!(!seen.iter().any(|s| s.phase == "download"));
+
+        for phase in ["scan", "chunk"] {
+            let ends: Vec<&Seen> = seen.iter().filter(|s| s.phase == phase && s.last).collect();
+            assert_eq!(ends.len(), 1, "{phase} ends once: {seen:?}");
+            assert_eq!(ends[0].done, 3, "{phase} counted every note");
+            assert_eq!(ends[0].total, Some(3));
+        }
+    }
+
+    /// The bug this was written against: both chunking loops and the scan leave
+    /// the body early for a note that did not change, so a counter bumped at the
+    /// *bottom* under-reports by exactly the notes an incremental run skips —
+    /// which is nearly all of them, on the runs where scanning is the whole of
+    /// the wait.  A client would watch the count stall short of the total and
+    /// never see it close.
+    #[test]
+    fn a_run_that_skips_every_note_still_counts_them_all() {
+        let v = scratch("progress-skips");
+        let notes: Vec<String> = ["alpha", "beta", "gamma"].iter().map(|n| note(&v, n)).collect();
+        seed_real(&v, &notes.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let (mut j, log) = watched();
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        // Nothing changed since the seed, so every file takes an early exit.
+        let r = cmd_index(&v, false, false, m, &Config::default(), &mut j, None).unwrap();
+        assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
+
+        let seen = log.borrow();
+        for phase in ["scan", "chunk"] {
+            let run: Vec<&Seen> = seen.iter().filter(|s| s.phase == phase).collect();
+            // Asserting only on the closing report would prove nothing: it is
+            // emitted after the loop and says `done == total` however little the
+            // loop counted.  What the bug destroys is the *progression* — with
+            // the counter at the bottom, a run that skips every note reports
+            // once, at the end, having appeared frozen throughout.
+            let counted: Vec<usize> = run.iter().filter(|s| !s.last).map(|s| s.done).collect();
+            assert_eq!(
+                counted,
+                (0..3).collect::<Vec<_>>(),
+                "{phase} must report on every note it visits, skipped or not: {seen:?}"
+            );
+            let ends: Vec<&&Seen> = run.iter().filter(|s| s.last).collect();
+            assert_eq!(ends.len(), 1, "{phase} ends once");
+            assert_eq!((ends[0].done, ends[0].total), (3, Some(3)));
+        }
+    }
+
+    /// The lexical indexer chunks once to find out whether the analyzer widened,
+    /// then throws that away and chunks everything again if it did.  The
+    /// discarded pass must not report: a client would see the count reach the
+    /// total, then start over.
+    #[test]
+    fn the_speculative_chunking_pass_reports_nothing() {
+        let v = scratch("progress-speculative");
+        for n in ["a", "b"] {
+            note(&v, n);
+        }
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        // First run builds the index; the second is incremental over a changed
+        // note, which is when the speculative pass has something to do.
+        cmd_index_lexical(&v, true, false, &lang, false, &cfg, &mut Journal::quiet()).unwrap();
+        let a = v.join("a.org");
+        fs::write(&a, format!("{}\nmore prose\n", fs::read_to_string(&a).unwrap())).unwrap();
+
+        let (mut j, log) = watched();
+        cmd_index_lexical(&v, false, false, &lang, false, &cfg, &mut j).unwrap();
+
+        let seen = log.borrow();
+        let chunk_ends = seen.iter().filter(|s| s.phase == "chunk" && s.last).count();
+        assert!(chunk_ends <= 1, "at most one chunking pass may report: {seen:?}");
+    }
+
     /// An editor calls `index` on every save, so a vault full of one problem
     /// must not ship the same problem hundreds of times per keystroke.
     #[test]
