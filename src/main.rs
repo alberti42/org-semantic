@@ -158,7 +158,7 @@ impl Default for Limits {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Chunk {
     /// Relative to the vault root.  Relative rather than absolute so the index
     /// survives the vault being moved or renamed, and so `dir:` predicates are
@@ -169,8 +169,20 @@ struct Chunk {
     id: Option<String>,
     /// Heading path, e.g. "Note title > Section > Subsection".
     heading: String,
-    /// 1-based, for the case where there is no `:ID:` to jump by.
+    /// The line the owning heading starts on, 1-based and in the real file —
+    /// the counter advances over lines the parser drops, so a collapsed source
+    /// block shifts nothing.  This is the address a client jumps to.
     line: usize,
+    /// The raw-file lines this passage was built from, inclusive.
+    ///
+    /// Wider than the text: a `#+begin_src` collapsed to `[src bash]` still
+    /// spans its whole block, so reading the file over this range shows the code
+    /// itself.  Consecutive passages of one section overlap by a paragraph,
+    /// because `carry_over` restarts each piece with its predecessor's last one.
+    #[serde(default)]
+    start_line: usize,
+    #[serde(default)]
+    end_line: usize,
     /// Effective org tags: `#+filetags:` plus every ancestor heading's tags plus
     /// its own.  Org inherits tags down the outline, so a chunk under
     /// `* Project :work:` carries `work` whether or not its own heading says so.
@@ -1061,7 +1073,14 @@ fn chunk_file(
     let mut file_id: Option<String> = None;
     let mut cur_id: Option<String> = None;
     let mut cur_line = 1usize;
-    let mut buf = String::new();
+    // Kept lines, grouped into paragraphs as they arrive, each remembering the
+    // raw-file lines it came from.
+    let mut paras: Vec<Para> = Vec::new();
+    // Whether the last paragraph is still taking lines; a blank line closes it.
+    let mut open = false;
+    // The paragraph a collapsed block or literal run stands in for, so its span
+    // can be widened over the lines it replaced.
+    let mut stands_for: Option<usize> = None;
     let mut in_drawer = false;
     // The block whose body we are inside, and whether to keep it.
     let mut in_block: Option<bool> = None;
@@ -1105,7 +1124,7 @@ fn chunk_file(
     }
 
     let flush = |chunks: &mut Vec<Chunk>,
-                 buf: &str,
+                 paras: &[Para],
                  stack: &[String],
                  tag_stack: &[Vec<String>],
                  todo_stack: &[Option<String>],
@@ -1115,8 +1134,7 @@ fn chunk_file(
                  id: &Option<String>,
                  line: usize,
                  lang: &str| {
-        let body = buf.trim();
-        if body.is_empty() {
+        if paras.is_empty() {
             return;
         }
         let heading = if stack.is_empty() {
@@ -1143,17 +1161,19 @@ fn chunk_file(
         // guarantees forward progress when a heading path is itself longer than
         // the budget — see the known hole in CLAUDE.md.
         let room = limit.saturating_sub(measure(&heading) + 4).max(32);
-        for piece in split_to_fit(body, measure, room) {
+        for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
                 id: id.clone(),
                 heading: heading.clone(),
                 line,
+                start_line: piece.start,
+                end_line: piece.end,
                 tags: tags.clone(),
                 todo: todo.clone(),
                 priority,
                 lang: lang.to_string(),
-                text: piece,
+                text: piece.text,
             });
         }
     };
@@ -1195,7 +1215,7 @@ fn chunk_file(
         if let Some(h) = parse_headline(line, &todo_keywords) {
             flush(
                 &mut chunks,
-                &buf,
+                &paras,
                 &stack,
                 &tag_stack,
                 &todo_stack,
@@ -1206,7 +1226,8 @@ fn chunk_file(
                 cur_line,
                 &cur_lang,
             );
-            buf.clear();
+            paras.clear();
+            open = false;
             let depth = h.level.saturating_sub(1);
             stack.truncate(depth);
             tag_stack.truncate(depth);
@@ -1238,7 +1259,7 @@ fn chunk_file(
         if let Some((cfg, l)) = lang.zip(ltex_language(line)) {
             flush(
                 &mut chunks,
-                &buf,
+                &paras,
                 &stack,
                 &tag_stack,
                 &todo_stack,
@@ -1249,17 +1270,28 @@ fn chunk_file(
                 cur_line,
                 &cur_lang,
             );
-            buf.clear();
+            paras.clear();
+            open = false;
             cur_lang = cfg.accept_declared(&l, rel);
             continue;
         }
         // Blocks: what happens to the body is policy, not prose.
         if let Some(keep) = in_block {
             if strip_prefix_ci(trimmed, "#+end_").is_some() {
+                if let Some(i) = stands_for {
+                    paras[i].end = n;
+                } else if keep {
+                    if let Some(last) = paras.last_mut() {
+                        last.end = n;
+                    }
+                }
+                stands_for = None;
                 in_block = None;
             } else if keep {
-                buf.push_str(line);
-                buf.push('\n');
+                add_line(&mut paras, &mut open, n, line);
+            } else if let Some(i) = stands_for {
+                // Dropped body: the placeholder standing for it grows instead.
+                paras[i].end = n;
             }
             continue;
         }
@@ -1272,9 +1304,10 @@ fn chunk_file(
                 Target::Lexical => p.lexical,
                 Target::Semantic => p.semantic == InSemantic::Body(true),
             });
+            stands_for = None;
             if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
-                buf.push_str(&placeholder(&kind, arg));
-                buf.push('\n');
+                add_line(&mut paras, &mut open, n, &placeholder(&kind, arg));
+                stands_for = Some(paras.len() - 1);
             }
             continue;
         }
@@ -1289,9 +1322,10 @@ fn chunk_file(
                 Target::Lexical => p.lexical,
                 Target::Semantic => p.semantic == InSemantic::Body(true),
             };
+            stands_for = None;
             if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
-                buf.push_str(&placeholder("results", ""));
-                buf.push('\n');
+                add_line(&mut paras, &mut open, n, &placeholder("results", ""));
+                stands_for = Some(paras.len() - 1);
             }
             literal_run = Some(keep);
             continue;
@@ -1303,32 +1337,34 @@ fn chunk_file(
                 Target::Semantic => p.semantic == InSemantic::Body(true),
             });
             if literal_run.is_none() {
+                stands_for = None;
                 if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
                     // Once for the run, not once per line.
-                    buf.push_str(&placeholder("example", ""));
-                    buf.push('\n');
+                    add_line(&mut paras, &mut open, n, &placeholder("example", ""));
+                    stands_for = Some(paras.len() - 1);
                 }
                 literal_run = Some(keep);
             }
             if keep {
-                buf.push_str(line);
-                buf.push('\n');
+                add_line(&mut paras, &mut open, n, line);
+            } else if let Some(i) = stands_for {
+                paras[i].end = n;
             }
             continue;
         }
         literal_run = None;
+        stands_for = None;
 
         // Other keywords, drawer ends and comments are markup, not prose.
         if trimmed.starts_with("#+") || trimmed.starts_with("# ") || trimmed == ":END:" {
             continue;
         }
 
-        buf.push_str(line);
-        buf.push('\n');
+        add_line(&mut paras, &mut open, n, line);
     }
     flush(
         &mut chunks,
-        &buf,
+        &paras,
         &stack,
         &tag_stack,
         &todo_stack,
@@ -1374,13 +1410,80 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
 }
 
+/// Add a kept line to the paragraph being built, or start a new one.
+///
+/// A blank line closes the current paragraph — the same boundary the old flat
+/// buffer got from splitting on `\n\n`, but decided here where the line number
+/// is still in hand.
+fn add_line(paras: &mut Vec<Para>, open: &mut bool, n: usize, text: &str) {
+    if text.trim().is_empty() {
+        *open = false;
+        return;
+    }
+    if *open {
+        if let Some(p) = paras.last_mut() {
+            p.text.push('\n');
+            p.text.push_str(text);
+            p.end = n;
+            return;
+        }
+    }
+    paras.push(Para { start: n, end: n, text: text.to_string() });
+    *open = true;
+}
+
+/// A run of consecutive non-blank lines, and where it came from in the file.
+///
+/// The span is over the **raw** file, not over the filtered text: a source block
+/// collapsed to `[src bash]` still spans its `#+begin_`…`#+end_`, so a preview
+/// read from these lines shows the code the index deliberately does not carry.
+/// The parser walks every line of the file and only declines to *keep* some, so
+/// the numbers cost nothing to record — they are already in hand.
+#[derive(Clone, Debug, PartialEq)]
+struct Para {
+    /// 1-based, inclusive, in the real file.
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+impl Para {
+    /// A piece cut out of this paragraph — a `hard_split` remnant. It keeps the
+    /// whole paragraph's span, since a cut inside one has nothing finer to name.
+    fn piece(&self, text: &str) -> Piece {
+        Piece { start: self.start, end: self.end, text: text.to_string() }
+    }
+}
+
+/// One packed passage: the text that gets indexed, and the lines it came from.
+///
+/// Consecutive pieces may overlap, because `carry_over` deliberately restarts a
+/// piece with its predecessor's last paragraph. The spans overlap with them, and
+/// truthfully so — that text really is in both.
+#[derive(Clone, Debug, PartialEq)]
+struct Piece {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+impl Piece {
+    fn of(paras: &[&Para]) -> Piece {
+        Piece {
+            start: paras.first().map(|p| p.start).unwrap_or(1),
+            end: paras.last().map(|p| p.end).unwrap_or(1),
+            text: join(paras),
+        }
+    }
+}
+
 /// Begin each piece with the tail of the one before it, so an idea cut at a
 /// boundary is embedded whole in at least one chunk.
 ///
 /// Measured in paragraphs rather than characters.  A fixed character window —
 /// org-db-v3 used 200 — would cut through the middle of a LaTeX display in
 /// these notes, and half a display carries less meaning than none of it.
-fn carry_over<'a, F>(prev: &[&'a str], next: &'a str, fits: F) -> Vec<&'a str>
+fn carry_over<'a, F>(prev: &[&'a Para], next: &'a Para, fits: F) -> Vec<&'a Para>
 where
     F: Fn(&str) -> bool,
 {
@@ -1388,7 +1491,7 @@ where
     // would make that piece a subset of this one rather than a neighbour.
     if prev.len() > 1 {
         if let Some(&tail) = prev.last() {
-            if fits(&format!("{tail}\n\n{next}")) {
+            if fits(&format!("{}\n\n{}", tail.text, next.text)) {
                 return vec![tail, next];
             }
         }
@@ -1424,16 +1527,16 @@ fn chars(s: &str) -> usize {
 /// The only packer.  There used to be a second one working in characters, run
 /// before this one, so a section could be cut twice on rules that knew nothing
 /// of each other.
-fn split_to_fit(text: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec<String> {
+fn split_to_fit(paras: &[Para], measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec<Piece> {
     let fits = |s: &str| measure(s) <= budget;
-    let mut out: Vec<String> = Vec::new();
-    let mut cur: Vec<&str> = Vec::new();
+    let mut out: Vec<Piece> = Vec::new();
+    let mut cur: Vec<&Para> = Vec::new();
 
-    for para in text.split("\n\n") {
-        if !fits(para) {
+    for para in paras {
+        if !fits(&para.text) {
             // Nothing to overlap on: flush, then cut this paragraph to size.
             if !cur.is_empty() {
-                out.push(cur.join("\n\n"));
+                out.push(Piece::of(&cur));
                 cur.clear();
             }
             out.extend(hard_split(para, measure, budget));
@@ -1443,30 +1546,36 @@ fn split_to_fit(text: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> V
             cur.push(para);
             continue;
         }
-        if fits(&format!("{}\n\n{}", cur.join("\n\n"), para)) {
+        if fits(&format!("{}\n\n{}", join(&cur), para.text)) {
             cur.push(para);
         } else {
-            out.push(cur.join("\n\n"));
+            out.push(Piece::of(&cur));
             cur = carry_over(&cur, para, fits);
         }
     }
-    let last = cur.join("\n\n");
-    if !last.trim().is_empty() {
-        out.push(last);
+    if !cur.is_empty() {
+        let last = Piece::of(&cur);
+        if !last.text.trim().is_empty() {
+            out.push(last);
+        }
     }
     out
+}
+
+fn join(paras: &[&Para]) -> String {
+    paras.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n\n")
 }
 
 /// Last resort for a single paragraph over budget: cut on char boundaries,
 /// sized from this text's own measured chars-per-token so the guess is close,
 /// then verified and shrunk until it actually fits.
-fn hard_split(para: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec<String> {
+fn hard_split(para: &Para, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec<Piece> {
     let mut out = Vec::new();
-    let mut rest = para;
+    let mut rest = para.text.as_str();
     while !rest.is_empty() {
         let toks = measure(rest);
         if toks <= budget {
-            out.push(rest.to_string());
+            out.push(para.piece(rest));
             break;
         }
         let ratio = rest.len() as f64 / toks.max(1) as f64;
@@ -1480,7 +1589,7 @@ fn hard_split(para: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec
                 cut -= 1;
             }
         }
-        out.push(rest[..cut].to_string());
+        out.push(para.piece(&rest[..cut]));
         rest = &rest[cut..];
     }
     out
@@ -2073,7 +2182,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 4;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -3683,6 +3792,27 @@ mod tests {
         s.split_whitespace().count()
     }
 
+    /// Paragraphs from a blank-line-separated string, numbered from line 1.
+    /// The packing tests are about packing, so the numbers only need to exist.
+    fn as_paras(text: &str) -> Vec<Para> {
+        let mut out = Vec::new();
+        let mut open = false;
+        for (i, line) in text.lines().enumerate() {
+            add_line(&mut out, &mut open, i + 1, line);
+        }
+        out
+    }
+
+    /// The pieces' text run together, for asserting a hard split lost nothing.
+    fn joined(pieces: &[Piece]) -> String {
+        pieces.iter().map(|p| p.text.as_str()).collect()
+    }
+
+    /// One paragraph, for the `hard_split` tests.
+    fn one_para(text: &str) -> Para {
+        Para { start: 1, end: 1, text: text.to_string() }
+    }
+
     fn para(word: &str, n: usize) -> String {
         std::iter::repeat_n(word, n).collect::<Vec<_>>().join(" ")
     }
@@ -3757,6 +3887,109 @@ mod tests {
         assert_eq!(c[2].line, 8);
     }
 
+    // --------------------------------------------------------------- spans
+
+    /// Every construct whose span could be wrong, in one note.  The last
+    /// section's paragraphs are long enough to divide under a real budget —
+    /// `room` has a floor of 32, so a toy budget would never split anything.
+    fn spanned_note() -> String {
+        format!(
+            "#+title: Spans\n\nPreamble prose.\n\n\
+             * First\nAbove the block.\n\n\
+             #+begin_src bash\necho hello\necho world\n#+end_src\n\n\
+             Below the block.\n\n\
+             * Second\n{}\n\n{}\n\n{}\n\n{}\n",
+            para("alpha", 20),
+            para("beta", 20),
+            para("gamma", 20),
+            para("delta", 20)
+        )
+    }
+
+    fn spanned(budget: usize) -> Vec<Chunk> {
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: budget, ..Chunking::default() },
+            ..Config::default()
+        };
+        chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            &spanned_note(),
+            None,
+            &cfg,
+            Target::Semantic,
+            &words,
+        )
+    }
+
+    /// The span has to cover the passage: whatever the chunk kept must be found
+    /// in the raw lines it points at. This is the property the whole design
+    /// rests on — a preview is read from these lines, so if they do not contain
+    /// the passage, the preview is of something else.
+    #[test]
+    fn a_span_covers_the_lines_its_text_came_from() {
+        let note = spanned_note();
+        let lines: Vec<&str> = note.lines().collect();
+        // Both the undivided case and the divided one, since dividing is where
+        // a span could start pointing at the wrong paragraph.
+        for c in spanned(200).into_iter().chain(spanned(45)) {
+            assert!(c.start_line >= 1 && c.end_line >= c.start_line, "{c:?}");
+            assert!(c.end_line <= lines.len(), "span past the end of the file: {c:?}");
+            let raw = lines[c.start_line - 1..c.end_line].join("\n");
+            for line in c.text.lines() {
+                // A placeholder stands for text it replaced; by construction it
+                // is the one thing not found in the file.
+                if line.trim().is_empty() || line.trim_start().starts_with('[') {
+                    continue;
+                }
+                assert!(
+                    raw.contains(line.trim()),
+                    "line {line:?} is not inside lines {}..{} of the file:\n{raw}",
+                    c.start_line,
+                    c.end_line
+                );
+            }
+        }
+    }
+
+    /// The point of a span being wider than its text: a collapsed block still
+    /// spans the block, so the code the index dropped can be read back.
+    #[test]
+    fn a_collapsed_block_still_spans_the_code_it_replaced() {
+        let note = spanned_note();
+        let lines: Vec<&str> = note.lines().collect();
+        let c = spanned(200)
+            .into_iter()
+            .find(|c| c.text.contains("[src bash]"))
+            .expect("the block should have left a placeholder");
+        let raw = lines[c.start_line - 1..c.end_line].join("\n");
+        assert!(raw.contains("echo hello") && raw.contains("echo world"), "{raw}");
+        assert!(!c.text.contains("echo hello"), "the text itself must not carry the code");
+    }
+
+    /// Text above every heading belongs to no section, and points at the top of
+    /// the file rather than at nothing.
+    #[test]
+    fn a_preamble_passage_spans_its_own_lines() {
+        let c = spanned(200).into_iter().next().expect("a preamble chunk");
+        assert_eq!(c.text.trim(), "Preamble prose.");
+        assert_eq!((c.start_line, c.end_line), (3, 3));
+        assert_eq!(c.line, 1, "no heading owns it, so it jumps to the top");
+    }
+
+    /// A divided section's pieces advance through the file, and overlap where
+    /// `carry_over` repeats a paragraph — the spans say so rather than hiding it.
+    #[test]
+    fn a_divided_section_yields_advancing_spans() {
+        let cs: Vec<Chunk> =
+            spanned(45).into_iter().filter(|c| c.heading.ends_with("Second")).collect();
+        assert!(cs.len() > 1, "four 20-word paragraphs must divide under a 45-word budget");
+        for w in cs.windows(2) {
+            assert!(w[1].start_line >= w[0].start_line, "pieces must advance: {w:?}");
+            assert!(w[1].start_line <= w[0].end_line + 2, "and not skip lines: {w:?}");
+        }
+    }
+
     // ------------------------------------------------------------- packing
 
     #[test]
@@ -3764,10 +3997,10 @@ mod tests {
         // Ten 10-word paragraphs against a budget of 35: must split, and each
         // piece should still hold three paragraphs rather than one.
         let body = (0..10).map(|_| para("w", 10)).collect::<Vec<_>>().join("\n\n");
-        let pieces = split_to_fit(&body, &words, 35);
+        let pieces = split_to_fit(&as_paras(&body), &words, 35);
         assert!(pieces.len() > 1, "should have split");
         assert!(
-            pieces.iter().any(|p| p.split("\n\n").count() > 1),
+            pieces.iter().any(|p| p.text.split("\n\n").count() > 1),
             "pieces must group paragraphs, not isolate them"
         );
     }
@@ -3775,12 +4008,12 @@ mod tests {
     #[test]
     fn overlap_repeats_the_previous_paragraph() {
         let paras: Vec<String> = (0..6).map(|i| format!("p{i} {}", para("w", 20))).collect();
-        let pieces = split_to_fit(&paras.join("\n\n"), &words, 60);
+        let pieces = split_to_fit(&as_paras(&paras.join("\n\n")), &words, 60);
         assert!(pieces.len() >= 2);
         // The second piece must begin with the last paragraph of the first.
-        let tail_of_first = pieces[0].split("\n\n").last().unwrap();
+        let tail_of_first = pieces[0].text.split("\n\n").last().unwrap();
         assert!(
-            pieces[1].starts_with(tail_of_first),
+            pieces[1].text.starts_with(tail_of_first),
             "piece 2 should open with piece 1's final paragraph\n1: {:?}\n2: {:?}",
             pieces[0],
             pieces[1]
@@ -3792,9 +4025,12 @@ mod tests {
         // Two paragraphs, each nearly the whole budget: no overlap is possible
         // without making piece 1 a subset of piece 2.
         let body = format!("{}\n\n{}", para("a", 50), para("b", 50));
-        let pieces = split_to_fit(&body, &words, 60);
+        let pieces = split_to_fit(&as_paras(&body), &words, 60);
         assert_eq!(pieces.len(), 2);
-        assert!(!pieces[1].contains("a a a"), "must not repeat a whole single-paragraph piece");
+        assert!(
+            !pieces[1].text.contains("a a a"),
+            "must not repeat a whole single-paragraph piece"
+        );
     }
 
     /// The invariant the overlap could plausibly have broken.
@@ -3808,11 +4044,11 @@ mod tests {
                     .map(|(i, n)| format!("p{i} {}", para("w", *n)))
                     .collect::<Vec<_>>()
                     .join("\n\n");
-                for piece in split_to_fit(&body, &words, budget) {
+                for piece in split_to_fit(&as_paras(&body), &words, budget) {
                     assert!(
-                        words(&piece) <= budget,
+                        words(&piece.text) <= budget,
                         "piece of {} words exceeds budget {budget}",
-                        words(&piece)
+                        words(&piece.text)
                     );
                 }
             }
@@ -3880,20 +4116,20 @@ mod tests {
     #[test]
     fn hard_split_is_lossless_and_within_budget() {
         let para = para("word", 500);
-        let pieces = hard_split(&para, &words, 40);
+        let pieces = hard_split(&one_para(&para), &words, 40);
         assert!(pieces.len() > 1);
         for p in &pieces {
-            assert!(words(p) <= 40, "{} words > 40", words(p));
+            assert!(words(&p.text) <= 40, "{} words > 40", words(&p.text));
         }
-        assert_eq!(pieces.concat(), para, "hard split must not lose or reorder text");
+        assert_eq!(joined(&pieces), para, "hard split must not lose or reorder text");
     }
 
     #[test]
     fn hard_split_never_cuts_inside_a_character() {
         // All multi-byte, so a naive byte cut would panic or corrupt.
         let para = "é→ü ".repeat(400);
-        let pieces = hard_split(&para, &words, 30);
-        assert_eq!(pieces.concat(), para);
+        let pieces = hard_split(&one_para(&para), &words, 30);
+        assert_eq!(joined(&pieces), para);
     }
 
     // ------------------------------------------------- index round-trip / prune
@@ -3942,6 +4178,8 @@ mod tests {
                 id: None,
                 heading: "H".into(),
                 line: 1,
+                start_line: 1,
+                end_line: 1,
                 tags: Vec::new(),
                 todo: None,
                 priority: None,
@@ -4558,6 +4796,8 @@ mod tests {
             id: None,
             heading: heading.into(),
             line,
+            start_line: line,
+            end_line: line,
             tags: Vec::new(),
             todo: None,
             priority: None,
@@ -4903,6 +5143,8 @@ mod tests {
             id: None,
             heading: "H".into(),
             line: 1,
+            start_line: 1,
+            end_line: 1,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             todo: todo.map(str::to_string),
             priority: None,
@@ -4988,6 +5230,8 @@ mod tests {
                 id: None,
                 heading: "alpha".into(),
                 line: 1,
+                start_line: 1,
+                end_line: 1,
                 tags: vec!["physics".into()],
                 todo: None,
                 priority: None,
@@ -4999,6 +5243,8 @@ mod tests {
                 id: None,
                 heading: "beta".into(),
                 line: 1,
+                start_line: 1,
+                end_line: 1,
                 tags: vec!["german".into()],
                 todo: None,
                 priority: None,
@@ -5038,6 +5284,8 @@ mod tests {
             id: None,
             heading: p.into(),
             line: 1,
+            start_line: 1,
+            end_line: 1,
             tags: vec![],
             todo: None,
             priority: None,
@@ -5159,6 +5407,8 @@ mod tests {
             id: None,
             heading: p.into(),
             line: 1,
+            start_line: 1,
+            end_line: 1,
             tags: vec![],
             todo: None,
             priority: None,
