@@ -696,7 +696,37 @@ impl Config {
 
     fn read(path: &Path) -> Result<Config> {
         let bytes = fs::read(path).with_context(|| format!("reading config {}", path.display()))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing config {}", path.display()))
+        let cfg: Config = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing config {}", path.display()))?;
+        cfg.check().with_context(|| format!("in config {}", path.display()))?;
+        Ok(cfg)
+    }
+
+    /// Settings that parse but cannot be honoured.
+    ///
+    /// Both bounds below would otherwise pass silently and do nothing — the
+    /// same reason an unknown key is an error rather than ignored.
+    fn check(&self) -> Result<()> {
+        let t = self.chunk.semantic_tokens;
+        if t > TOKEN_LIMIT {
+            return Err(anyhow!(
+                "chunk.semantic_tokens is {t}, more than the {TOKEN_LIMIT} tokens the \
+                 embedding model reads in one pass; the rest would be truncated in silence"
+            ));
+        }
+        // Below this the heading alone fills the budget and `MIN_ROOM` takes
+        // over, so the number would be ignored rather than applied.
+        if t <= MIN_ROOM * 2 {
+            return Err(anyhow!(
+                "chunk.semantic_tokens is {t}, too small to survive subtracting a heading — \
+                 the floor of {MIN_ROOM} would apply instead.  Use at least {}",
+                MIN_ROOM * 2 + 1
+            ));
+        }
+        if self.chunk.lexical_chars == 0 {
+            return Err(anyhow!("chunk.lexical_chars is 0, which would index nothing"));
+        }
+        Ok(())
     }
 
     /// What changed, in words, so an error can say which setting moved rather
@@ -1185,7 +1215,7 @@ fn chunk_file(
         // comes out of the budget once, here, where it is known.  The floor
         // guarantees forward progress when a heading path is itself longer than
         // the budget — see the known hole in CLAUDE.md.
-        let room = limit.saturating_sub(measure(&heading) + 4).max(32);
+        let room = limit.saturating_sub(measure(&heading) + 4).max(MIN_ROOM);
         for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
@@ -1534,6 +1564,14 @@ where
 /// anywhere from 380 to 760 tokens.  Hence a real tokenized pass rather than a
 /// character budget.
 const TOKEN_LIMIT: usize = 512;
+
+/// The least room a passage is ever packed into, once its heading is subtracted.
+///
+/// A floor rather than a hard rule: with no room at all nothing "fits", every
+/// paragraph falls to `hard_split`, and a chunk per character comes out. It also
+/// means a budget too small to leave this much is silently ignored, which is why
+/// `Config::check` refuses one.
+const MIN_ROOM: usize = 32;
 
 fn n_tokens(tok: &tokenizers::Tokenizer, s: &str) -> usize {
     tok.encode(s, true).map(|e| e.len()).unwrap_or(usize::MAX)
@@ -5113,6 +5151,28 @@ mod tests {
     fn planning_keywords_are_matched_case_sensitively() {
         let c = chunks_of("#+title: T\n* Task\nDeadline: we agreed on the first of September.\n");
         assert!(c[0].text.contains("Deadline: we agreed"));
+    }
+
+    /// A budget the tool cannot honour is refused, not quietly replaced.
+    ///
+    /// Above the model's limit the tail would be truncated in silence; below
+    /// twice `MIN_ROOM` the floor applies instead and the number does nothing.
+    /// Both used to pass without comment — the first only became possible when
+    /// the budget stopped being the same constant as the ceiling.
+    #[test]
+    fn a_budget_that_cannot_be_honoured_is_refused() {
+        let at = |n: usize| {
+            Config {
+                chunk: Chunking { semantic_tokens: n, lexical_chars: 1500 },
+                ..Config::default()
+            }
+            .check()
+        };
+        assert!(at(TOKEN_LIMIT + 1).is_err(), "past what the model reads");
+        assert!(at(MIN_ROOM * 2).is_err(), "swallowed by the floor");
+        assert!(at(TOKEN_LIMIT).is_ok());
+        assert!(at(MIN_ROOM * 2 + 1).is_ok());
+        assert!(Config::default().check().is_ok(), "the defaults must pass their own check");
     }
 
     /// The two indexes want opposite things from a date, so the policy is split
