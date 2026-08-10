@@ -3406,9 +3406,18 @@ fn cmd_index_lexical(
     let analyzer = lexical::Analyzer::widen(previous.as_ref(), &chunks, fold);
     let rebuilding = old.is_none() || previous.as_ref().map(|a| a.key()) != Some(analyzer.key());
 
-    // A rebuild has to see every note, not only the changed ones.
+    // A rebuild has to see every note, not only the changed ones — but the scan
+    // above has already read most of them, and under `--full` it has read all of
+    // them, since nothing was known to compare against.  Their text is still in
+    // hand, so only the notes the scan skipped are opened here.
     if rebuilding {
         chunks.clear();
+        let in_hand: std::collections::HashMap<&str, &str> =
+            scan.stale.iter().map(|s| (s.path.as_str(), s.text.as_str())).collect();
+        // Already known to be unopenable, and already recorded on `Scan`.
+        // Trying again would fail again and say so a second time.
+        let unopenable: std::collections::HashSet<&str> =
+            scan.unreadable.iter().map(|(p, _)| p.as_str()).collect();
         let t_chunk = Instant::now();
         for (i, f) in files.iter().enumerate() {
             stop_requested()?;
@@ -3417,18 +3426,34 @@ fn cmd_index_lexical(
                     .of(files.len()),
             );
             let path = rel_path(vault, f);
-            match fs::read_to_string(f) {
-                Ok(text) => chunks.extend(chunk_file(
-                    f,
-                    &path,
-                    &text,
-                    Some(&mut Lang { cfg: lang, journal: j }),
-                    cfg,
-                    Target::Lexical,
-                    &LEXICAL_BUDGET,
-                )),
-                Err(e) => j.remark(unreadable_note(&path, &e.to_string())),
+            if unopenable.contains(path.as_str()) {
+                continue;
             }
+            // Only a note whose stamp matched reaches the disk here: the scan
+            // never opened it, so nothing about it is known yet.
+            let fresh;
+            let text = match in_hand.get(path.as_str()) {
+                Some(t) => *t,
+                None => match fs::read_to_string(f) {
+                    Ok(t) => {
+                        fresh = t;
+                        &fresh
+                    }
+                    Err(e) => {
+                        j.remark(unreadable_note(&path, &e.to_string()));
+                        continue;
+                    }
+                },
+            };
+            chunks.extend(chunk_file(
+                f,
+                &path,
+                text,
+                Some(&mut Lang { cfg: lang, journal: j }),
+                cfg,
+                Target::Lexical,
+                &LEXICAL_BUDGET,
+            ));
         }
         j.progress(
             &Progress::new(
@@ -3444,12 +3469,12 @@ fn cmd_index_lexical(
         j.progress_done();
     } else {
         // Nothing was discarded, so the speculative pass is the real one.
-        // Reported here rather than beside the scan for the same reason: a
-        // rebuild re-reads every note above, and naming the same broken file
-        // twice is exactly what the two `eprintln!`s this replaced did.
         j.absorb(speculative);
-        report_unreadable(&scan, j);
     }
+    // Once, whichever way the run went.  This used to sit inside the `else`,
+    // because the rebuild opened every note again and would have named a broken
+    // one a second time; it no longer opens what the scan already read.
+    report_unreadable(&scan, j);
 
     if old.is_some() {
         writeln!(
