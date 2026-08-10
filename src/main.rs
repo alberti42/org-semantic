@@ -158,14 +158,30 @@ struct Journal {
     /// why it stays public rather than hiding behind a method.
     out: Box<dyn Write>,
     warn: Box<dyn Write>,
+    /// Whether `warn` is a terminal, which decides whether anything may be
+    /// drawn *in place*.  A bar redrawn with `\r` is a live report on a tty and
+    /// a hundred near-identical lines in a redirected log.
+    tty: bool,
     remarks: Vec<Remark>,
     /// Per kind, including what the cap dropped.
     counts: std::collections::HashMap<&'static str, usize>,
 }
 
+/// Whether anything may draw on the terminal.
+///
+/// False under `serve`, where stderr is a pipe the editor owns and a
+/// carriage-returned bar is at best noise nobody can correlate with a request;
+/// false when redirected, where in-place drawing becomes a hundred near-identical
+/// lines.  Read at each site rather than cached: it is two syscalls a run.
+fn stderr_is_tty() -> bool {
+    std::io::IsTerminal::is_terminal(&io::stderr())
+}
+
 impl Journal {
     fn cli() -> Self {
-        Journal::with(Box::new(io::stdout()), Box::new(io::stderr()))
+        let mut j = Journal::with(Box::new(io::stdout()), Box::new(io::stderr()));
+        j.tty = stderr_is_tty();
+        j
     }
 
     /// For `serve`, and for every test: says nothing, keeps everything.
@@ -174,13 +190,19 @@ impl Journal {
     }
 
     fn with(out: Box<dyn Write>, warn: Box<dyn Write>) -> Self {
-        Journal { out, warn, remarks: Vec::new(), counts: Default::default() }
+        Journal { out, warn, tty: false, remarks: Vec::new(), counts: Default::default() }
     }
 
     /// Print it and record it, so the terminal reads as it always did and a
     /// client gets the same thing as data.
+    ///
+    /// The erase-line prefix is what keeps a remark from landing on top of a
+    /// half-drawn progress bar: the two share `warn`, and the lexical chunking
+    /// pass raises remarks from inside the loop that draws it.  Guarded by
+    /// `tty`, or the escape bytes would end up in a log file.
     fn remark(&mut self, r: Remark) {
-        let _ = writeln!(self.warn, "{}", r.printed());
+        let clear = if self.tty { "\r\x1b[2K" } else { "" };
+        let _ = writeln!(self.warn, "{clear}{}", r.printed());
         self.record(r);
     }
 
@@ -493,7 +515,13 @@ fn classifier() -> Result<&'static Lid> {
     if !path.exists() {
         let dir = path.parent().expect("joined path has a parent");
         fs::create_dir_all(dir)?;
-        eprintln!("fetching the language model from {LID_URL}");
+        // Only where someone is watching: this has no journal to go through —
+        // `classifier` is a `OnceLock` accessor reached from everywhere — and a
+        // bare `eprintln!` under `serve` writes into the editor's pipe.  What
+        // that caller gets instead is a `download` progress report.
+        if stderr_is_tty() {
+            eprintln!("fetching the language model from {LID_URL}");
+        }
         let bytes = ureq::get(LID_URL).call()?.body_mut().read_to_vec()?;
         // Write beside the target and rename, so an interrupted download does
         // not leave a truncated file that later runs would happily load.
@@ -2049,8 +2077,12 @@ fn model_with(
     max_length: Option<usize>,
     coreml: bool,
 ) -> Result<TextEmbedding> {
-    let mut opts =
-        InitOptions::new(which).with_cache_dir(cache_dir()).with_show_download_progress(true);
+    // fastembed's download bar is indicatif's, and indicatif draws on stderr.
+    // Unconditionally on, that put a progress bar in the middle of a JSON-RPC
+    // session; the flag is all fastembed exposes, so the choice is made here.
+    let mut opts = InitOptions::new(which)
+        .with_cache_dir(cache_dir())
+        .with_show_download_progress(stderr_is_tty());
     if let Some(n) = max_length {
         opts = opts.with_max_length(n);
     }
@@ -3442,16 +3474,26 @@ fn cmd_index(
             // Tokens per second is near flat once padding is gone, so remaining
             // work divided by it is an estimate rather than an extrapolation.
             let tps = (tokens_done as f64 / el).max(1.0);
-            eprint!(
-                "\r  embedding {done}/{} · {:.0} chunk/s · {:.1}k tok/s · eta {:.0}s   ",
-                texts.len(),
-                done as f64 / el,
-                tps / 1000.0,
-                (total_tokens - tokens_done) as f64 / tps
-            );
-            io::stderr().flush().ok();
+            // Through the journal, and only onto a terminal.  This used to be a
+            // bare `eprint!`, which went to the process's own stderr whatever
+            // the caller was — so `serve` drew a carriage-returned bar into a
+            // pipe it shares with the protocol, for a client that had no way to
+            // know which request it belonged to.
+            if j.tty {
+                let _ = write!(
+                    j.warn,
+                    "\r  embedding {done}/{} · {:.0} chunk/s · {:.1}k tok/s · eta {:.0}s   ",
+                    texts.len(),
+                    done as f64 / el,
+                    tps / 1000.0,
+                    (total_tokens - tokens_done) as f64 / tps
+                );
+                let _ = j.warn.flush();
+            }
         }
-        eprintln!();
+        if j.tty {
+            let _ = writeln!(j.warn);
+        }
         writeln!(
             j.out,
             "embedded {} chunks in {:.1}s ({:.0}/s)",
@@ -4088,7 +4130,9 @@ fn tokenizer_for(m: &Model) -> Result<tokenizers::Tokenizer> {
         // Not cached: chunking runs before embedding, so the download that would
         // have happened later has to happen now.
         Err(_) => {
-            eprintln!("  fetching {} …", m.name);
+            if stderr_is_tty() {
+                eprintln!("  fetching {} …", m.name);
+            }
             let _ = model_with(m.which.clone(), None, false)?;
             find_tokenizer(m)?
         }
