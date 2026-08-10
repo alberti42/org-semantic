@@ -942,7 +942,7 @@ decides everything else*:
 #+end_src
 
 Classification is per note rather than per chunk, since a chunk can be a two-line
-heading. It uses fastText's =lid.176= (917 kB), downloaded to
+heading. It uses fastText's =lid.176= (938 kB), downloaded to
 =$XDG_CACHE_HOME/org-semantic/= on first use.
 
 *It is accurate on prose and guesses when there is no prose.* Measured across a
