@@ -27,6 +27,56 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+/// A failure a caller is expected to *act* on rather than merely display.
+///
+/// `serve` hands every application error back as JSON-RPC `-32000` with an
+/// English sentence, which leaves a client no way to tell "your settings drifted,
+/// offer a reindex" from "you mistyped the vault path" except by matching prose.
+/// This is the label that makes them distinguishable, borrowed from LSP, which
+/// puts exactly this in the error's `data` member.
+///
+/// `Display` is the message and nothing else, so the sentence a human reads is
+/// unchanged and only `serve` looks at `kind`.  Errors without one of these are
+/// the ordinary kind: show them, there is nothing to decide.
+///
+/// The kinds are a closed list, and each is a public interface the moment an
+/// editor branches on it:
+///
+/// | kind | carries |
+/// |---|---|
+/// | `config-drift` | `target`, `changed` (setting names), `remedy` |
+/// | `index-layout` | `target`, `found`, `expected`, `remedy` |
+/// | `no-index` | `target`, `remedy` |
+/// | `index-corrupt` | `target`, `chunks`, `vectors`, `remedy` |
+/// | `unknown-model` | `known` |
+/// | `ambiguous-model` | `built` |
+///
+/// `remedy` is the machine form — `"index"` or `"reindex-full"` — so a client
+/// never has to read the sentence to know which call to offer.
+#[derive(Debug, Serialize)]
+struct Fault {
+    kind: &'static str,
+    #[serde(skip)]
+    message: String,
+    /// Whatever this kind promises to carry, flattened alongside `kind`.
+    #[serde(flatten)]
+    data: serde_json::Value,
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Fault {}
+
+/// Build a labelled error.  The message is what everyone sees; the rest is for
+/// whoever asked over a wire.
+fn fault(kind: &'static str, data: serde_json::Value, message: String) -> anyhow::Error {
+    anyhow!(Fault { kind, message, data })
+}
+
 /// An embedding model, with the prefixes it was trained to see.
 ///
 /// The prefixes are part of choosing a model, not a detail: BGE prefixes only
@@ -124,9 +174,11 @@ const DEFAULT_MODEL: &str = "bge-small-en";
 
 fn model_named(name: &str) -> Result<&'static Model> {
     MODELS.iter().find(|m| m.name.eq_ignore_ascii_case(name)).ok_or_else(|| {
-        anyhow!(
-            "unknown model `{name}`; known: {}",
-            MODELS.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
+        let known: Vec<&str> = MODELS.iter().map(|m| m.name).collect();
+        fault(
+            "unknown-model",
+            serde_json::json!({ "known": known }),
+            format!("unknown model `{name}`; known: {}", known.join(", ")),
         )
     })
 }
@@ -738,73 +790,93 @@ impl Config {
         Ok(())
     }
 
-    /// What changed, in words, so an error can say which setting moved rather
-    /// than that something did.
-    /// What changed *for this index*, in words.
+    /// What changed *for this index*.
     ///
     /// Compared canonically, or reordering a list would be reported as a change
     /// it is not — the cached copy is sorted and a hand-written file need not
     /// be.  Filtered by target, so an error about the semantic index never cites
     /// a lexical-only setting.
-    fn differences(&self, other: &Config, target: Target) -> Vec<String> {
+    ///
+    /// The setting's name is kept apart from the sentence rather than being
+    /// formatted into it, because a client wants to know *which* setting moved
+    /// and a person wants to read what it moved from and to.
+    fn differences(&self, other: &Config, target: Target) -> Vec<Change> {
         let mut out = Vec::new();
+        let mut moved = |setting: String, was: String, now: String| {
+            if was != now {
+                out.push(Change { setting, was, now });
+            }
+        };
         for (name, mine, theirs) in [
             ("exclude_tagged", as_set(&self.exclude_tagged), as_set(&other.exclude_tagged)),
             ("todo_keywords", as_set(&self.todo_keywords), as_set(&other.todo_keywords)),
         ] {
-            if mine != theirs {
-                out.push(format!("{name}: was [{}], now [{}]", theirs.join(", "), mine.join(", ")));
-            }
+            moved(
+                name.into(),
+                format!("[{}]", theirs.join(", ")),
+                format!("[{}]", mine.join(", ")),
+            );
         }
         if target == Target::Lexical {
-            if self.languages != other.languages {
-                out.push(format!(
-                    "languages: was [{}], now [{}]",
-                    other.languages.join(", "),
-                    self.languages.join(", ")
-                ));
-            }
-            if self.fold_diacritics != other.fold_diacritics {
-                out.push(format!(
-                    "fold_diacritics: was {}, now {}",
-                    other.fold_diacritics, self.fold_diacritics
-                ));
-            }
+            moved(
+                "languages".into(),
+                format!("[{}]", other.languages.join(", ")),
+                format!("[{}]", self.languages.join(", ")),
+            );
+            moved(
+                "fold_diacritics".into(),
+                other.fold_diacritics.to_string(),
+                self.fold_diacritics.to_string(),
+            );
         }
         for kind in Self::KINDS {
             let (a, b) = (self.blocks.of(kind), other.blocks.of(kind));
             match target {
-                Target::Semantic if a.semantic != b.semantic => out.push(format!(
-                    "blocks.{kind}.semantic: was {}, now {}",
-                    describe_semantic(b.semantic),
-                    describe_semantic(a.semantic)
-                )),
-                Target::Lexical if a.lexical != b.lexical => {
-                    out.push(format!("blocks.{kind}.lexical: was {}, now {}", b.lexical, a.lexical))
-                }
-                _ => {}
+                Target::Semantic => moved(
+                    format!("blocks.{kind}.semantic"),
+                    describe_semantic(b.semantic).into(),
+                    describe_semantic(a.semantic).into(),
+                ),
+                Target::Lexical => moved(
+                    format!("blocks.{kind}.lexical"),
+                    b.lexical.to_string(),
+                    a.lexical.to_string(),
+                ),
             }
         }
-        if self.chunk.of(target) != other.chunk.of(target) {
-            let unit = match target {
-                Target::Semantic => "semantic_tokens",
-                Target::Lexical => "lexical_chars",
-            };
-            out.push(format!(
-                "chunk.{unit}: was {}, now {}",
-                other.chunk.of(target),
-                self.chunk.of(target)
-            ));
-        }
-        let (mine, theirs) = (self.planning_line.keeps(target), other.planning_line.keeps(target));
-        if mine != theirs {
-            let side = match target {
-                Target::Semantic => "semantic",
-                Target::Lexical => "lexical",
-            };
-            out.push(format!("planning_line.{side}: was {theirs}, now {mine}"));
-        }
+        let unit = match target {
+            Target::Semantic => "semantic_tokens",
+            Target::Lexical => "lexical_chars",
+        };
+        moved(
+            format!("chunk.{unit}"),
+            other.chunk.of(target).to_string(),
+            self.chunk.of(target).to_string(),
+        );
+        let side = match target {
+            Target::Semantic => "semantic",
+            Target::Lexical => "lexical",
+        };
+        moved(
+            format!("planning_line.{side}"),
+            other.planning_line.keeps(target).to_string(),
+            self.planning_line.keeps(target).to_string(),
+        );
         out
+    }
+}
+
+/// One setting that reads differently now than when the index was built.
+#[derive(Debug)]
+struct Change {
+    setting: String,
+    was: String,
+    now: String,
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: was {}, now {}", self.setting, self.was, self.now)
     }
 }
 
@@ -873,15 +945,19 @@ fn check_config(
     // when this index was written, and the stored copy is silent about it
     // rather than disagreeing.  Saying "the stored policy differs" there sends
     // someone hunting for an edit they never made.
-    let detail = previous_cfg
-        .map(|old| cfg.differences(old, target).join("; "))
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| {
-            "no setting reads differently, so this index predates one that now exists".into()
-        });
-    Err(anyhow!(
-        "the {what} index was built under a different policy — {detail}\n\
-         {remedy}, or restore the previous setting"
+    let changed = previous_cfg.map(|old| cfg.differences(old, target)).unwrap_or_default();
+    let detail = match changed.as_slice() {
+        [] => "no setting reads differently, so this index predates one that now exists".into(),
+        cs => cs.iter().map(Change::to_string).collect::<Vec<_>>().join("; "),
+    };
+    let names: Vec<&str> = changed.iter().map(|c| c.setting.as_str()).collect();
+    Err(fault(
+        "config-drift",
+        serde_json::json!({ "target": what, "changed": names, "remedy": "reindex-full" }),
+        format!(
+            "the {what} index was built under a different policy — {detail}\n\
+             {remedy}, or restore the previous setting"
+        ),
     ))
 }
 
@@ -2446,14 +2522,27 @@ struct LoadedIndex {
 /// failed with `missing field \`heading_line\`` — true, and useless. A format
 /// change should say it is one.
 fn read_chunks(dir: &Path, m: &Model) -> Result<Vec<Chunk>> {
-    let manifest: Manifest = stored_hash(&dir.join("manifest.json"))
-        .ok_or_else(|| anyhow!("no index in {} — run `index`", dir.display()))?;
+    let manifest: Manifest = stored_hash(&dir.join("manifest.json")).ok_or_else(|| {
+        fault(
+            "no-index",
+            serde_json::json!({ "target": "semantic", "remedy": "index" }),
+            format!("no index in {} — build one first", dir.display()),
+        )
+    })?;
     if manifest.version != INDEX_VERSION {
-        return Err(anyhow!(
-            "the index in {} was written under layout v{} and this is v{INDEX_VERSION} — \
-             rebuild it with `index --full`",
-            dir.display(),
-            manifest.version
+        // No flag named here: `--full` is a CLI spelling, and this is also read
+        // by an editor whose user has no command line to type it on.  The
+        // machine form of the remedy rides in `data`.
+        return Err(fault(
+            "index-layout",
+            serde_json::json!({ "target": "semantic", "found": manifest.version,
+                                "expected": INDEX_VERSION, "remedy": "reindex-full" }),
+            format!(
+                "the index in {} was written under layout v{} and this is v{INDEX_VERSION} — \
+                 rebuild it from scratch",
+                dir.display(),
+                manifest.version
+            ),
         ));
     }
     if manifest.model != m.name || manifest.dim != m.dim {
@@ -2467,6 +2556,18 @@ fn read_chunks(dir: &Path, m: &Model) -> Result<Vec<Chunk>> {
         ));
     }
     Ok(serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?)
+}
+
+/// `chunks.json` and `vectors.f32` are positionally coupled, so a length
+/// mismatch means every answer would name the wrong note.  Reported the same way
+/// from both readers rather than phrased twice.
+fn corrupt_index(chunks: usize, vectors: usize) -> anyhow::Error {
+    fault(
+        "index-corrupt",
+        serde_json::json!({ "target": "semantic", "chunks": chunks, "vectors": vectors,
+                            "remedy": "reindex-full" }),
+        format!("index is inconsistent: {vectors} vectors for {chunks} chunks"),
+    )
 }
 
 /// Read a previous index, or `None` when there is none, when it was written by
@@ -3427,23 +3528,37 @@ fn describe_filters(f: &Filters) -> String {
 /// exists, never impose a model on vectors built by another.
 fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static Model> {
     let built = built_models(vault);
-    let names = || built.iter().map(|m| m.name).collect::<Vec<_>>().join(", ");
+    let names: Vec<&str> = built.iter().map(|m| m.name).collect();
+    // Spelled without flags: `index` is a CLI subcommand and a `serve` method
+    // both, but `--model` exists only on one of them, and telling an editor's
+    // user to pass a flag is telling them to go somewhere they are not.
+    let missing = |m: Option<&Model>| {
+        let for_model = m.map(|m| format!(" for {}", m.name)).unwrap_or_default();
+        fault(
+            "no-index",
+            serde_json::json!({ "target": "semantic", "model": m.map(|m| m.name),
+                                "built": &names, "remedy": "index" }),
+            match names.as_slice() {
+                [] => format!("no semantic index{for_model} — build one first"),
+                _ => format!("no semantic index{for_model}; built: {}", names.join(", ")),
+            },
+        )
+    };
     match want {
         Some(m) if built.iter().any(|b| b.name == m.name) => Ok(m),
-        Some(m) if built.is_empty() => {
-            Err(anyhow!("no semantic index; run `index --model {}`", m.name))
-        }
-        Some(m) => Err(anyhow!("no {} index; built: {}", m.name, names())),
+        Some(m) => Err(missing(Some(m))),
         None => match built.as_slice() {
-            [] => Err(anyhow!("no semantic index — run `index` first")),
+            [] => Err(missing(None)),
             [only] => Ok(only),
             // Several to choose from: prefer the default, else make it explicit
             // rather than picking for them.
-            many => many
-                .iter()
-                .find(|m| m.name == DEFAULT_MODEL)
-                .copied()
-                .ok_or_else(|| anyhow!("several indexes ({}); pass --model", names())),
+            many => many.iter().find(|m| m.name == DEFAULT_MODEL).copied().ok_or_else(|| {
+                fault(
+                    "ambiguous-model",
+                    serde_json::json!({ "built": &names }),
+                    format!("several indexes ({}); name which one", names.join(", ")),
+                )
+            }),
         },
     }
 }
@@ -3462,7 +3577,7 @@ fn cmd_search(
     let raw = fs::read(dir.join("vectors.f32"))?;
     let n = raw.len() / (m.dim * 4);
     if n != chunks.len() {
-        return Err(anyhow!("index is inconsistent: {n} vectors for {} chunks", chunks.len()));
+        return Err(corrupt_index(chunks.len(), n));
     }
     let vectors: Vec<f32> =
         raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -5003,6 +5118,69 @@ mod tests {
         );
     }
 
+    /// The label rides alongside the sentence, never inside it.
+    ///
+    /// Everything a person sees — the CLI's output, the JSON-RPC `message` — is
+    /// composed exactly as before, so this is a guard against the label leaking
+    /// into prose the moment someone changes how `Fault` is carried.
+    #[test]
+    fn a_label_does_not_disturb_the_message_it_labels() {
+        let e = fault("test-kind", serde_json::json!({ "n": 1 }), "the sentence".into());
+        assert_eq!(e.to_string(), "the sentence");
+        // anyhow's Debug renders the whole chain, and that is what `fn main`
+        // prints: a second line here would be a visible CLI regression.
+        assert_eq!(format!("{e:?}"), "the sentence");
+        let f = e.downcast_ref::<Fault>().expect("the label survives the trip through anyhow");
+        assert_eq!(f.kind, "test-kind");
+        assert_eq!(
+            serde_json::to_value(f).unwrap(),
+            serde_json::json!({ "kind": "test-kind", "n": 1 })
+        );
+    }
+
+    /// The one condition a client is expected to turn into a prompt, so it must
+    /// arrive as data and not as a sentence to match against.
+    #[test]
+    fn config_drift_says_which_settings_moved_in_machine_form() {
+        let old = Config::default();
+        let new = Config { exclude_tagged: vec![], ..Config::default() };
+        let t = Target::Semantic;
+        let e = check_config(Some(old.hash_for(t)), &new, Some(&old), t, CLI_REMEDY).unwrap_err();
+        let f = e.downcast_ref::<Fault>().expect("drift is a labelled fault");
+        assert_eq!(f.kind, "config-drift");
+        assert_eq!(f.data["changed"], serde_json::json!(["exclude_tagged"]));
+        assert_eq!(f.data["target"], "semantic");
+        assert_eq!(f.data["remedy"], "reindex-full");
+    }
+
+    /// An index too old to read is a different problem from one that was never
+    /// built, and a client offering "reindex" for one and "index" for the other
+    /// must be able to tell them apart without reading English.
+    #[test]
+    fn a_stale_layout_and_a_missing_index_are_distinguishable() {
+        let v = scratch("faults");
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let dir = semantic_dir(&v, m);
+        let missing = read_chunks(&dir, m).unwrap_err();
+        assert_eq!(missing.downcast_ref::<Fault>().map(|f| f.kind), Some("no-index"));
+
+        fs::create_dir_all(&dir).unwrap();
+        let stale = Manifest {
+            version: INDEX_VERSION - 1,
+            config: 0,
+            model: m.name.into(),
+            dim: m.dim,
+            files: Default::default(),
+            stamps: Default::default(),
+        };
+        fs::write(dir.join("manifest.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+        let e = read_chunks(&dir, m).unwrap_err();
+        let f = e.downcast_ref::<Fault>().expect("a layout mismatch is labelled");
+        assert_eq!(f.kind, "index-layout");
+        assert_eq!(f.data["found"], INDEX_VERSION - 1);
+        assert_eq!(f.data["expected"], INDEX_VERSION);
+    }
+
     #[test]
     fn an_unknown_flag_is_refused_rather_than_ignored() {
         let args: Vec<String> =
@@ -5498,7 +5676,7 @@ mod tests {
         assert!(semantic_only
             .differences(&d, Target::Semantic)
             .iter()
-            .any(|s| s.starts_with("planning_line.semantic:")));
+            .any(|c| c.setting == "planning_line.semantic"));
     }
 
     /// Regression: org lets a keyword carry a fast-selection key and logging
@@ -5572,10 +5750,7 @@ mod tests {
         for t in [Target::Semantic, Target::Lexical] {
             assert_eq!(a.hash_for(t), reordered.hash_for(t), "order and repeats are not changes");
         }
-        assert!(b
-            .differences(&a, Target::Semantic)
-            .iter()
-            .any(|d| d.starts_with("todo_keywords:")));
+        assert!(b.differences(&a, Target::Semantic).iter().any(|c| c.setting == "todo_keywords"));
     }
 
     #[test]

@@ -267,6 +267,50 @@ the index was built under* --- see
 should do with the error. Leaving it out searches whatever is there, which is
 what the CLI does.
 
+*** Errors you are meant to act on
+:PROPERTIES:
+:CUSTOM_ID: errors-a-client-acts-on
+:END:
+
+Some failures are things to show the user; others are things to /offer to fix/.
+"The vault path does not exist" is the first kind. "Your settings no longer match
+what this index was built under" is the second: the right response is a prompt,
+and the client needs to know which settings moved to write one.
+
+Telling them apart by reading the message would mean matching English, so the
+ones worth acting on carry a label in the error's =data= member --- the same
+place LSP puts one:
+
+#+begin_src json
+{ "jsonrpc": "2.0", "id": 7,
+  "error": {
+    "code": -32000,
+    "message": "the semantic index was built under a different policy — todo_keywords: was [DONE, TODO], now [DONE, TODO, WAITING]\nreindex with `full` to rebuild under the new one, or restore the previous setting",
+    "data": { "kind": "config-drift", "target": "semantic",
+              "changed": ["todo_keywords"], "remedy": "reindex-full" } } }
+#+end_src
+
+The absence of =data= is meaningful: an error without it is one to display, with
+nothing to decide.
+
+| =kind=            | what happened                                                | =data= also carries          |
+|-------------------+--------------------------------------------------------------+------------------------------|
+| =config-drift=    | the policy sent differs from the one the index was built under | =target=, =changed=          |
+| =index-layout=    | the index predates this version of the tool                  | =target=, =found=, =expected= |
+| =no-index=        | nothing is built for this vault yet                          | =target=, and =built= when other models are |
+| =index-corrupt=   | the chunk table and the vectors disagree in length           | =target=, =chunks=, =vectors= |
+| =unknown-model=   | no such model                                                | =known=                      |
+| =ambiguous-model= | several indexes exist and none is the default                | =built=                      |
+
+Every one carries =remedy=, which is the call to offer rather than a sentence to
+parse: =index= means /build it/, =reindex-full= means /rebuild it from scratch/.
+=changed= names the settings, so a prompt can say *which* one moved without
+taking the message apart.
+
+=message= stays the human sentence, unchanged, and is written to be shown as-is.
+It never names a command-line flag, because the person reading it in an editor
+has no command line to type one on.
+
 *Reindexing happens in-process too.* Spawning a CLI for it would pay the model
 load again, which is the cost the resident process exists to avoid --- so the
 loaded model is lent to the indexer. Re-indexing a vault after saving one note

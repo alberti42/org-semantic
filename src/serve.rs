@@ -57,11 +57,7 @@ impl Server {
             let chunks: Vec<Chunk> = read_chunks(&dir, m)?;
             let raw = fs::read(dir.join("vectors.f32"))?;
             if raw.len() != chunks.len() * m.dim * 4 {
-                return Err(anyhow!(
-                    "index is inconsistent: {} vectors for {} chunks",
-                    raw.len() / (m.dim * 4),
-                    chunks.len()
-                ));
+                return Err(corrupt_index(chunks.len(), raw.len() / (m.dim * 4)));
             }
             let vectors: Vec<f32> =
                 raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -79,10 +75,17 @@ impl Server {
     /// reading it fresh means a rebuild under different languages or folding
     /// can never be answered with the previous one.
     fn analyzer(vault: &Path) -> Result<lexical::Analyzer> {
-        let stored = lexical::stored_key(&state_dir(vault))
-            .ok_or_else(|| anyhow!("no lexical index — run `index --lexical`"))?;
-        lexical::Analyzer::from_key(&stored)
-            .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))
+        // Spelled for the caller that is actually here: an editor driving this
+        // has an `index` method with a `mode`, not a `--lexical` flag.
+        let missing = |what: &str| {
+            fault(
+                "no-index",
+                serde_json::json!({ "target": "lexical", "remedy": "index" }),
+                format!("{what} lexical index — build one with `index` in lexical mode"),
+            )
+        };
+        let stored = lexical::stored_key(&state_dir(vault)).ok_or_else(|| missing("no"))?;
+        lexical::Analyzer::from_key(&stored).ok_or_else(|| missing("unreadable"))
     }
 
     /// `search` — both modalities, one shape.
@@ -135,6 +138,9 @@ impl Server {
         if let Some(v) = p.get("config") {
             let cfg: Config =
                 serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?;
+            // Deserializing does not validate: without this a client can send a
+            // chunk budget larger than the model reads and have it accepted.
+            cfg.check()?;
             let stored = Config::read(&config_path(&state_dir(&vault))).ok();
             let (previous, target) = if lexical_mode {
                 let h = stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
@@ -206,10 +212,13 @@ impl Server {
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
-        let cfg = match p.get("config") {
+        let cfg: Config = match p.get("config") {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
             None => resolve_config(&vault, None)?,
         };
+        // Deserializing does not validate; `Config::read` would have, so a
+        // policy arriving over the wire must be held to the same bar.
+        cfg.check()?;
         let previous = Config::read(&config_path(&state_dir(&vault))).ok();
 
         if mode == "semantic" || mode == "both" {
@@ -397,10 +406,17 @@ pub fn serve() -> Result<()> {
             Ok(v) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": v }),
             // Application errors go back as JSON-RPC errors rather than killing
             // the process: a mistyped vault must not end the session.
-            Err(e) => serde_json::json!({
-                "jsonrpc": "2.0", "id": id,
-                "error": { "code": -32000, "message": e.to_string() }
-            }),
+            //
+            // A `Fault` adds LSP's third member, `data`, carrying the label and
+            // whatever that label promises.  Its absence is meaningful: an error
+            // with no `data` is one to show, not one to act on.
+            Err(e) => {
+                let mut err = serde_json::json!({ "code": -32000, "message": e.to_string() });
+                if let Some(f) = e.downcast_ref::<Fault>() {
+                    err["data"] = serde_json::to_value(f).unwrap_or(serde_json::Value::Null);
+                }
+                serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": err })
+            }
         })?;
     }
     Ok(())
