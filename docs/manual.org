@@ -384,10 +384,10 @@ will write the =$/progress= handler and still see nothing. Use
 :CUSTOM_ID: cancelling
 :END:
 
-Stopping the /work/ and stopping the /program/ are the same act on a command
-line, and Ctrl-C has always done both. Behind an editor they are different acts:
-you want this reindex abandoned and the server still there for the next query.
-That separation is the whole of what follows.
+Stopping the /work/ and stopping the /program/ are one act on a command line:
+Ctrl-C ends both, and there is nothing else to want. Behind an editor they are
+two --- you want this reindex abandoned and the server still there for the next
+query --- and separating them is what this is for.
 
 Send the server *=SIGINT=* --- =(interrupt-process proc)= from Emacs. It stops
 between units of work and answers the request it was serving with LSP's
@@ -403,13 +403,12 @@ time --- it stops whatever is running.
 Nothing is half-written. The checks sit between units and nowhere near a write,
 so an abandoned run leaves the previous index exactly as it was.
 
-*A second =SIGINT= ends the process*, as Ctrl-C always did. The first is only
-honoured between units of work, so a wait with no units --- a model download,
-mid-flight --- is deaf to it; the second is not.
+*A second =SIGINT= ends the process.* The first is honoured only between units
+of work, so a wait with no units --- a model download, mid-flight --- does not
+see it. The second does.
 
-On the command line none of this applies, and nothing about it changed: with
-only one thing to stop there is nothing to separate, so =SIGINT= kills the
-program outright as it always has.
+On the command line none of this applies: one thing is running, so =SIGINT=
+ends the program outright.
 
 *** Warnings that do not stop the run
 :PROPERTIES:
