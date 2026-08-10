@@ -7329,11 +7329,36 @@ mod cold_start {
         dir
     }
 
+    /// Bytes of real files under DIR, ignoring the symlinks hf-hub's cache
+    /// threads from `snapshots/` to `blobs/` — counting those would double
+    /// everything.
+    fn dir_bytes(dir: &Path) -> u64 {
+        let mut total = 0;
+        let Ok(entries) = fs::read_dir(dir) else { return 0 };
+        for e in entries.flatten() {
+            let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
+            if md.is_dir() {
+                total += dir_bytes(&e.path());
+            } else if md.is_file() {
+                total += md.len();
+            }
+        }
+        total
+    }
+
     /// The download reports the size it is about to spend, *before* spending it,
     /// and carries no denominator — fastembed and `ureq` both hand over the
     /// bytes in one go, so nothing counts up towards it and a client must show a
     /// spinner rather than a bar frozen at nought.
-    fn assert_announced(msgs: &[serde_json::Value], target: &str, bytes: u64) {
+    ///
+    /// CACHE is checked against the claim afterwards. That check is the whole
+    /// reason the sizes may be constants at all: nothing pins them — fastembed
+    /// picks the repo and the file, but `hf_hub` fetches `main`, so an upstream
+    /// re-upload moves the number under us. Querying Hugging Face instead would
+    /// mean reproducing fastembed's private choice among eight `.onnx` variants,
+    /// which fails *precisely* rather than approximately. A constant that this
+    /// test keeps honest is the cheaper trade.
+    fn assert_announced(msgs: &[serde_json::Value], target: &str, bytes: u64, cache: &Path) {
         let values: Vec<&serde_json::Value> = msgs
             .iter()
             .filter(|m| m["method"] == "$/progress")
@@ -7360,6 +7385,20 @@ mod cold_start {
             remarks.iter().any(|r| r["kind"] == "model-downloaded"),
             "and recorded, so the reply explains why the run took minutes: {remarks:?}"
         );
+
+        // The claim against what arrived.  A wide band on purpose: the cache
+        // holds a tokenizer and some JSON besides the weights, and the point is
+        // to catch a stale constant or a switch to a quantised variant — four
+        // times out — not to police a few per cent.
+        let landed = dir_bytes(cache);
+        let ratio = bytes as f64 / landed.max(1) as f64;
+        assert!(
+            (0.67..1.5).contains(&ratio),
+            "announced {} but {} arrived — the size this quotes has moved, and the constant \
+             in MODELS (or LID_BYTES) needs remeasuring",
+            human_bytes(bytes),
+            human_bytes(landed)
+        );
     }
 
     #[test]
@@ -7368,7 +7407,7 @@ mod cold_start {
         let cache = scratch("lid-cache");
         let vault = scratch("lid-vault");
         let msgs = cold_index(&cache, vault_of(&vault, 3), "lexical");
-        assert_announced(&msgs, "lexical", LID_BYTES);
+        assert_announced(&msgs, "lexical", LID_BYTES, &cache);
         assert!(
             cache.join("org-semantic").join("lid.176.ftz").exists(),
             "and the file really did land where the announcement said it would"
@@ -7384,7 +7423,7 @@ mod cold_start {
         let cache = scratch("model-cache");
         let vault = scratch("model-vault");
         let msgs = cold_index(&cache, vault_of(&vault, 3), "semantic");
-        assert_announced(&msgs, "semantic", m.bytes);
+        assert_announced(&msgs, "semantic", m.bytes, &cache);
         assert!(
             model_cache_root(m).is_ok(),
             "the model this announced is one fastembed knows how to fetch"
