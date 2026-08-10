@@ -260,7 +260,7 @@ impl Progress {
             // Indeterminate: say how big, if that is known, and nothing else.
             None => match self.bytes {
                 Some(b) => {
-                    let _ = write!(s, "· {:.0} MB", b as f64 / 1e6);
+                    let _ = write!(s, "· {}", human_bytes(b));
                 }
                 None => s.push('…'),
             },
@@ -306,6 +306,17 @@ struct Journal {
     /// Named apart from the `progress` method on purpose — `j.watch = …` beside
     /// `j.progress(&p)` reads as two different things, which they are.
     watch: Option<Watcher>,
+}
+
+/// A size as someone would say it aloud.  Decimal units, because that is what a
+/// download is quoted in, and one place to get the rounding right — `917_000 /
+/// 1_000_000` is zero, which is how this was first written.
+fn human_bytes(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000_000 => format!("{:.1} GB", n as f64 / 1e9),
+        n if n >= 1_000_000 => format!("{} MB", n / 1_000_000),
+        _ => format!("{} kB", n / 1_000),
+    }
 }
 
 /// Whether anything may draw on the terminal.
@@ -701,13 +712,9 @@ fn classifier() -> Result<&'static Lid> {
     if !path.exists() {
         let dir = path.parent().expect("joined path has a parent");
         fs::create_dir_all(dir)?;
-        // Only where someone is watching: this has no journal to go through —
-        // `classifier` is a `OnceLock` accessor reached from everywhere — and a
-        // bare `eprintln!` under `serve` writes into the editor's pipe.  What
-        // that caller gets instead is a `download` progress report.
-        if stderr_is_tty() {
-            eprintln!("fetching the language model from {LID_URL}");
-        }
+        // Silent on purpose.  This has no journal to go through — `classifier`
+        // is a `OnceLock` accessor reached from everywhere — and `prepare_lang`,
+        // which does, announces the fetch with its size before calling here.
         let bytes = ureq::get(LID_URL).call()?.body_mut().read_to_vec()?;
         // Write beside the target and rename, so an interrupted download does
         // not leave a truncated file that later runs would happily load.
@@ -743,18 +750,23 @@ fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
     // announces it live on the terminal as it happens.
     let fetching = !lid_path().exists();
     if fetching {
-        // Said *before* the wait, not after it — that is the whole point of a
-        // progress channel.  No `total`: `ureq` reads the body in one call, so
-        // there are no increments to count, only a size to state.
+        // Said *before* the wait, which is the whole point of saying it, and
+        // said as a plain line rather than drawn: the `tty` guard exists for
+        // things redrawn in place, and a run with its output in a log file
+        // still deserves to know why it is about to sit there.
+        j.remark(Remark::new(
+            "model-downloaded",
+            format!(
+                "the language classifier ({}) is not cached; fetching it before this run \
+                 can start",
+                human_bytes(LID_BYTES)
+            ),
+        ));
         j.progress(&Progress::new("lexical", "download", "bytes", 0, 0.0).sized(LID_BYTES));
     }
     let lid = classifier()?;
     if fetching {
         j.progress_done();
-        j.record(Remark::new(
-            "model-downloaded",
-            "the language classifier was fetched before this run could start".into(),
-        ));
     }
     for l in lang.languages.iter().filter(|l| !lid.knows(l)) {
         j.remark(Remark::new(
@@ -3495,15 +3507,19 @@ fn cmd_index(
     } else {
         let cold = find_tokenizer(m).is_err();
         if cold {
+            j.remark(Remark::new(
+                "model-downloaded",
+                format!(
+                    "{} ({}) is not cached; fetching it before this run can start",
+                    m.name,
+                    human_bytes(m.bytes)
+                ),
+            ));
             j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).sized(m.bytes));
         }
         let t = tokenizer_for(m)?;
         if cold {
             j.progress_done();
-            j.record(Remark::new(
-                "model-downloaded",
-                format!("{} was fetched before this run could start", m.name),
-            ));
         }
         Some(t)
     };
@@ -4404,9 +4420,8 @@ fn tokenizer_for(m: &Model) -> Result<tokenizers::Tokenizer> {
         // Not cached: chunking runs before embedding, so the download that would
         // have happened later has to happen now.
         Err(_) => {
-            if stderr_is_tty() {
-                eprintln!("  fetching {} …", m.name);
-            }
+            // Announced by `cmd_index` before it calls here, which is the one
+            // place that both knows the size and holds a journal.
             let _ = model_with(m.which.clone(), None, false)?;
             find_tokenizer(m)?
         }
@@ -5700,6 +5715,20 @@ mod tests {
         let s = fetching.printed();
         assert!(s.contains("470 MB"), "says how big: {s}");
         assert!(!s.contains('/'), "and shows no fraction: {s}");
+    }
+
+    /// Every size this quotes is one someone is about to wait for, so rounding
+    /// it to nothing is worse than not saying it.  The 917 kB classifier read
+    /// as "0 MB" until this existed.
+    #[test]
+    fn a_size_is_quoted_in_a_unit_that_survives_rounding() {
+        assert_eq!(human_bytes(LID_BYTES), "917 kB");
+        assert_eq!(human_bytes(133_000_000), "133 MB");
+        assert_eq!(human_bytes(2_236_000_000), "2.2 GB");
+        for m in MODELS {
+            let s = human_bytes(m.bytes);
+            assert!(!s.starts_with('0'), "{} would be quoted as {s}", m.name);
+        }
     }
 
     /// An editor calls `index` on every save, so a vault full of one problem
