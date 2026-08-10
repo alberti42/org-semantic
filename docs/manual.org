@@ -348,7 +348,7 @@ previous run of reports. The response --- result /or/ error --- ends the last.
 | =unit=               | what =done= and =total= count --- "files", "chunks"     |
 | =done=, =total=      | comparable *only* within one =(target, phase)= pair     |
 | =tokens=, =ofTokens= | embedding only                                          |
-| =bytes=              | a download's size; there is no =total= to climb         |
+| =bytes=              | a download's size, if it could be asked for; never a =total= to climb |
 | =secs=               | seconds into /this phase/                               |
 | =last=               | the final report of its phase                           |
 
@@ -365,7 +365,9 @@ never end up rendering 6,400 of 6,522 for ever.
 
 A =download= report has a size and no total. Nothing counts up towards it:
 fastembed hands over no increments, and a bar frozen at nought for four minutes
-reads as a crash. Show a spinner and the size.
+reads as a crash. Show a spinner and the size. =bytes= is absent when the size
+could not be asked for, which is not an error --- the download is announced
+either way.
 
 #+begin_quote
 *The timeout will bite you before any of this does.*

@@ -233,8 +233,11 @@ impl Progress {
         self
     }
 
-    fn sized(mut self, bytes: u64) -> Self {
-        self.bytes = Some(bytes);
+    /// A size, when one could be had.  Not knowing is a supported answer: the
+    /// download is announced either way, and a client shows a spinner with or
+    /// without a figure beside it.
+    fn maybe_sized(mut self, bytes: Option<u64>) -> Self {
+        self.bytes = bytes;
         self
     }
 
@@ -316,6 +319,17 @@ fn human_bytes(n: u64) -> String {
         n if n >= 1_000_000_000 => format!("{:.1} GB", n as f64 / 1e9),
         n if n >= 1_000_000 => format!("{} MB", n / 1_000_000),
         _ => format!("{} kB", n / 1_000),
+    }
+}
+
+/// How a first run explains the wait it is about to impose.
+fn fetching_now(what: &str, size: Option<u64>) -> String {
+    match size {
+        Some(n) => format!(
+            "{what} ({}) is not cached; fetching it before this run can start",
+            human_bytes(n)
+        ),
+        None => format!("{what} is not cached; fetching it before this run can start"),
     }
 }
 
@@ -445,17 +459,6 @@ struct Model {
     passage: &'static str,
     /// Languages it was trained on, for `--model list`.
     about: &'static str,
-    /// Roughly what a first run has to download, for setting an expectation
-    /// before a wait of minutes.  Not a denominator — fastembed gives no
-    /// increments, so nothing counts up towards this.
-    ///
-    /// A curated claim like the prefixes above, and for the same reason:
-    /// asking Hugging Face is worse.  `intfloat/multilingual-e5-large` reports
-    /// `onnx/model.onnx` as 545,850 bytes, and the weights are in a sibling
-    /// `model.onnx_data` of 2.2 GB — a precise answer, off by four thousand.
-    /// Half the repos also ship eight quantised variants and only fastembed
-    /// knows which it takes.
-    bytes: u64,
 }
 
 /// BGE's query prefix, shared by the whole v1.5 English family.
@@ -467,19 +470,19 @@ const BGE_QUERY: &str = "Represent this sentence for searching relevant passages
 #[rustfmt::skip]
 const MODELS: &[Model] = &[
     Model { name: "bge-small-en", which: EmbeddingModel::BGESmallENV15, dim: 384,
-            query: BGE_QUERY, passage: "", about: "English", bytes: 133_000_000 },
+            query: BGE_QUERY, passage: "", about: "English" },
     Model { name: "bge-base-en", which: EmbeddingModel::BGEBaseENV15, dim: 768,
-            query: BGE_QUERY, passage: "", about: "English", bytes: 436_000_000 },
+            query: BGE_QUERY, passage: "", about: "English" },
     Model { name: "bge-large-en", which: EmbeddingModel::BGELargeENV15, dim: 1024,
-            query: BGE_QUERY, passage: "", about: "English", bytes: 1_337_000_000 },
+            query: BGE_QUERY, passage: "", about: "English" },
     // E5 is asymmetric: both sides carry a prefix, and omitting the passage one
     // is the quiet mistake this table exists to prevent.
     Model { name: "e5-small", which: EmbeddingModel::MultilingualE5Small, dim: 384,
-            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 470_000_000 },
+            query: "query: ", passage: "passage: ", about: "100 languages" },
     Model { name: "e5-base", which: EmbeddingModel::MultilingualE5Base, dim: 768,
-            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 1_110_000_000 },
+            query: "query: ", passage: "passage: ", about: "100 languages" },
     Model { name: "e5-large", which: EmbeddingModel::MultilingualE5Large, dim: 1024,
-            query: "query: ", passage: "passage: ", about: "100 languages", bytes: 2_236_000_000 },
+            query: "query: ", passage: "passage: ", about: "100 languages" },
 ];
 
 const USAGE: &str = "\
@@ -677,10 +680,6 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// keeps it out of the distribution so ShareAlike never engages.
 const LID_URL: &str = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz";
 
-/// What that download costs, for saying so before it starts.  Measured, not
-/// quoted: the figure everyone repeats for this file is 917, which is KiB.
-const LID_BYTES: u64 = 938_000;
-
 /// The classifier and the set of languages it knows.
 ///
 /// The languages are read from the model rather than listed here, so the two can
@@ -755,15 +754,9 @@ fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
         // said as a plain line rather than drawn: the `tty` guard exists for
         // things redrawn in place, and a run with its output in a log file
         // still deserves to know why it is about to sit there.
-        j.remark(Remark::new(
-            "model-downloaded",
-            format!(
-                "the language classifier ({}) is not cached; fetching it before this run \
-                 can start",
-                human_bytes(LID_BYTES)
-            ),
-        ));
-        j.progress(&Progress::new("lexical", "download", "bytes", 0, 0.0).sized(LID_BYTES));
+        let size = head_size(LID_URL);
+        j.remark(Remark::new("model-downloaded", fetching_now("the language classifier", size)));
+        j.progress(&Progress::new("lexical", "download", "bytes", 0, 0.0).maybe_sized(size));
     }
     let lid = classifier()?;
     if fetching {
@@ -3508,15 +3501,9 @@ fn cmd_index(
     } else {
         let cold = find_tokenizer(m).is_err();
         if cold {
-            j.remark(Remark::new(
-                "model-downloaded",
-                format!(
-                    "{} ({}) is not cached; fetching it before this run can start",
-                    m.name,
-                    human_bytes(m.bytes)
-                ),
-            ));
-            j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).sized(m.bytes));
+            let size = download_size(m);
+            j.remark(Remark::new("model-downloaded", fetching_now(m.name, size)));
+            j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).maybe_sized(size));
         }
         let t = tokenizer_for(m)?;
         if cold {
@@ -4386,6 +4373,40 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
         println!("  {t} tokens · {} chars · {}", texts[*i].len(), chunks[*i].heading);
     }
     Ok(())
+}
+
+/// How many bytes a HEAD says are behind URL, if it says.
+fn head_size(url: &str) -> Option<u64> {
+    let resp = ureq::head(url).call().ok()?;
+    resp.headers().get("content-length")?.to_str().ok()?.parse().ok()
+}
+
+/// What a first run has to fetch, asked of the place it will be fetched from.
+///
+/// Nothing here is guessed and nothing is kept in step by hand.  fastembed
+/// publishes the repo, the file it takes and any sidecar it needs
+/// (`ModelInfo::model_code` / `model_file` / `additional_files`), so following
+/// that metadata follows fastembed's own choices — including the ones that make
+/// a curated number wrong.  `multilingual-e5-large` is both traps at once: it
+/// comes from `Qdrant/multilingual-e5-large-onnx` rather than the `intfloat`
+/// repo anyone would guess, and its weights are a 2.2 GB `model.onnx_data`
+/// beside a 546 kB `model.onnx`.
+///
+/// `HF_ENDPOINT` is honoured because fastembed honours it, or a mirrored install
+/// would be quoted the size of a file it is not going to fetch.
+///
+/// `None` when the answer cannot be had, and never an error: the announcement
+/// then says a download is happening without saying how large, and an index is
+/// not going to fail because a HEAD did not come back.
+fn download_size(m: &Model) -> Option<u64> {
+    let info = TextEmbedding::list_supported_models().into_iter().find(|i| i.model == m.which)?;
+    let endpoint =
+        std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
+    let mut total = 0;
+    for f in std::iter::once(&info.model_file).chain(info.additional_files.iter()) {
+        total += head_size(&format!("{endpoint}/{}/resolve/main/{f}", info.model_code))?;
+    }
+    Some(total)
 }
 
 /// Where fastembed caches a model's files.
@@ -5712,7 +5733,8 @@ mod tests {
 
         // A download has a size but no denominator, so it must not render as a
         // bar sitting at zero — that reads as a hang.
-        let fetching = Progress::new("semantic", "download", "bytes", 0, 0.0).sized(470_000_000);
+        let fetching =
+            Progress::new("semantic", "download", "bytes", 0, 0.0).maybe_sized(Some(470_000_000));
         let s = fetching.printed();
         assert!(s.contains("470 MB"), "says how big: {s}");
         assert!(!s.contains('/'), "and shows no fraction: {s}");
@@ -5723,13 +5745,12 @@ mod tests {
     /// as "0 MB" until this existed.
     #[test]
     fn a_size_is_quoted_in_a_unit_that_survives_rounding() {
-        assert_eq!(human_bytes(LID_BYTES), "938 kB");
-        assert_eq!(human_bytes(133_000_000), "133 MB");
-        assert_eq!(human_bytes(2_236_000_000), "2.2 GB");
-        for m in MODELS {
-            let s = human_bytes(m.bytes);
-            assert!(!s.starts_with('0'), "{} would be quoted as {s}", m.name);
-        }
+        assert_eq!(human_bytes(938_013), "938 kB");
+        assert_eq!(human_bytes(133_093_490), "133 MB");
+        assert_eq!(human_bytes(2_235_909_179), "2.2 GB");
+        // Not knowing is a supported answer, and must not read as knowing zero.
+        assert!(!fetching_now("a model", None).contains('('));
+        assert!(fetching_now("a model", Some(133_093_490)).contains("133 MB"));
     }
 
     /// One report as a test cares about it.
@@ -7358,7 +7379,7 @@ mod cold_start {
     /// mean reproducing fastembed's private choice among eight `.onnx` variants,
     /// which fails *precisely* rather than approximately. A constant that this
     /// test keeps honest is the cheaper trade.
-    fn assert_announced(msgs: &[serde_json::Value], target: &str, bytes: u64, cache: &Path) {
+    fn assert_announced(msgs: &[serde_json::Value], target: &str, cache: &Path) {
         let values: Vec<&serde_json::Value> = msgs
             .iter()
             .filter(|m| m["method"] == "$/progress")
@@ -7367,7 +7388,7 @@ mod cold_start {
         let downloads: Vec<&&serde_json::Value> =
             values.iter().filter(|v| v["phase"] == "download").collect();
         assert_eq!(downloads.len(), 1, "one download, announced once: {values:?}");
-        assert_eq!(downloads[0]["bytes"], bytes, "the size a first run is about to spend");
+        assert!(downloads[0]["bytes"].is_u64(), "a size was asked for and got: {downloads:?}");
         assert_eq!(downloads[0]["target"], target);
         assert!(downloads[0].get("total").is_none(), "no denominator to climb: {downloads:?}");
         // Before the work that waits on it, not after — which is the whole
@@ -7387,16 +7408,17 @@ mod cold_start {
         );
 
         // The claim against what arrived.  A wide band on purpose: the cache
-        // holds a tokenizer and some JSON besides the weights, and the point is
-        // to catch a stale constant or a switch to a quantised variant — four
-        // times out — not to police a few per cent.
+        // holds a tokenizer and some JSON besides the weights, so the point is
+        // to catch the announcement naming a different artefact — a quantised
+        // variant is four times out — not to police a few per cent.
+        let announced = downloads[0]["bytes"].as_u64().expect("a size was quoted");
         let landed = dir_bytes(cache);
-        let ratio = bytes as f64 / landed.max(1) as f64;
+        let ratio = announced as f64 / landed.max(1) as f64;
         assert!(
             (0.67..1.5).contains(&ratio),
-            "announced {} but {} arrived — the size this quotes has moved, and the constant \
-             in MODELS (or LID_BYTES) needs remeasuring",
-            human_bytes(bytes),
+            "announced {} but {} arrived — whatever was asked for is not what fastembed \
+             fetched",
+            human_bytes(announced),
             human_bytes(landed)
         );
     }
@@ -7407,7 +7429,7 @@ mod cold_start {
         let cache = scratch("lid-cache");
         let vault = scratch("lid-vault");
         let msgs = cold_index(&cache, vault_of(&vault, 3), "lexical");
-        assert_announced(&msgs, "lexical", LID_BYTES, &cache);
+        assert_announced(&msgs, "lexical", &cache);
         assert!(
             cache.join("org-semantic").join("lid.176.ftz").exists(),
             "and the file really did land where the announcement said it would"
@@ -7423,7 +7445,7 @@ mod cold_start {
         let cache = scratch("model-cache");
         let vault = scratch("model-vault");
         let msgs = cold_index(&cache, vault_of(&vault, 3), "semantic");
-        assert_announced(&msgs, "semantic", m.bytes, &cache);
+        assert_announced(&msgs, "semantic", &cache);
         assert!(
             model_cache_root(m).is_ok(),
             "the model this announced is one fastembed knows how to fetch"
