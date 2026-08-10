@@ -1110,8 +1110,9 @@ fn chunk_file(
     lang: Option<&LangConfig>,
     cfg: &Config,
     target: Target,
-    measure: &dyn Fn(&str) -> usize,
+    budget: &Budget,
 ) -> Vec<Chunk> {
+    let measure = budget.measure;
     // The unit the caller measures in decides which budget applies: the
     // semantic index counts the model's tokens, the lexical one characters.
     let limit = cfg.chunk.of(target);
@@ -1211,11 +1212,13 @@ fn chunk_file(
         }
         let todo = todo_stack.iter().rev().find_map(|t| t.clone());
         let priority = prio_stack.iter().rev().find_map(|p| *p);
-        // The heading is prepended to every piece before it is embedded, so it
-        // comes out of the budget once, here, where it is known.  The floor
-        // guarantees forward progress when a heading path is itself longer than
-        // the budget — see the known hole in CLAUDE.md.
-        let room = limit.saturating_sub(measure(&heading) + 4).max(MIN_ROOM);
+        // Exactly what precedes the body in the embedded string — the model's
+        // prefix, the heading, the newline — comes out of the budget once, here,
+        // where the heading is known.  The floor guarantees forward progress
+        // when that prelude is itself longer than the budget; see the known hole
+        // in CLAUDE.md.
+        let prelude = format!("{}{}\n", budget.prefix, heading);
+        let room = limit.saturating_sub(measure(&prelude)).max(MIN_ROOM);
         for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
@@ -1466,6 +1469,21 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
 }
 
+/// How a passage's size is judged: the unit, and what rides in front of it.
+///
+/// The prefix is the model's own — `passage: ` for E5, nothing for BGE — and it
+/// is part of the string that gets embedded, so it is part of the budget. It
+/// used to be missing from the arithmetic, covered by a constant 4 that also
+/// stood in for the newline and for tokenization not being additive. That number
+/// happened to work because measuring the heading and the body separately counts
+/// a `[CLS]`/`[SEP]` pair twice, over-counting by 2 and offsetting most of it —
+/// two errors cancelling, with about six tokens of margin and no guarantee.
+/// Measuring the real prelude needs neither.
+struct Budget<'a> {
+    measure: &'a dyn Fn(&str) -> usize,
+    prefix: &'a str,
+}
+
 /// Add a kept line to the paragraph being built, or start a new one.
 ///
 /// A blank line closes the current paragraph — the same boundary the old flat
@@ -1583,6 +1601,10 @@ fn n_tokens(tok: &tokenizers::Tokenizer, s: &str) -> usize {
 fn chars(s: &str) -> usize {
     s.len()
 }
+
+/// The word index's budget: characters, and nothing in front of the heading —
+/// tantivy indexes the passage as it stands, with no model prefix.
+const LEXICAL_BUDGET: Budget = Budget { measure: &chars, prefix: "" };
 
 /// Greedily pack paragraphs up to BUDGET, in whatever unit MEASURE counts, with
 /// one paragraph of overlap between consecutive pieces; hard-split any single
@@ -1914,14 +1936,14 @@ mod lexical {
         /// self-contained; bump it whenever the schema changes, so a stale index
         /// is discarded rather than opened against the wrong schema.
         pub fn key(&self) -> String {
-            format!("v3 langs={} fold={}", self.langs.join("+"), self.fold)
+            format!("v4 langs={} fold={}", self.langs.join("+"), self.fold)
         }
 
         /// Rebuild the analyzer from a stored key.  This is what lets the
         /// lexical index be searched without `chunks.json`: the languages come
         /// back from the index's own metadata rather than from the corpus.
         pub fn from_key(key: &str) -> Option<Self> {
-            let rest = key.strip_prefix("v3 ")?;
+            let rest = key.strip_prefix("v4 ")?;
             let (langs, fold) = rest.split_once(" fold=")?;
             Some(Analyzer {
                 langs: langs.strip_prefix("langs=")?.split('+').map(String::from).collect(),
@@ -2246,7 +2268,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 6;
+const INDEX_VERSION: u32 = 7;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -2606,7 +2628,15 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     for st in &scan.stale {
         let f = vault.join(&st.path);
-        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg, Target::Lexical, &chars));
+        chunks.extend(chunk_file(
+            &f,
+            &st.path,
+            &st.text,
+            Some(lang),
+            cfg,
+            Target::Lexical,
+            &LEXICAL_BUDGET,
+        ));
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -2626,7 +2656,7 @@ fn cmd_index_lexical(
                     Some(lang),
                     cfg,
                     Target::Lexical,
-                    &chars,
+                    &LEXICAL_BUDGET,
                 )),
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
@@ -2806,7 +2836,8 @@ fn cmd_index(
         // One pass, in the model's own tokens.  Sections that had to be divided
         // are counted from the result — several chunks sharing a heading line —
         // rather than reported by the packer.
-        let cs = chunk_file(f, &path, text, None, cfg, Target::Semantic, &measure);
+        let budget = Budget { measure: &measure, prefix: m.passage };
+        let cs = chunk_file(f, &path, text, None, cfg, Target::Semantic, &budget);
         // A section that had to be divided shows up as consecutive chunks on one
         // heading line, so it is counted from the result rather than reported by
         // the packer — and counted once however many pieces it became.
@@ -2837,7 +2868,7 @@ fn cmd_index(
                     // an incremental run is a fraction of the corpus — the pass
                     // this replaced measured every chunk, reused ones included.
                     pending.push(chunks.len());
-                    pending_len.push(measure(&format!("{}\n{}", c.heading, c.text)));
+                    pending_len.push(measure(&format!("{}{}\n{}", m.passage, c.heading, c.text)));
                     chunks.push(c);
                     vectors.extend(std::iter::repeat_n(0.0, m.dim));
                 }
@@ -3407,8 +3438,10 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     files.sort();
     // Packed with the real tokenizer, or this measures chunks the indexer would
     // never produce.
-    let tok = tokenizer_for(model_named(DEFAULT_MODEL)?)?;
+    let m = model_named(DEFAULT_MODEL)?;
+    let tok = tokenizer_for(m)?;
     let measure = |t: &str| n_tokens(&tok, t);
+    let budget = Budget { measure: &measure, prefix: m.passage };
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3419,7 +3452,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
                 None,
                 &Config::default(),
                 Target::Semantic,
-                &measure,
+                &budget,
             ));
         }
         if chunks.len() >= n {
@@ -3497,6 +3530,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
     let measure = |s: &str| n_tokens(&tok, s);
+    let budget = Budget { measure: &measure, prefix: m.passage };
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3507,7 +3541,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
                 None,
                 &Config::default(),
                 Target::Semantic,
-                &measure,
+                &budget,
             ));
         }
     }
@@ -3673,9 +3707,10 @@ fn cmd_chunks(
         // Each index is previewed in its own unit, because each is packed in
         // its own: showing a lexical preview cut to token boundaries would be
         // showing something that never reaches disk.
-        let unit: &dyn Fn(&str) -> usize = match target {
-            Target::Semantic => &measure,
-            Target::Lexical => &chars,
+        let semantic = Budget { measure: &measure, prefix: m.passage };
+        let budget = match target {
+            Target::Semantic => &semantic,
+            Target::Lexical => &LEXICAL_BUDGET,
         };
         let chunks = chunk_file(
             f,
@@ -3684,7 +3719,7 @@ fn cmd_chunks(
             (target == Target::Lexical).then_some(lang),
             cfg,
             target,
-            unit,
+            budget,
         );
         println!("\n=== {} — {} chunks", f.display(), chunks.len());
         for (i, c) in chunks.iter().enumerate() {
@@ -4020,7 +4055,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         )
     }
 
@@ -4090,7 +4125,7 @@ mod tests {
             None,
             &cfg,
             Target::Semantic,
-            &words,
+            &WORDS,
         )
     }
 
@@ -4233,7 +4268,7 @@ mod tests {
             chunk: Chunking { semantic_tokens: budget, ..Chunking::default() },
             ..Config::default()
         };
-        chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, Target::Semantic, &words)
+        chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, Target::Semantic, &WORDS)
     }
 
     /// The heading is prepended to every piece before it is embedded, so it has
@@ -4248,6 +4283,44 @@ mod tests {
         for c in &cs {
             let full = format!("{}\n{}", c.heading, c.text);
             assert!(words(&full) <= 50, "heading + text must fit: {}", words(&full));
+        }
+    }
+
+    /// The budget covers *everything* that reaches the model, the model's own
+    /// prefix included.
+    ///
+    /// E5 prepends `passage: `; it is in the embedded string and used to be in
+    /// neither measurement, covered by a constant 4 that also stood in for the
+    /// newline. That worked only because measuring heading and body separately
+    /// counts a `[CLS]`/`[SEP]` pair twice and over-counted by 2 the other way.
+    /// With the prelude measured, a prefix of any length is simply subtracted.
+    #[test]
+    fn the_models_prefix_comes_out_of_the_budget_too() {
+        let note = format!("#+title: T\n* Heading here\n{}\n", para("w", 200));
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: 80, ..Chunking::default() },
+            ..Config::default()
+        };
+        // Long enough that ignoring it would show: ten words of prefix.
+        let prefix = "one two three four five six seven eight nine ten ";
+        let budget = Budget { measure: &words, prefix };
+        let cs = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            &note,
+            None,
+            &cfg,
+            Target::Semantic,
+            &budget,
+        );
+        assert!(cs.len() > 1, "200 words cannot fit a budget of 80");
+        for c in &cs {
+            let embedded = format!("{prefix}{}\n{}", c.heading, c.text);
+            assert!(
+                words(&embedded) <= 80,
+                "the embedded string is {} words, over the 80-word budget",
+                words(&embedded)
+            );
         }
     }
 
@@ -4269,7 +4342,7 @@ mod tests {
             chunk: Chunking { semantic_tokens: 20, lexical_chars: 10_000 },
             ..Config::default()
         };
-        let at = |target, m: &dyn Fn(&str) -> usize| {
+        let at = |target, b: &Budget| {
             chunk_file(
                 Path::new("/v/n.org"),
                 "n.org",
@@ -4277,12 +4350,12 @@ mod tests {
                 Some(&LangConfig::default()),
                 &cfg,
                 target,
-                m,
+                b,
             )
             .len()
         };
-        assert!(at(Target::Semantic, &words) > 1, "100 words exceed a 20-word budget");
-        assert_eq!(at(Target::Lexical, &chars), 1, "but not 10,000 characters");
+        assert!(at(Target::Semantic, &WORDS) > 1, "100 words exceed a 20-word budget");
+        assert_eq!(at(Target::Lexical, &LEXICAL_BUDGET), 1, "but not 10,000 characters");
     }
 
     #[test]
@@ -4312,12 +4385,16 @@ mod tests {
         semantic_dir(v, model_named(DEFAULT_MODEL).unwrap())
     }
 
-    /// A measure for tests that are about parsing, not packing: nothing ever
-    /// exceeds a budget, so a note comes back as the sections it has.  Packing
-    /// itself is exercised directly against `split_to_fit`.
     fn unsplit(_: &str) -> usize {
         0
     }
+
+    /// A measure for tests that are about parsing, not packing: nothing ever
+    /// exceeds a budget, so a note comes back as the sections it has.
+    const UNSPLIT: Budget = Budget { measure: &unsplit, prefix: "" };
+
+    /// Words, for the tests that *are* about packing.
+    const WORDS: Budget = Budget { measure: &words, prefix: "" };
 
     fn scratch(name: &str) -> PathBuf {
         // No tempfile dependency: a per-test directory under the system temp,
@@ -4390,7 +4467,7 @@ mod tests {
                 None,
                 &Config::default(),
                 Target::Semantic,
-                &unsplit,
+                &UNSPLIT,
             ));
             files.insert((*p).to_string(), content_hash(text.as_bytes()));
         }
@@ -4464,7 +4541,7 @@ mod tests {
         // embed the one new passage.
         let text = fs::read_to_string(&abs).unwrap();
         let fresh =
-            chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic, &unsplit);
+            chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic, &UNSPLIT);
         let old = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         // Matched on the stored hash, as the indexer does — the old index no
         // longer carries the text to compare against.
@@ -4564,7 +4641,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         let texts: Vec<&str> = c.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts.len(), 1, "only the public section survives: {texts:?}");
@@ -4580,7 +4657,7 @@ mod tests {
             None,
             &keep,
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(all.len(), 3, "and nothing is dropped when nothing is excluded");
     }
@@ -4598,10 +4675,10 @@ mod tests {
             None,
             &cfg,
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         let lex =
-            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &unsplit);
+            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &UNSPLIT);
 
         // The body is not embedded, but the seam and the fact survive: without
         // the placeholder the two paragraphs would read as adjacent.
@@ -4626,7 +4703,7 @@ mod tests {
             None,
             &cfg,
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         // Babel output is generated and nobody looks for it by meaning; a
         // quotation is prose someone chose to set off.
@@ -4634,7 +4711,7 @@ mod tests {
         assert!(sem[0].text.contains("quotation is prose"), "{:?}", sem[0].text);
 
         let lex =
-            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &unsplit);
+            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &UNSPLIT);
         assert!(lex[0].text.contains("mounted ok"), "still findable by word");
     }
 
@@ -5189,7 +5266,7 @@ mod tests {
                 None,
                 &Config::default(),
                 target,
-                &unsplit,
+                &UNSPLIT,
             )
         };
         assert!(!of(Target::Semantic)[0].text.contains("DEADLINE"), "noise to an embedding");
@@ -5206,7 +5283,7 @@ mod tests {
             ..Config::default()
         };
         let of =
-            |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target, &unsplit);
+            |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target, &UNSPLIT);
         assert!(of(Target::Semantic)[0].text.contains("DEADLINE"));
         assert!(!of(Target::Lexical)[0].text.contains("DEADLINE"));
 
@@ -5277,7 +5354,7 @@ mod tests {
             None,
             &cfg,
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(c[0].todo.as_deref(), Some("NEXT"));
         assert_eq!(c[0].heading, "T > Rewire");
@@ -5323,7 +5400,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
@@ -5546,7 +5623,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
         assert_eq!(by("alpha").lang, "en-US", "the configured default");
@@ -5563,7 +5640,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(c[0].lang, "it-IT");
     }
@@ -5724,7 +5801,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-                &unsplit,
+                &UNSPLIT,
 );
         assert_eq!(de[0].lang, "de");
         let en = chunk_file(
@@ -5734,7 +5811,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(en[0].lang, "en");
     }
@@ -5751,7 +5828,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-                &unsplit,
+                &UNSPLIT,
 );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
@@ -5771,7 +5848,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-                &unsplit,
+                &UNSPLIT,
 );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
@@ -5789,7 +5866,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-                &unsplit,
+                &UNSPLIT,
 );
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("Plain").lang, "en-US");
@@ -5810,7 +5887,7 @@ mod tests {
             Some(&LangConfig::parse("de-DE,en-US")),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
@@ -5821,7 +5898,7 @@ mod tests {
             Some(&LangConfig::parse("en-US")),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(single[0].lang, "en-US");
 
@@ -5833,7 +5910,7 @@ mod tests {
             Some(&LangConfig::parse("auto")),
             &Config::default(),
             Target::Lexical,
-            &unsplit,
+            &UNSPLIT,
         );
         assert_eq!(auto[0].lang, "en");
     }

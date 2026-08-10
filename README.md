@@ -9,14 +9,14 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 ```console
 $ org-semantic index ~/notes --both
 951 org files
-  643 sections were divided to fit the 350-token budget
-6531 chunks · 6531 to embed · scanned in 5.0s
-model loaded in 0.9s
-  embedding 6531/6531 · 34 chunk/s · 6.5k tok/s · eta 0s
-embedded 6531 chunks in 194.1s (34/s)
-wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 200.1s total
+  638 sections were divided to fit the 350-token budget
+6522 chunks · 6522 to embed · scanned in 5.0s
+model loaded in 0.8s
+  embedding 6522/6522 · 33 chunk/s · 6.5k tok/s · eta 0s
+embedded 6522 chunks in 196.4s (33/s)
+wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 202.2s total
 951 org files
-lexical index: 5969 chunks written in 1.2s
+lexical index: 5958 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
@@ -38,7 +38,7 @@ $ org-semantic search ~/notes "why do the atoms heat up and get lost from the tr
        :Literature:
        During dynamical reconfiguration (AOD-based transport), atoms might spend too long outside…
 
-[model load 698ms · query embed 7ms · search over 6531 vectors 1.7ms]
+[model load 745ms · query embed 7ms · search over 6522 vectors 2.0ms]
 ```
 
 Not one word of that query appears in the top note's title, and the passage it
