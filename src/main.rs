@@ -5754,6 +5754,23 @@ mod tests {
         );
     }
 
+    /// `USAGE` is copied into two documents, and a copy nobody diffs is a copy
+    /// that rots: adding `--version` left the manual describing a tool without
+    /// one, and only a hand-run `diff` noticed. The agent guide's copy is
+    /// checked by a command in its own text; this is the manual's.
+    #[test]
+    fn both_documents_quote_the_usage_the_binary_prints() {
+        let org = include_str!("../docs/manual.org");
+        let start = org.find("usage: org-semantic").expect("the manual quotes it");
+        let end = start + org[start..].find("#+end_example").expect("inside an example block");
+        let quoted = org[start..end].trim_end();
+        assert_eq!(
+            quoted.split_whitespace().collect::<Vec<_>>(),
+            USAGE.split_whitespace().collect::<Vec<_>>(),
+            "docs/manual.org quotes a usage block the binary no longer prints"
+        );
+    }
+
     #[test]
     fn the_example_config_is_exactly_the_defaults() {
         let text = include_str!("../config.example.json");

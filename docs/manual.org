@@ -149,6 +149,8 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
+  --version                                 the release this binary is from
+
 Everything about how a vault is indexed is policy, not flags: which languages
 it is written in, whether accents are folded, which subtrees are skipped, how
 large a passage may get, and what happens to src and example blocks.  It goes
@@ -202,7 +204,7 @@ Methods:
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=   | =vault= (optional)                                                                       | the release, and which indexes are built and loaded |
+| =status=   | =vault=                                                                                  | the release, and which indexes this vault has |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
 | =shutdown= | ---                                                                                      | exit                                          |
 
@@ -278,26 +280,22 @@ so there is one version between them and nothing to negotiate. A client checks
 that the binary is the one its own release expects, and installs the right one
 if it is not.
 
-Ask before anything is running:
+That check needs no server --- it happens before one is started:
 
 #+begin_src console
 $ org-semantic --version
 0.1.0
 #+end_src
 
-or over the pipe once it is, where =vault= is optional precisely because the
-first question is which binary is on the other end:
+=status= carries the same string, for a client that is already talking to a
+running server and would rather ask than assume. Its own answer is about the
+vault: which semantic indexes exist and whether there is a lexical one, so an
+editor can offer the commands that will work and explain the ones that will not
+rather than failing when they are used.
 
 #+begin_src json
---> { "jsonrpc": "2.0", "id": 1, "method": "status", "params": {} }
-<-- { "version": "0.1.0", "loaded": 0 }
-#+end_src
-
-Name a vault and the answer also says which indexes that vault has, and how many
-are resident:
-
-#+begin_src json
-<-- { "version": "0.1.0", "loaded": 1, "vault": "/home/you/notes",
+--> { "jsonrpc": "2.0", "id": 1, "method": "status", "params": { "vault": "/home/you/notes" } }
+<-- { "version": "0.1.0", "vault": "/home/you/notes", "loaded": 1,
       "semantic": [ { "name": "e5-small", "dim": 384, "about": "100 languages" } ],
       "lexical": true }
 #+end_src
