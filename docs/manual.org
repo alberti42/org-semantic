@@ -122,14 +122,14 @@ notes by meaning, and a lexical one, which finds them by word.
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
-  search <vault> <query> [k] [--per-file N] [--merge-sections] [--model NAME]
+  search <vault> <query> [k] [--per-file N] [--merge-by-section] [--model NAME]
          [--json]
          Rank by meaning: describe what you are after, not its words.
          k bounds the notes shown (default 8); --per-file bounds how many
          passages any one of them may contribute (default 3).  Keeping a
          year of meetings in one meetings.org?  Raise --per-file.
          A section too long for one passage answers as several, each with
-         its own lines; --merge-sections folds those back into one hit.
+         its own lines; --merge-by-section folds those back into one hit.
   search <vault> <query> [k] --lexical [--any] [--json]
          Rank by word (BM25, over a per-language stemmed index).  Every
          term must match; --any matches notes carrying any of them.
@@ -199,7 +199,7 @@ Methods:
 
 | method     | params                                                                                   | returns                                       |
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =search=   | =vault=, =query=, =k=, =perFile=, =mergeSections=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
+| =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers               |
 | =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
@@ -242,7 +242,7 @@ They remain distinct hits, and =startLine=/=endLine= separate them --- so you ca
 jump to the passage that matched rather than to the top of the section it sits
 in.
 
-If you would rather see one result per section, =--merge-sections= (=mergeSections=
+If you would rather see one result per section, =--merge-by-section= (=mergeBySection=
 over JSON-RPC) folds them: the section is scored by its best passage and spans
 all of them. It is off by default because the spans make each passage reachable
 on its own, and hiding the one that matched behind the top of its section throws

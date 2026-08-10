@@ -108,9 +108,9 @@ impl Server {
         };
         let lexical_mode = p.get("mode").and_then(|v| v.as_str()) == Some("lexical");
         // A section divided by the budget answers as several passages, each with
-        // its own span.  `mergeSections` folds them back into one result — off
+        // its own span.  `mergeBySection` folds them back into one result — off
         // by default, since the spans make the pieces individually reachable.
-        let merge = p.get("mergeSections").and_then(|v| v.as_bool()).unwrap_or(false);
+        let merge = p.get("mergeBySection").and_then(|v| v.as_bool()).unwrap_or(false);
         let want = match p.get("model").and_then(|v| v.as_str()) {
             Some(name) => Some(model_named(name)?),
             None => None,

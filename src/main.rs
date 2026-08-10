@@ -84,14 +84,14 @@ notes by meaning, and a lexical one, which finds them by word.
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
-  search <vault> <query> [k] [--per-file N] [--merge-sections] [--model NAME]
+  search <vault> <query> [k] [--per-file N] [--merge-by-section] [--model NAME]
          [--json]
          Rank by meaning: describe what you are after, not its words.
          k bounds the notes shown (default 8); --per-file bounds how many
          passages any one of them may contribute (default 3).  Keeping a
          year of meetings in one meetings.org?  Raise --per-file.
          A section too long for one passage answers as several, each with
-         its own lines; --merge-sections folds those back into one hit.
+         its own lines; --merge-by-section folds those back into one hit.
   search <vault> <query> [k] --lexical [--any] [--json]
          Rank by word (BM25, over a per-language stemmed index).  Every
          term must match; --any matches notes carrying any of them.
@@ -3798,7 +3798,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 4,
-                &["--lexical", "--any", "--json", "--model", "--per-file", "--merge-sections"],
+                &["--lexical", "--any", "--json", "--model", "--per-file", "--merge-by-section"],
             )?;
             // `k` bounds the notes; `--per-file` bounds how much of the list any
             // one of them may take.  A vault kept in a few large files wants the
@@ -3822,7 +3822,7 @@ fn main() -> Result<()> {
             };
             // A section divided by the budget answers as several passages, each
             // with its own span.  This folds them back into one result.
-            let merge = args.iter().skip(4).any(|a| a == "--merge-sections");
+            let merge = args.iter().skip(4).any(|a| a == "--merge-by-section");
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
             // parse back out.
