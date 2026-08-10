@@ -723,13 +723,13 @@ impl Config {
                  embedding model reads in one pass; the rest would be truncated in silence"
             ));
         }
-        // Below this the heading alone fills the budget and `MIN_ROOM` takes
-        // over, so the number would be ignored rather than applied.
-        if t <= MIN_ROOM * 2 {
+        // Small budgets are workable — the body's share adapts to them — but
+        // below this a passage is too short to be worth embedding on its own.
+        if t < MIN_BODY / 2 {
             return Err(anyhow!(
-                "chunk.semantic_tokens is {t}, too small to survive subtracting a heading — \
-                 the floor of {MIN_ROOM} would apply instead.  Use at least {}",
-                MIN_ROOM * 2 + 1
+                "chunk.semantic_tokens is {t}; a passage that short carries too little to \
+                 embed on its own.  Use at least {}",
+                MIN_BODY / 2
             ));
         }
         if self.chunk.lexical_chars == 0 {
@@ -1227,7 +1227,7 @@ fn chunk_file(
         // model, which would truncate the body instead.
         let embed_heading = fit_heading(&heading, budget, limit);
         let measured = embed_heading.as_deref().unwrap_or(&heading);
-        let room = limit.saturating_sub(measure(&budget.prelude(measured))).max(MIN_ROOM);
+        let room = limit.saturating_sub(measure(&budget.prelude(measured))).max(body_share(limit));
         for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
@@ -1540,7 +1540,7 @@ fn embedded_as(m: &Model, c: &Chunk) -> String {
 /// then shrink until it actually fits.
 fn fit_heading(heading: &str, budget: &Budget, limit: usize) -> Option<String> {
     let measure = budget.measure;
-    let room_for_prelude = limit.saturating_sub(MIN_ROOM);
+    let room_for_prelude = limit.saturating_sub(body_share(limit));
     if measure(&budget.prelude(heading)) <= room_for_prelude {
         return None;
     }
@@ -1659,13 +1659,24 @@ where
 /// character budget.
 const TOKEN_LIMIT: usize = 512;
 
-/// The least room a passage is ever packed into, once its heading is subtracted.
+/// The body's guaranteed share of the budget, when a heading has to be cut.
 ///
-/// A floor rather than a hard rule: with no room at all nothing "fits", every
-/// paragraph falls to `hard_split`, and a chunk per character comes out. It also
-/// means a budget too small to leave this much is silently ignored, which is why
-/// `Config::check` refuses one.
-const MIN_ROOM: usize = 32;
+/// Only ever consulted for a heading path too long to leave the passage room —
+/// no real note reaches it. But where it does apply it decides how much of the
+/// note survives: at 32 tokens a passage is barely a sentence, and a note with a
+/// pathological heading would be chopped into dozens of them, each mostly
+/// heading. 128 gives each one something to say.
+///
+/// Capped at half the budget, so a small budget is not swallowed whole: whatever
+/// else happens, a heading may not take more than half of what the passage was
+/// allowed. That also keeps this from dictating a minimum budget — a flat 128
+/// would forbid any budget under 257.
+const MIN_BODY: usize = 128;
+
+/// What the body is guaranteed, under this budget.
+fn body_share(limit: usize) -> usize {
+    MIN_BODY.min(limit / 2).max(1)
+}
 
 fn n_tokens(tok: &tokenizers::Tokenizer, s: &str) -> usize {
     tok.encode(s, true).map(|e| e.len()).unwrap_or(usize::MAX)
@@ -4440,6 +4451,31 @@ mod tests {
         assert!(c.text.contains("regulator"), "the passage is what had to survive");
     }
 
+    /// The body's share is what decides how much of a badly-headed note
+    /// survives, and it must adapt rather than dictate a minimum budget.
+    #[test]
+    fn the_body_keeps_its_share_of_whatever_the_budget_is() {
+        // A generous budget gives the flat share.
+        assert_eq!(body_share(350), MIN_BODY);
+        // A small one gives half, rather than being swallowed whole.
+        assert_eq!(body_share(100), 50);
+        assert!(body_share(2) >= 1, "never zero, or nothing fits and hard_split runs away");
+
+        // And the guarantee holds through an actual cut: the passage gets its
+        // share, so a pathological note is not chopped into fragments.
+        let note = format!("#+title: T\n* {}\n{}\n", para("h", 400), para("w", 300));
+        let cs = packed(&note, 200);
+        for c in &cs {
+            let embedded = format!("{}\n{}", c.embed_heading.as_deref().unwrap(), c.text);
+            assert!(words(&embedded) <= 200);
+        }
+        assert!(
+            cs.iter().all(|c| words(&c.text) >= 50 || cs.len() == 1),
+            "each passage gets the body's share, not a sentence: {:?}",
+            cs.iter().map(|c| words(&c.text)).collect::<Vec<_>>()
+        );
+    }
+
     /// And an ordinary heading is left exactly alone — this must never fire on
     /// a real note.
     #[test]
@@ -5372,9 +5408,9 @@ mod tests {
             .check()
         };
         assert!(at(TOKEN_LIMIT + 1).is_err(), "past what the model reads");
-        assert!(at(MIN_ROOM * 2).is_err(), "swallowed by the floor");
+        assert!(at(MIN_BODY / 2 - 1).is_err(), "too short to be worth embedding");
         assert!(at(TOKEN_LIMIT).is_ok());
-        assert!(at(MIN_ROOM * 2 + 1).is_ok());
+        assert!(at(MIN_BODY / 2).is_ok());
         assert!(Config::default().check().is_ok(), "the defaults must pass their own check");
     }
 
