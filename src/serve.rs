@@ -207,14 +207,17 @@ impl Server {
         let mode = p.get("mode").and_then(|v| v.as_str()).unwrap_or("semantic");
         let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mut out = io::sink();
+        // Both streams sunk: stdout here *is* the JSON-RPC transport, and
+        // stderr is a pipe nobody has correlated with this request.  What the
+        // CLI would print is carried back as `remarks` instead.
+        let mut j = Journal::quiet();
         let mut done = serde_json::Map::new();
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
         let cfg: Config = match p.get("config") {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
-            None => resolve_config(&vault, None)?,
+            None => resolve_config(&vault, None, &mut j)?,
         };
         // Deserializing does not validate; `Config::read` would have, so a
         // policy arriving over the wire must be held to the same bar.
@@ -241,13 +244,18 @@ impl Server {
                 )?;
             }
             let key = (vault.clone(), want.name);
+            // Stamped at the boundary rather than carried as state on the
+            // journal: a flag is something you can forget to clear, a mark is
+            // not.
+            let mark = j.remarks.len();
             // Lend the resident model if this vault's index is already loaded.
             let report = match self.semantic.get_mut(&key) {
-                Some(s) => {
-                    cmd_index(&vault, full, rehash, want, &cfg, &mut out, Some(&mut s.model))?
-                }
-                None => cmd_index(&vault, full, rehash, want, &cfg, &mut out, None)?,
+                Some(s) => cmd_index(&vault, full, rehash, want, &cfg, &mut j, Some(&mut s.model))?,
+                None => cmd_index(&vault, full, rehash, want, &cfg, &mut j, None)?,
             };
+            for r in &mut j.remarks[mark..] {
+                r.target = Some("semantic");
+            }
             // The vectors on disk have moved, so what is held in memory is now
             // wrong — including the baseline, which is derived from them.
             self.refresh(&key)?;
@@ -260,7 +268,8 @@ impl Server {
             // parameters: they are part of what the index *is*, and a second
             // channel for them is a second thing that can disagree.
             let lang = LangConfig { languages: cfg.languages.clone() };
-            prepare_lang(&lang)?;
+            let mark = j.remarks.len();
+            prepare_lang(&lang, &mut j)?;
             if !full {
                 check_config(
                     stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
@@ -271,15 +280,11 @@ impl Server {
                     SERVE_REMEDY,
                 )?;
             }
-            let report = cmd_index_lexical(
-                &vault,
-                full,
-                rehash,
-                &lang,
-                cfg.fold_diacritics,
-                &cfg,
-                &mut out,
-            )?;
+            let report =
+                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut j)?;
+            for r in &mut j.remarks[mark..] {
+                r.target = Some("lexical");
+            }
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
@@ -288,6 +293,13 @@ impl Server {
         }
         fs::create_dir_all(state_dir(&vault))?;
         fs::write(config_path(&state_dir(&vault)), cfg.canonical())?;
+        // One list for the whole run, not a field on each report: two of the
+        // kinds belong to neither index, and an unreadable note under
+        // `mode: "both"` is one problem seen twice.
+        let remarks = j.drain();
+        if !remarks.is_empty() {
+            done.insert("remarks".into(), serde_json::to_value(remarks)?);
+        }
         Ok(serde_json::Value::Object(done))
     }
 

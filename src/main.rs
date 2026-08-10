@@ -77,6 +77,139 @@ fn fault(kind: &'static str, data: serde_json::Value, message: String) -> anyhow
     anyhow!(Fault { kind, message, data })
 }
 
+/// Something that went wrong in a way the run survived.
+///
+/// Shaped after LSP's `Diagnostic` — `kind` is its `code`, `path` and `line` its
+/// position — but delivered differently: these arise from a request the client
+/// is already waiting on, so they ride the reply rather than an unsolicited
+/// notification.
+///
+/// No severity field.  Every one of these is a warning, and an enum with one
+/// inhabitant is a taxonomy pretending to be data; add it when a second severity
+/// actually exists.
+///
+/// The kinds, which are the client's contract:
+///
+/// | kind | when |
+/// |---|---|
+/// | `unreadable-file` | a note could not be read, so it is missing from the index |
+/// | `heading-shortened` | a heading too long to leave its passage room was cut for embedding |
+/// | `index-rebuilt` | an incremental run had to rebuild from scratch, and why |
+/// | `stale-policy` | the cached policy would not parse, so the defaults were used |
+/// | `unknown-configured-language` | a language in the policy is not one the classifier knows |
+/// | `model-downloaded` | a model was fetched, which is why this run took minutes |
+/// | `truncated` | how many remarks of one kind were dropped past the cap |
+#[derive(Serialize, Debug)]
+struct Remark {
+    kind: &'static str,
+    /// Which index this belongs to, stamped by whoever knows — `None` for the
+    /// ones raised before either index is touched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'static str>,
+    /// Vault-relative, as `Chunk::path` is, so a client can address it the same
+    /// way it addresses a hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    message: String,
+}
+
+impl Remark {
+    fn new(kind: &'static str, message: String) -> Self {
+        Remark { kind, target: None, path: None, line: None, message }
+    }
+
+    fn at(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    fn on_line(mut self, line: usize) -> Self {
+        self.line = Some(line);
+        self
+    }
+
+    /// As the CLI shows it: indented under the run's own report, positioned when
+    /// there is a position to give.
+    fn printed(&self) -> String {
+        match (&self.path, self.line) {
+            (Some(p), Some(l)) => format!("  {p}:{l}: {}", self.message),
+            (Some(p), None) => format!("  {p}: {}", self.message),
+            _ => format!("  {}", self.message),
+        }
+    }
+}
+
+/// Past this many of one kind, the rest are counted rather than carried.  An
+/// editor calls `index` on every save, and a vault with four hundred unreadable
+/// notes should not ship four hundred remarks each time.
+const REMARK_CAP: usize = 50;
+
+/// Where a run's prose goes, and what it hands back as data.
+///
+/// Two writers rather than one because the CLI has always had two: the running
+/// report on stdout, warnings on stderr.  `serve` sinks both and reads `remarks`
+/// instead — its stdout *is* the JSON-RPC transport, and its stderr is a pipe
+/// nobody has correlated with a request, so a warning written there is a warning
+/// lost.
+struct Journal {
+    /// The running report.  Written through directly by the indexers, which is
+    /// why it stays public rather than hiding behind a method.
+    out: Box<dyn Write>,
+    warn: Box<dyn Write>,
+    remarks: Vec<Remark>,
+    /// Per kind, including what the cap dropped.
+    counts: std::collections::HashMap<&'static str, usize>,
+}
+
+impl Journal {
+    fn cli() -> Self {
+        Journal::with(Box::new(io::stdout()), Box::new(io::stderr()))
+    }
+
+    /// For `serve`, and for every test: says nothing, keeps everything.
+    fn quiet() -> Self {
+        Journal::with(Box::new(io::sink()), Box::new(io::sink()))
+    }
+
+    fn with(out: Box<dyn Write>, warn: Box<dyn Write>) -> Self {
+        Journal { out, warn, remarks: Vec::new(), counts: Default::default() }
+    }
+
+    /// Print it and record it, so the terminal reads as it always did and a
+    /// client gets the same thing as data.
+    fn remark(&mut self, r: Remark) {
+        let _ = writeln!(self.warn, "{}", r.printed());
+        self.record(r);
+    }
+
+    /// Record without printing, for the few places where the CLI would rather
+    /// show a summary than one line per occurrence.
+    fn record(&mut self, r: Remark) {
+        let seen = self.counts.entry(r.kind).or_insert(0);
+        *seen += 1;
+        if *seen <= REMARK_CAP {
+            self.remarks.push(r);
+        }
+    }
+
+    /// Take the list, with one entry per kind the cap truncated.  Called once,
+    /// where the remarks leave the process.
+    fn drain(&mut self) -> Vec<Remark> {
+        let mut out = std::mem::take(&mut self.remarks);
+        for (kind, n) in std::mem::take(&mut self.counts) {
+            if n > REMARK_CAP {
+                out.push(Remark::new(
+                    "truncated",
+                    format!("{} more `{kind}` not listed", n - REMARK_CAP),
+                ));
+            }
+        }
+        out
+    }
+}
+
 /// An embedding model, with the prefixes it was trained to see.
 ///
 /// The prefixes are part of choosing a model, not a detail: BGE prefixes only
@@ -336,12 +469,16 @@ impl Lid {
 
 /// The loaded classifier, shared for the run.  `FastText` is `Sync`, and loading
 /// costs ~20 ms, which is not worth paying per note.
+fn lid_path() -> PathBuf {
+    xdg_cache().join("org-semantic").join("lid.176.ftz")
+}
+
 fn classifier() -> Result<&'static Lid> {
     static LID: OnceLock<Lid> = OnceLock::new();
     if let Some(l) = LID.get() {
         return Ok(l);
     }
-    let path = xdg_cache().join("org-semantic").join("lid.176.ftz");
+    let path = lid_path();
     if !path.exists() {
         let dir = path.parent().expect("joined path has a parent");
         fs::create_dir_all(dir)?;
@@ -374,10 +511,24 @@ fn classifier() -> Result<&'static Lid> {
 /// Unconditional even when a single `--lang` means nothing will be classified:
 /// the model is still what says whether a language exists, and `index` is
 /// already downloading an embedding model two orders of magnitude larger.
-fn prepare_lang(lang: &LangConfig) -> Result<()> {
+fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
+    // Noted rather than merely printed: over `serve` this is minutes of network
+    // with no reply yet, and afterwards it is the only explanation for why a
+    // five-second index took ninety.  Recorded, not remarked — `classifier`
+    // announces it live on the terminal as it happens.
+    let fetching = !lid_path().exists();
     let lid = classifier()?;
+    if fetching {
+        j.record(Remark::new(
+            "model-downloaded",
+            "the language classifier was fetched before this run could start".into(),
+        ));
+    }
     for l in lang.languages.iter().filter(|l| !lid.knows(l)) {
-        eprintln!("  --lang {l}: not a language the classifier knows");
+        j.remark(Remark::new(
+            "unknown-configured-language",
+            format!("`{l}` is not a language the classifier knows"),
+        ));
     }
     Ok(())
 }
@@ -894,7 +1045,7 @@ fn config_path(dir: &Path) -> PathBuf {
 
 /// The policy to index with: what `--config` names, else what the vault was last
 /// indexed with, else the defaults.
-fn resolve_config(vault: &Path, given: Option<&Path>) -> Result<Config> {
+fn resolve_config(vault: &Path, given: Option<&Path>, j: &mut Journal) -> Result<Config> {
     // A file the caller named is theirs: a typo in it must be an error, not a
     // setting that quietly does nothing.
     if let Some(p) = given {
@@ -907,7 +1058,10 @@ fn resolve_config(vault: &Path, given: Option<&Path>) -> Result<Config> {
     if cached.exists() {
         match Config::read(&cached) {
             Ok(c) => return Ok(c),
-            Err(e) => eprintln!("  ignoring the cached policy ({e}); using the defaults"),
+            Err(e) => j.remark(Remark::new(
+                "stale-policy",
+                format!("ignoring the cached policy ({e}); using the defaults"),
+            )),
         }
     }
     Ok(Config::default())
@@ -2576,27 +2730,33 @@ fn corrupt_index(chunks: usize, vectors: usize) -> anyhow::Error {
 /// The last case is the one worth being strict about: `chunks.json` and
 /// `vectors.f32` are positionally coupled, so a mismatch does not fail loudly —
 /// it silently returns the wrong note for every query.
-fn load_index(dir: &Path, m: &Model) -> Option<LoadedIndex> {
+fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
     // A different model's vectors are not comparable with this one's, and a
     // different dimension cannot even be read, so either means a full rebuild.
     if manifest.version != INDEX_VERSION || manifest.model != m.name || manifest.dim != m.dim {
-        eprintln!(
-            "  existing index was built with {} ({}d); rebuilding for {} ({}d)",
-            manifest.model, manifest.dim, m.name, m.dim
-        );
+        j.remark(Remark::new(
+            "index-rebuilt",
+            format!(
+                "existing index was built with {} ({}d); rebuilding for {} ({}d)",
+                manifest.model, manifest.dim, m.name, m.dim
+            ),
+        ));
         return None;
     }
     let chunks: Vec<Chunk> =
         serde_json::from_slice(&fs::read(dir.join("chunks.json")).ok()?).ok()?;
     let raw = fs::read(dir.join("vectors.f32")).ok()?;
     if raw.len() != chunks.len() * m.dim * 4 {
-        eprintln!(
-            "  index is inconsistent ({} chunks, {} vectors); rebuilding from scratch",
-            chunks.len(),
-            raw.len() / (m.dim * 4)
-        );
+        j.remark(Remark::new(
+            "index-rebuilt",
+            format!(
+                "index is inconsistent ({} chunks, {} vectors); rebuilding from scratch",
+                chunks.len(),
+                raw.len() / (m.dim * 4)
+            ),
+        ));
         return None;
     }
     let vectors: Vec<f32> =
@@ -2680,10 +2840,27 @@ struct Scan {
     stale: Vec<Stale>,
     /// Recorded before, gone from disk now.
     dropped: Vec<String>,
+    /// On disk but unreadable, with the reason.  Carried out rather than
+    /// announced here: this is the one filesystem-only helper in the file, and
+    /// the caller is the one that knows which index it is scanning for.
+    unreadable: Vec<(String, String)>,
     by_stamp: usize,
     by_hash: usize,
     changed: usize,
     new: usize,
+}
+
+/// A note on disk that could not be read, so it is missing from the index the
+/// caller is about to write.  Phrased once for the two paths that hit it.
+fn unreadable_note(path: &str, why: &str) -> Remark {
+    Remark::new("unreadable-file", format!("could not be read, so it is not indexed: {why}"))
+        .at(path)
+}
+
+fn report_unreadable(scan: &Scan, j: &mut Journal) {
+    for (path, why) in &scan.unreadable {
+        j.remark(unreadable_note(path, why));
+    }
 }
 
 /// What a previous run recorded about the notes it saw: a content hash and a
@@ -2702,6 +2879,7 @@ fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: b
         reuse: Vec::new(),
         stale: Vec::new(),
         dropped: Vec::new(),
+        unreadable: Vec::new(),
         by_stamp: 0,
         by_hash: 0,
         changed: 0,
@@ -2730,7 +2908,7 @@ fn scan_vault(vault: &Path, files: &[PathBuf], prev: Option<Seen<'_>>, rehash: b
         let text = match fs::read_to_string(f) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("skipping {}: {e}", f.display());
+                sc.unreadable.push((path.clone(), e.to_string()));
                 continue;
             }
         };
@@ -2794,7 +2972,7 @@ fn cmd_index_lexical(
     lang: &LangConfig,
     fold: bool,
     cfg: &Config,
-    out: &mut dyn Write,
+    j: &mut Journal,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
     let mut files = Vec::new();
@@ -2846,14 +3024,19 @@ fn cmd_index_lexical(
                     Target::Lexical,
                     &LEXICAL_BUDGET,
                 )),
-                Err(e) => eprintln!("skipping {}: {e}", f.display()),
+                Err(e) => j.remark(unreadable_note(&path, &e.to_string())),
             }
         }
+    } else {
+        // Reported here rather than beside the scan, because a rebuild re-reads
+        // every note above and would otherwise name the same broken file twice
+        // — which is what the two `eprintln!`s this replaced used to do.
+        report_unreadable(&scan, j);
     }
 
     if old.is_some() {
         writeln!(
-            out,
+            j.out,
             "{} org files · {} by stamp · {} restamped · {} changed · {} new · {} removed",
             files.len(),
             scan.by_stamp,
@@ -2863,7 +3046,7 @@ fn cmd_index_lexical(
             scan.dropped.len()
         )?;
     } else {
-        writeln!(out, "{} org files", files.len())?;
+        writeln!(j.out, "{} org files", files.len())?;
     }
 
     let mut report = IndexReport {
@@ -2876,12 +3059,19 @@ fn cmd_index_lexical(
         ..Default::default()
     };
     if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
-        writeln!(out, "nothing changed; lexical index left as it is")?;
+        writeln!(j.out, "nothing changed; lexical index left as it is")?;
         report.unchanged = true;
         return Ok(report);
     }
     if rebuilding && old.is_some() {
-        writeln!(out, "  analyzer changed ({}); rebuilding", analyzer.key())?;
+        // Stays on the report stream, where it has always been, *and* is
+        // recorded: a client that asked for an incremental run and paid for a
+        // full one is owed the reason.
+        writeln!(j.out, "  analyzer changed ({}); rebuilding", analyzer.key())?;
+        j.record(Remark::new(
+            "index-rebuilt",
+            format!("the analyzer changed ({}), so every note was re-indexed", analyzer.key()),
+        ));
     }
 
     lexical::sync(&dir, &chunks, &scan.dropped, rebuilding, &analyzer)?;
@@ -2896,7 +3086,7 @@ fn cmd_index_lexical(
         })?,
     )?;
     writeln!(
-        out,
+        j.out,
         "lexical index: {} chunks written in {:.2}s",
         chunks.len(),
         t0.elapsed().as_secs_f64()
@@ -2945,7 +3135,7 @@ fn cmd_index(
     rehash: bool,
     m: &Model,
     cfg: &Config,
-    out: &mut dyn Write,
+    j: &mut Journal,
     resident: Option<&mut TextEmbedding>,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
@@ -2954,15 +3144,17 @@ fn cmd_index(
     files.sort();
 
     let dir = semantic_dir(vault, m);
-    let old = if full { None } else { load_index(&dir, m) };
+    let old = if full { None } else { load_index(&dir, m, j) };
 
     let scan = scan_vault(vault, &files, old.as_ref().map(|ix| (&ix.files, &ix.stamps)), rehash);
+    report_unreadable(&scan, j);
     let Scan {
         hashes,
         stamps,
         reuse,
         stale,
         dropped,
+        unreadable: _,
         by_stamp,
         by_hash,
         changed: changed_files,
@@ -3066,19 +3258,23 @@ fn cmd_index(
 
     if old.is_some() {
         writeln!(
-            out,
+            j.out,
             "{} org files · {by_stamp} by stamp · {by_hash} restamped · \
              {changed_files} changed · {new_files} new · {dropped} removed",
             files.len()
         )?;
     } else {
-        writeln!(out, "{} org files", files.len())?;
+        writeln!(j.out, "{} org files", files.len())?;
     }
     if resplit > 0 {
+        // Printed, never recorded: `IndexReport.resplit` already carries this
+        // number, so a remark would send the client the same fact twice.
+        //
         // The budget that actually divided them, not the model's ceiling: those
         // were the same number when a single hardcoded limit did both jobs, and
         // this went on printing 512 after the budget became policy at 350.
-        eprintln!(
+        let _ = writeln!(
+            j.warn,
             "  {resplit} sections were divided to fit the {}-token budget",
             cfg.chunk.of(Target::Semantic)
         );
@@ -3086,22 +3282,40 @@ fn cmd_index(
     // Rare enough to be worth naming when it happens: the heading was too long
     // to leave the passage room, so it was cut and the note is embedded under a
     // shortened path.  Silence here used to mean the body was truncated instead.
-    let cut: Vec<&Chunk> = chunks.iter().filter(|c| c.embed_heading.is_some()).collect();
-    if !cut.is_empty() {
-        let mut seen: Vec<(&str, usize)> = Vec::new();
-        for c in &cut {
-            let key = (c.path.as_str(), c.heading_line);
-            if !seen.contains(&key) {
-                seen.push(key);
-            }
+    //
+    // One heading may hold several passages, so the pairs are deduped — by a set
+    // rather than a scan, since this runs over every chunk of every incremental
+    // run to produce three lines.
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    let mut once = std::collections::HashSet::new();
+    for c in chunks.iter().filter(|c| c.embed_heading.is_some()) {
+        let key = (c.path.as_str(), c.heading_line);
+        if once.insert(key) {
+            seen.push(key);
         }
-        eprintln!(
+    }
+    if !seen.is_empty() {
+        // The terminal wants a summary and three examples; a client wants the
+        // list, so the two are produced separately rather than one from the
+        // other.
+        let _ = writeln!(
+            j.warn,
             "  {} heading{} too long to leave the passage room, shortened for embedding:",
             seen.len(),
             if seen.len() == 1 { "" } else { "s" }
         );
         for (path, line) in seen.iter().take(3) {
-            eprintln!("    {path}:{line}");
+            let _ = writeln!(j.warn, "    {path}:{line}");
+        }
+        for (path, line) in seen {
+            j.record(
+                Remark::new(
+                    "heading-shortened",
+                    "heading too long to leave the passage room; shortened for embedding".into(),
+                )
+                .at(path)
+                .on_line(line),
+            );
         }
     }
     // The carried count is what makes a large note cheap to edit, so it is
@@ -3110,7 +3324,7 @@ fn cmd_index(
     let reused_here =
         if carried > 0 { format!(" · {carried} unchanged within them") } else { String::new() };
     writeln!(
-        out,
+        j.out,
         "{} chunks · {} to embed{reused_here} · scanned in {:.2}s",
         chunks.len(),
         pending.len(),
@@ -3137,13 +3351,13 @@ fn cmd_index(
     // line numbers moved and its hash is new, and both belong on disk.
     let restamped = by_hash > 0 || old.as_ref().is_some_and(|ix| ix.stamps.len() != stamps.len());
     if pending.is_empty() && stale.is_empty() && dropped == 0 && !restamped && old.is_some() {
-        writeln!(out, "nothing changed; index left as it is")?;
+        writeln!(j.out, "nothing changed; index left as it is")?;
         report.unchanged = true;
         return Ok(report);
     }
 
     if pending.is_empty() {
-        writeln!(out, "no new text to embed; rewriting the manifest")?;
+        writeln!(j.out, "no new text to embed; rewriting the manifest")?;
     } else {
         // A resident process already holds the model; loading a second copy
         // would cost the 0.12–0.64 s this whole design exists to avoid.
@@ -3153,7 +3367,7 @@ fn cmd_index(
             Some(m) => m,
             None => {
                 owned = Some(model_with(m.which.clone(), None, false)?);
-                writeln!(out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
+                writeln!(j.out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
                 owned.as_mut().expect("just set")
             }
         };
@@ -3198,7 +3412,7 @@ fn cmd_index(
         }
         eprintln!();
         writeln!(
-            out,
+            j.out,
             "embedded {} chunks in {:.1}s ({:.0}/s)",
             texts.len(),
             t2.elapsed().as_secs_f64(),
@@ -3208,7 +3422,7 @@ fn cmd_index(
 
     let written = save_index(&dir, m, cfg, &chunks, &vectors, hashes, stamps)?;
     writeln!(
-        out,
+        j.out,
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
         dir.display(),
         written as f64 / 1e6,
@@ -4046,7 +4260,8 @@ fn main() -> Result<()> {
                 None => model_named(DEFAULT_MODEL)?,
             };
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = resolve_config(vault, given.as_deref())?;
+            let mut j = Journal::cli();
+            let cfg = resolve_config(vault, given.as_deref(), &mut j)?;
             let lang = LangConfig { languages: cfg.languages.clone() };
             // The policy last indexed under, kept only so the error can say
             // which setting moved rather than that one did.
@@ -4073,13 +4288,12 @@ fn main() -> Result<()> {
                     )?;
                 }
             }
-            let mut out = io::stdout();
             if both || !lexical {
-                cmd_index(vault, full, rehash, model, &cfg, &mut out, None)?;
+                cmd_index(vault, full, rehash, model, &cfg, &mut j, None)?;
             }
             if both || lexical {
-                prepare_lang(&lang)?;
-                cmd_index_lexical(vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut out)?;
+                prepare_lang(&lang, &mut j)?;
+                cmd_index_lexical(vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut j)?;
             }
             // Cached so a later run need not restate it.
             fs::create_dir_all(state_dir(vault))?;
@@ -4145,9 +4359,10 @@ fn main() -> Result<()> {
             // `--config` here is a dry run: try a policy without storing it or
             // paying for a reindex to find out what it would do.
             let given = flag_value(&args, 3, "--config").map(PathBuf::from);
-            let cfg = resolve_config(vault, given.as_deref())?;
+            let mut j = Journal::cli();
+            let cfg = resolve_config(vault, given.as_deref(), &mut j)?;
             let lang = LangConfig { languages: cfg.languages.clone() };
-            prepare_lang(&lang)?;
+            prepare_lang(&lang, &mut j)?;
             let target = if args.iter().skip(3).any(|a| a == "--lexical") {
                 Target::Lexical
             } else {
@@ -4660,6 +4875,12 @@ mod tests {
         semantic_dir(v, model_named(DEFAULT_MODEL).unwrap())
     }
 
+    /// `load_index` narrates why it is rebuilding; no test asserts on that, so
+    /// they all pass a journal that says nothing.
+    fn loaded(dir: &Path, m: &Model) -> Option<LoadedIndex> {
+        load_index(dir, m, &mut Journal::quiet())
+    }
+
     fn unsplit(_: &str) -> usize {
         0
     }
@@ -4769,14 +4990,15 @@ mod tests {
         seed_real(&v, &[a.as_str()]);
         let m = model_named(DEFAULT_MODEL).unwrap();
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        let old_hash = load_index(&sem(&v), m).unwrap().files[&a];
+        let old_hash = loaded(&sem(&v), m).unwrap().files[&a];
 
         // Trailing blank lines: the file's bytes differ, its chunking does not.
         let abs = v.join(&a);
         let body = fs::read_to_string(&abs).unwrap();
         fs::write(&abs, format!("{body}\n\n")).unwrap();
 
-        let r = cmd_index(&v, false, false, m, &Config::default(), &mut io::sink(), None).unwrap();
+        let r = cmd_index(&v, false, false, m, &Config::default(), &mut Journal::quiet(), None)
+            .unwrap();
 
         assert_eq!(r.embedded, 0, "no passage changed, so none may be embedded");
         assert!(r.carried > 0, "its passages must be carried over, not rebuilt");
@@ -4786,7 +5008,7 @@ mod tests {
             "carried vectors must be copied verbatim"
         );
         assert_ne!(
-            load_index(&sem(&v), m).unwrap().files[&a],
+            loaded(&sem(&v), m).unwrap().files[&a],
             old_hash,
             "the new content hash must reach the manifest, or this repeats every run"
         );
@@ -4806,8 +5028,7 @@ mod tests {
         }
         fs::write(&abs, &body).unwrap();
         seed_real(&v, &[a.as_str()]);
-        let seeded =
-            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().chunks.len();
+        let seeded = loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().chunks.len();
 
         // Insert at the top: every line number below it moves, but a line is
         // metadata and no passage's text changed.
@@ -4818,7 +5039,7 @@ mod tests {
         let text = fs::read_to_string(&abs).unwrap();
         let fresh =
             chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic, &UNSPLIT);
-        let old = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let old = loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         // Matched on the stored hash, as the indexer does — the old index no
         // longer carries the text to compare against.
         let cached: std::collections::HashMap<u64, usize> =
@@ -4846,13 +5067,13 @@ mod tests {
             false,
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
-            &mut io::sink(),
+            &mut Journal::quiet(),
             None,
         )
         .unwrap();
 
-        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap())
-            .expect("index should still load");
+        let ix =
+            loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
         assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
         assert_eq!(ix.chunks[0].path, a);
         assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
@@ -4875,7 +5096,7 @@ mod tests {
             false,
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
-            &mut io::sink(),
+            &mut Journal::quiet(),
             None,
         )
         .unwrap();
@@ -4902,7 +5123,7 @@ mod tests {
         // than read: its vectors answer a different question.
         let other = model_named("e5-large").unwrap();
         assert_ne!(other.dim, model_named(DEFAULT_MODEL).unwrap().dim);
-        assert!(load_index(&state_dir(&v), other).is_none());
+        assert!(loaded(&state_dir(&v), other).is_none());
     }
 
     #[test]
@@ -5047,6 +5268,51 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"exclude_tag":["x"]}"#).is_err());
     }
 
+    /// A note that cannot be read is missing from the index, and silence about
+    /// that is the difference between "no results" and "no results *yet*".
+    #[test]
+    fn a_note_that_cannot_be_read_is_reported_against_its_vault_relative_path() {
+        let v = scratch("unreadable");
+        note(&v, "fine");
+        // Not UTF-8, which is what `read_to_string` refuses.
+        fs::write(v.join("broken.org"), [0xffu8, 0xfe, 0x00]).unwrap();
+        let mut files = Vec::new();
+        org_files(&v, &mut files).unwrap();
+        files.sort();
+
+        let scan = scan_vault(&v, &files, None, false);
+        let mut j = Journal::quiet();
+        report_unreadable(&scan, &mut j);
+        let rs = j.drain();
+        assert_eq!(rs.len(), 1, "one unreadable note, one remark: {rs:?}");
+        assert_eq!(rs[0].kind, "unreadable-file");
+        // Vault-relative, the way a hit is addressed — not the absolute path
+        // that happened to be on hand.
+        assert_eq!(rs[0].path.as_deref(), Some("broken.org"));
+        assert!(scan.stale.iter().any(|s| s.path == "fine.org"), "the rest is still scanned");
+    }
+
+    /// An editor calls `index` on every save, so a vault full of one problem
+    /// must not ship the same problem hundreds of times per keystroke.
+    #[test]
+    fn a_flood_of_one_kind_is_counted_rather_than_carried() {
+        let mut j = Journal::quiet();
+        for i in 0..REMARK_CAP + 7 {
+            j.remark(Remark::new("unreadable-file", "no".into()).at(format!("{i}.org")));
+        }
+        j.remark(Remark::new("stale-policy", "once".into()));
+        let rs = j.drain();
+        assert_eq!(rs.iter().filter(|r| r.kind == "unreadable-file").count(), REMARK_CAP);
+        assert_eq!(rs.iter().filter(|r| r.kind == "stale-policy").count(), 1, "caps are per kind");
+        let cut: Vec<&Remark> = rs.iter().filter(|r| r.kind == "truncated").collect();
+        assert_eq!(cut.len(), 1);
+        assert!(
+            cut[0].message.contains("7 more"),
+            "says how many were dropped: {}",
+            cut[0].message
+        );
+    }
+
     #[test]
     fn an_unreadable_cached_policy_falls_back_rather_than_bricking() {
         let v = scratch("stale-policy");
@@ -5054,13 +5320,18 @@ mod tests {
         // Whatever a schema change leaves behind: our own file, no longer
         // parseable.  The key is not a former name — nothing knows about those.
         fs::write(config_path(&state_dir(&v)), r#"{"from_an_older_schema":1}"#).unwrap();
-        let cfg = resolve_config(&v, None).expect("a stale cache must not brick every command");
+        let mut j = Journal::quiet();
+        let cfg =
+            resolve_config(&v, None, &mut j).expect("a stale cache must not brick every command");
         assert_eq!(cfg, Config::default());
+        // Falling back silently would leave someone wondering why their policy
+        // stopped applying, so the fallback is reported rather than assumed.
+        assert_eq!(j.drain().iter().map(|r| r.kind).collect::<Vec<_>>(), ["stale-policy"]);
 
         // A file the caller named is a different matter: that is their typo.
         let named = v.join("theirs.json");
         fs::write(&named, r#"{"from_an_older_schema":1}"#).unwrap();
-        assert!(resolve_config(&v, Some(&named)).is_err());
+        assert!(resolve_config(&v, Some(&named), &mut j).is_err());
     }
 
     #[test]
@@ -5297,7 +5568,7 @@ mod tests {
         let v = scratch("roundtrip");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
-        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let ix = loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(ix.chunks.len(), 1);
         assert_eq!(ix.vectors.len(), model_named(DEFAULT_MODEL).unwrap().dim);
         assert_eq!(ix.by_path.get(&a).map(Vec::len), Some(1));
@@ -5313,7 +5584,7 @@ mod tests {
         bytes.truncate(bytes.len() - 4);
         fs::write(&f, bytes).unwrap();
         assert!(
-            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
+            loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
             "positional coupling means a mismatch returns wrong answers, not errors"
         );
     }
@@ -5327,7 +5598,7 @@ mod tests {
         let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
         m["model"] = serde_json::Value::String("SomeOtherModel".into());
         fs::write(&f, serde_json::to_vec(&m).unwrap()).unwrap();
-        assert!(load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none());
+        assert!(loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none());
     }
 
     #[test]
@@ -5345,8 +5616,7 @@ mod tests {
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
-        let old_stamp =
-            load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
+        let old_stamp = loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap().stamps[&a];
         let abs = v.join(&a);
 
         // Move mtime without touching content.
@@ -5360,12 +5630,12 @@ mod tests {
             false,
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
-            &mut io::sink(),
+            &mut Journal::quiet(),
             None,
         )
         .unwrap();
 
-        let ix = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
+        let ix = loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         assert_eq!(
             fs::read(sem(&v).join("vectors.f32")).unwrap(),
             before,

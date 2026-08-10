@@ -311,6 +311,51 @@ taking the message apart.
 It never names a command-line flag, because the person reading it in an editor
 has no command line to type one on.
 
+*** Warnings that do not stop the run
+:PROPERTIES:
+:CUSTOM_ID: remarks
+:END:
+
+Indexing can go wrong in ways it survives: a note that will not read, a heading
+too long to leave its passage room, an incremental run that had to rebuild from
+scratch. On the terminal these go to standard error. There is no terminal behind
+=serve=, so =index= returns them as =remarks=:
+
+#+begin_src json
+{ "semantic": { "files": 951, "chunks": 6522, "embedded": 3 },
+  "lexical":  { "files": 951, "chunks": 5809 },
+  "remarks": [
+    { "kind": "unreadable-file", "target": "lexical",
+      "path": "03 Literature review/notes.org",
+      "message": "could not be read, so it is not indexed: stream did not contain valid UTF-8" },
+    { "kind": "heading-shortened", "target": "semantic",
+      "path": "01 Projects/plan.org", "line": 672,
+      "message": "heading too long to leave the passage room; shortened for embedding" } ] }
+#+end_src
+
+The shape is LSP's =Diagnostic= --- a kind, a position, a message --- and =path=
+is vault-relative, so it addresses a note exactly as a hit does. There is no
+severity: every one of these is a warning.
+
+| =kind=                        | what it tells you                                        |
+|-------------------------------+----------------------------------------------------------|
+| =unreadable-file=             | that note is *missing from the index*, not merely absent from your results |
+| =heading-shortened=           | the section is filed under a cut heading path            |
+| =index-rebuilt=               | you asked for an incremental run and paid for a full one, and why |
+| =stale-policy=                | the cached policy would not parse, so the defaults were used |
+| =unknown-configured-language= | a language in your policy is not one the classifier knows |
+| =model-downloaded=            | why a five-second index took ninety                      |
+| =truncated=                   | how many of one kind were left out                       |
+
+The key is missing when there is nothing to report. Past fifty of any one kind
+the rest are counted rather than listed, since an editor that reindexes on every
+save should not carry the same four hundred problems each time.
+
+=remarks= is a list for the whole run, not one per index: two of the kinds arise
+before either index is touched, and a note that will not read is one problem even
+when both indexes trip over it. Where it matters, =target= says which index a
+remark came from.
+
 *Reindexing happens in-process too.* Spawning a CLI for it would pay the model
 load again, which is the cost the resident process exists to avoid --- so the
 loaded model is lent to the indexer. Re-indexing a vault after saving one note
