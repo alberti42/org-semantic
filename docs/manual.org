@@ -699,8 +699,8 @@ are: a typo that does nothing looks exactly like a setting that does nothing.
 =chunks --config= applies a policy *without* storing it or reindexing, so you
 can see what a change would do before paying for it. =chunks= previews the
 semantic index and =chunks --lexical= the word index, faithfully in each case:
-only the semantic preview re-splits at 512 tokens, only the lexical one carries a
-language. It says which one it is showing.
+each is packed in its own unit, and only the lexical one carries a language. It
+says which one it is showing.
 
 Over JSON-RPC the =index= method takes the same policy as a =config= object, so
 an editor can keep its own source of truth in whatever format suits it --- a
@@ -893,18 +893,30 @@ fraction of the data and usually finds the best match. They are built for
 collections a thousand times bigger than a note archive, and they trade away
 exactness to save memory this problem has to spare.
 
-*Chunked by section, then paragraph, never past 512 tokens.* A /token/ is what
-the model actually reads --- roughly a word, or a fragment of one --- and 512 of
-them is all it can take at once. The limit is therefore counted in tokens rather
-than characters: a character budget looks equivalent but is not, since this
-corpus runs 2.0 characters per token in LaTeX-heavy notes against 4.0 in prose.
-Get it wrong and the embedding library simply drops whatever did not fit, without
-a word. Consecutive pieces overlap by one paragraph so an idea
-cut at a boundary is still embedded whole somewhere.
+*Chunked by section, then by paragraph, to a budget counted in tokens.* A
+/token/ is what the model actually reads --- roughly a word, or a fragment of one
+--- and 512 of them is all it can take at once. The budget is smaller than that
+ceiling on purpose, 350 by default: a passage should be small enough that a hit
+points at something specific.
 
-*Results are grouped per note.* A note that answers a query tends to answer it in
-several places, so a flat list of the best passages can spend all ten slots on
-one document and never mention the other nine notes that also match.
+Counted in tokens rather than characters because the two are not
+interchangeable: this corpus runs 2.0 characters per token in LaTeX-heavy notes
+against 4.0 in prose, so one figure in characters means different amounts of
+context in different notes. Overshoot the model's limit and the embedding library
+drops whatever did not fit, without a word --- and what it drops is the end.
+
+The heading is prepended to every passage before it is embedded, so it comes out
+of the budget first. A heading path so long that nothing would be left is
+shortened, and the note named on standard error; the passage is what has to
+survive. Consecutive pieces overlap by one paragraph, so an idea cut at a
+boundary is still embedded whole somewhere.
+
+*Results are grouped per outline node, and bounded per note.* A note that answers
+a query tends to answer it in several places, so a flat list of the best passages
+could spend every slot on one document. Two caps prevent that --- how many notes,
+and how many passages from each --- while the result itself is the section a
+passage sits in rather than the file it lives in, which is the difference between
+a useful answer and "meetings.org" nine times.
 
 *The index belongs to the vault it describes*, so pointing org-semantic at
 another vault is a different argument, not a different configuration.
@@ -918,8 +930,9 @@ updates incrementally, and speaks JSON --- over =--json= for one-shot calls and
 over =serve= for a caller holding a session open.
 
 *The Emacs package is the open piece, and is coming.* Everything it needs
-exists: structured hits with an absolute path, a line and an =:ID:=, and a
-resident process that answers in ~10 ms. What is missing is the client itself ---
+exists: structured hits carrying the note, the line its heading starts on, the
+lines the passage came from and the passage itself, and a resident process that
+answers in ~10 ms. What is missing is the client itself ---
 no elisp is written yet, so for now jumping to a hit is a manual =find-file=.
 
 The rest of the roadmap is org depth rather than more formats: honouring
