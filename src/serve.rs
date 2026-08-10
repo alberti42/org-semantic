@@ -54,7 +54,7 @@ impl Server {
         let key = (vault.to_path_buf(), m.name);
         if !self.semantic.contains_key(&key) {
             let dir = semantic_dir(vault, m);
-            let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
+            let chunks: Vec<Chunk> = read_chunks(&dir, m)?;
             let raw = fs::read(dir.join("vectors.f32"))?;
             if raw.len() != chunks.len() * m.dim * 4 {
                 return Err(anyhow!(
@@ -284,7 +284,7 @@ impl Server {
     fn refresh(&mut self, key: &(PathBuf, &'static str)) -> Result<()> {
         let Some(s) = self.semantic.get_mut(key) else { return Ok(()) };
         let dir = semantic_dir(&key.0, s.which);
-        let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
+        let chunks: Vec<Chunk> = read_chunks(&dir, s.which)?;
         let raw = fs::read(dir.join("vectors.f32"))?;
         let vectors: Vec<f32> =
             raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();

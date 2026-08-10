@@ -204,13 +204,14 @@ Methods:
 
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
-an absolute =file=, the =heading= path, the =line=, and the =:ID:= when there is
-one.
+an absolute =file=, the =heading= path, the =headingLine=, the passage's own
+=startLine=/=endLine=, and the =:ID:= when there is one.
 
-*The address of a hit is =path= and =line=, and there is no second way to go.*
+*The address of a hit is =path= and =headingLine=, and there is no second way
+to go.*
 =path= is relative to the vault root --- the directory holding =.org-semantic=
 --- so it names the note uniquely and survives the whole tree being moved;
-=file= is the same thing made absolute, for convenience. =line= is a line in the
+=file= is the same thing made absolute, for convenience. =headingLine= is a line in the
 *real file*, counted over the raw text: the parser drops drawers, keywords and
 block bodies from what it indexes, but never from what it counts, so a fifteen
 line source block collapsed to =[src bash]= shifts nothing.
@@ -232,10 +233,11 @@ same range, for a client that would rather read or highlight it itself. A note
 that has moved since it was indexed yields an empty =text= rather than stale
 lines.
 
-One consequence of =line= naming the section: a section long enough to be
-divided yields several passages reporting the same =path= and =line=. They are
-distinct hits with distinct =text= at one address, which is the right answer
-when the jump is to the section.
+One consequence of =headingLine= naming the section: a section long enough to be
+divided yields several passages reporting the same =path= and =headingLine=.
+They remain distinct hits, and =startLine=/=endLine= separate them --- so you can
+jump to the passage that matched rather than to the top of the section it sits
+in.
 
 One trap if you build an org link to the heading rather than jumping yourself:
 =org-link-search= prompts /"Create new heading?"/ when it misses, which over

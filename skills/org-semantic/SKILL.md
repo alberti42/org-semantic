@@ -52,7 +52,8 @@ org-semantic search <vault> 'tag:Literature dir:"03 Reviews" quantum error corre
 Each hit is an object:
 
 ```json
-{ "score": 0.883, "z": 2.1, "file": "/abs/path/note.org", "line": 672,
+{ "score": 0.883, "z": 2.1, "file": "/abs/path/note.org",
+  "headingLine": 672, "startLine": 674, "endLine": 691,
   "id": "f73825a4-…", "title": "…", "section": "…", "tags": ["Literature"],
   "text": "the passage itself" }
 ```
@@ -67,8 +68,9 @@ Each hit is an object:
   `line` is where it starts. In a vault that keeps three hundred meetings in one
   `meetings.org`, `title` is the file's and tells you nothing — `section` and
   `heading` are what locate the hit.
-- **The address of a hit is `file` (or `path`) and `line`.** `line` is the line
-  of the heading that owns the passage, so it names the section. `heading` is
+- **The address of a hit is `file` (or `path`) and `headingLine`.** That is the
+  line the owning heading starts on, so it names the section; `startLine` and
+  `endLine` bound the passage itself inside it. `heading` is
   the outline path, for saying *where* a hit is in prose. `id` is an org-id only
   when the note carries one, and it is the *nearest enclosing* node's — in a
   large file every hit may report the same one, so never use it as an address.

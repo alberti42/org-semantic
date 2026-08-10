@@ -169,10 +169,13 @@ struct Chunk {
     id: Option<String>,
     /// Heading path, e.g. "Note title > Section > Subsection".
     heading: String,
-    /// The line the owning heading starts on, 1-based and in the real file —
-    /// the counter advances over lines the parser drops, so a collapsed source
-    /// block shifts nothing.  This is the address a client jumps to.
-    line: usize,
+    /// Where the owning heading starts: 1-based, in the real file, and the
+    /// address a client jumps to.  The line counter advances over lines the
+    /// parser drops, so a collapsed source block shifts nothing.
+    ///
+    /// Named in full because `line` was read as "the line of the hit" — which
+    /// it never was.  Every passage of one section reports the same value.
+    heading_line: usize,
     /// The raw-file lines this passage was built from, inclusive.
     ///
     /// Wider than the text: a `#+begin_src` collapsed to `[src bash]` still
@@ -1151,7 +1154,7 @@ fn chunk_file(
                  title: &str,
                  file_tags: &[String],
                  id: &Option<String>,
-                 line: usize,
+                 heading_line: usize,
                  lang: &str| {
         if paras.is_empty() {
             return;
@@ -1185,7 +1188,7 @@ fn chunk_file(
                 path: rel.to_string(),
                 id: id.clone(),
                 heading: heading.clone(),
-                line,
+                heading_line,
                 start_line: piece.start,
                 end_line: piece.end,
                 tags: tags.clone(),
@@ -1870,14 +1873,14 @@ mod lexical {
         /// self-contained; bump it whenever the schema changes, so a stale index
         /// is discarded rather than opened against the wrong schema.
         pub fn key(&self) -> String {
-            format!("v2 langs={} fold={}", self.langs.join("+"), self.fold)
+            format!("v3 langs={} fold={}", self.langs.join("+"), self.fold)
         }
 
         /// Rebuild the analyzer from a stored key.  This is what lets the
         /// lexical index be searched without `chunks.json`: the languages come
         /// back from the index's own metadata rather than from the corpus.
         pub fn from_key(key: &str) -> Option<Self> {
-            let rest = key.strip_prefix("v2 ")?;
+            let rest = key.strip_prefix("v3 ")?;
             let (langs, fold) = rest.split_once(" fold=")?;
             Some(Analyzer {
                 langs: langs.strip_prefix("langs=")?.split('+').map(String::from).collect(),
@@ -2202,7 +2205,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 5;
+const INDEX_VERSION: u32 = 6;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -2284,6 +2287,36 @@ struct LoadedIndex {
     files: std::collections::BTreeMap<String, u64>,
     stamps: std::collections::BTreeMap<String, Stamp>,
     by_path: std::collections::HashMap<String, Vec<usize>>,
+}
+
+/// Read a model's chunk table, refusing one written under another layout.
+///
+/// `load_index` guards the *indexing* path; this guards the searching ones,
+/// which used to parse `chunks.json` straight and, after a field was renamed,
+/// failed with `missing field \`heading_line\`` — true, and useless. A format
+/// change should say it is one.
+fn read_chunks(dir: &Path, m: &Model) -> Result<Vec<Chunk>> {
+    let manifest: Manifest = stored_hash(&dir.join("manifest.json"))
+        .ok_or_else(|| anyhow!("no index in {} — run `index`", dir.display()))?;
+    if manifest.version != INDEX_VERSION {
+        return Err(anyhow!(
+            "the index in {} was written under layout v{} and this is v{INDEX_VERSION} — \
+             rebuild it with `index --full`",
+            dir.display(),
+            manifest.version
+        ));
+    }
+    if manifest.model != m.name || manifest.dim != m.dim {
+        return Err(anyhow!(
+            "the index in {} belongs to {} ({}d), not {} ({}d)",
+            dir.display(),
+            manifest.model,
+            manifest.dim,
+            m.name,
+            m.dim
+        ));
+    }
+    Ok(serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?)
 }
 
 /// Read a previous index, or `None` when there is none, when it was written by
@@ -2738,13 +2771,13 @@ fn cmd_index(
         // the packer — and counted once however many pieces it became.
         let (mut prev_line, mut counted) = (None, false);
         for c in cs {
-            if prev_line == Some(c.line) {
+            if prev_line == Some(c.heading_line) {
                 if !counted {
                     resplit += 1;
                     counted = true;
                 }
             } else {
-                prev_line = Some(c.line);
+                prev_line = Some(c.heading_line);
                 counted = false;
             }
             // The hash *is* the identity now.  It used to be confirmed against
@@ -3076,7 +3109,10 @@ fn hits_json(
                 "z": base.map(|b| b.z(*score)),
                 "path": c.path,
                 "file": vault.join(&c.path),
-                "line": c.line,
+                // The heading's line, which is what a client jumps to.  Named
+                // for what it is: plain `line` read as "the line of the hit",
+                // which it never was.
+                "headingLine": c.heading_line,
                 // The lines this passage was built from, so a client can read
                 // or highlight the region itself rather than trusting `text`.
                 "startLine": c.start_line,
@@ -3122,7 +3158,7 @@ fn report(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<
         // as the title itself for a note that has no headings, and locates the
         // hit inside a file that holds hundreds of them.
         println!("\n{}  {}", rank(best), g.heading);
-        println!("       {}:{}", g.path, c.line);
+        println!("       {}:{}", g.path, c.heading_line);
         // The node's own id, now that a group is a node: it jumps to the
         // passage rather than to whatever the file happens to start with.
         if let Some(id) = &c.id {
@@ -3145,7 +3181,7 @@ fn report(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<
             // Raw score: within one node every passage shares the same offset,
             // so the comparison that matters is between them.
             if g.hits.len() > 1 {
-                println!("       · {score:.3} L{:<5}", c.line);
+                println!("       · {score:.3} L{:<5}", c.heading_line);
                 println!("               {preview}…");
             } else {
                 println!("       {preview}…");
@@ -3211,7 +3247,7 @@ fn cmd_search(
 ) -> Result<()> {
     let m = choose_index(vault, want)?;
     let dir = semantic_dir(vault, m);
-    let chunks: Vec<Chunk> = serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?;
+    let chunks: Vec<Chunk> = read_chunks(&dir, m)?;
     let raw = fs::read(dir.join("vectors.f32"))?;
     let n = raw.len() / (m.dim * 4);
     if n != chunks.len() {
@@ -3580,7 +3616,7 @@ fn cmd_chunks(
             let full = format!("{}\n{}", c.heading, c.text);
             println!(
                 "\n--- [{i}] L{} · {} tok · {} chars · lang={} · {}",
-                c.line,
+                c.heading_line,
                 n_tokens(&tok, &full),
                 c.text.len(),
                 c.lang,
@@ -3940,8 +3976,8 @@ mod tests {
     fn line_points_at_the_heading_that_owns_the_chunk() {
         let c = chunks_of("#+title: T\n\npreamble\n\n* First\nalpha\n\n* Second\nbeta\n");
         assert_eq!(c[1].heading, "T > First");
-        assert_eq!(c[1].line, 5);
-        assert_eq!(c[2].line, 8);
+        assert_eq!(c[1].heading_line, 5);
+        assert_eq!(c[2].heading_line, 8);
     }
 
     // --------------------------------------------------------------- spans
@@ -4031,7 +4067,7 @@ mod tests {
         let c = spanned(200).into_iter().next().expect("a preamble chunk");
         assert_eq!(c.text.trim(), "Preamble prose.");
         assert_eq!((c.start_line, c.end_line), (3, 3));
-        assert_eq!(c.line, 1, "no heading owns it, so it jumps to the top");
+        assert_eq!(c.heading_line, 1, "no heading owns it, so it jumps to the top");
     }
 
     /// A divided section's pieces advance through the file, and overlap where
@@ -4142,7 +4178,7 @@ mod tests {
         let cs = packed("#+title: T\n* H\nshort body\n", 50);
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].text.trim(), "short body");
-        assert_eq!(cs[0].line, 2, "the heading's own line");
+        assert_eq!(cs[0].heading_line, 2, "the heading's own line");
     }
 
     /// Each index is packed in its own unit, so one budget cannot govern both:
@@ -4234,7 +4270,7 @@ mod tests {
                 path: (*p).into(),
                 id: None,
                 heading: "H".into(),
-                line: 1,
+                heading_line: 1,
                 start_line: 1,
                 end_line: 1,
                 tags: Vec::new(),
@@ -4850,7 +4886,7 @@ mod tests {
             path: path.into(),
             id: None,
             heading: heading.into(),
-            line,
+            heading_line: line,
             start_line: line,
             end_line: line,
             tags: Vec::new(),
@@ -5198,7 +5234,7 @@ mod tests {
             path: path.into(),
             id: None,
             heading: "H".into(),
-            line: 1,
+            heading_line: 1,
             start_line: 1,
             end_line: 1,
             tags: tags.iter().map(|s| s.to_string()).collect(),
@@ -5286,7 +5322,7 @@ mod tests {
                 path: a.clone(),
                 id: None,
                 heading: "alpha".into(),
-                line: 1,
+                heading_line: 1,
                 start_line: 1,
                 end_line: 1,
                 tags: vec!["physics".into()],
@@ -5300,7 +5336,7 @@ mod tests {
                 path: b.clone(),
                 id: None,
                 heading: "beta".into(),
-                line: 1,
+                heading_line: 1,
                 start_line: 1,
                 end_line: 1,
                 tags: vec!["german".into()],
@@ -5345,7 +5381,7 @@ mod tests {
             path: p.into(),
             id: None,
             heading: p.into(),
-            line: 1,
+            heading_line: 1,
             start_line: 1,
             end_line: 1,
             tags: vec![],
@@ -5469,7 +5505,7 @@ mod tests {
             path: p.into(),
             id: None,
             heading: p.into(),
-            line: 1,
+            heading_line: 1,
             start_line: 1,
             end_line: 1,
             tags: vec![],
