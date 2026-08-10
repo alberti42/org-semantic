@@ -344,6 +344,7 @@ severity: every one of these is a warning.
 | =index-rebuilt=               | you asked for an incremental run and paid for a full one, and why |
 | =stale-policy=                | the cached policy would not parse, so the defaults were used |
 | =unknown-configured-language= | a language in your policy is not one the classifier knows |
+| =unknown-declared-language=   | a note's own =# ltex: language== names one, and says where |
 | =model-downloaded=            | why a five-second index took ninety                      |
 | =truncated=                   | how many of one kind were left out                       |
 

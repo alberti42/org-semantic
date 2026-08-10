@@ -194,6 +194,17 @@ impl Journal {
         }
     }
 
+    /// Replay another journal's remarks into this one.
+    ///
+    /// For work done speculatively: chunk into a scratch journal, and say what
+    /// it found only once you know the work is being kept.  Printing is deferred
+    /// with it, so a discarded pass is silent on the terminal too.
+    fn absorb(&mut self, other: Journal) {
+        for r in other.remarks {
+            self.remark(r);
+        }
+    }
+
     /// Take the list, with one entry per kind the cap truncated.  Called once,
     /// where the remarks leave the process.
     fn drain(&mut self) -> Vec<Remark> {
@@ -1181,20 +1192,42 @@ impl LangConfig {
     /// has never heard of, which is a typo far more often than a real language;
     /// that falls back to the first configured language, the vault's default.
     /// Under `auto` there is no such default, so the note is classified instead.
-    fn accept_declared(&self, declared: &str, note: &str) -> String {
-        if classifier().is_ok_and(|lid| lid.knows(declared)) {
-            return declared.to_string();
+    fn accept_declared(&self, declared: &str) -> Option<String> {
+        classifier().is_ok_and(|lid| lid.knows(declared)).then(|| declared.to_string())
+    }
+}
+
+/// The language policy in force while chunking, and where a note's bad
+/// declaration is reported.
+///
+/// One parameter rather than two because the journal is only ever wanted where
+/// the policy is: the semantic index passes `None` for both, since it does not
+/// read `# ltex:` at all.
+struct Lang<'a> {
+    cfg: &'a LangConfig,
+    journal: &'a mut Journal,
+}
+
+impl Lang<'_> {
+    /// What a note's own `# ltex: language=…` is worth, and what to say when it
+    /// is worth nothing.  See [`LangConfig::accept_declared`] for the rule.
+    fn declared(&mut self, declared: &str, note: &str, line: usize) -> String {
+        if let Some(known) = self.cfg.accept_declared(declared) {
+            return known;
         }
-        match self.languages.first() {
-            Some(default) => {
-                eprintln!("  {note}: unknown language `{declared}`, using `{default}`");
-                default.clone()
-            }
-            None => {
-                eprintln!("  {note}: unknown language `{declared}`, classifying instead");
-                self.undeclared().to_string()
-            }
-        }
+        let (chosen, how) = match self.cfg.languages.first() {
+            Some(default) => (default.clone(), format!("using `{default}` instead")),
+            None => (self.cfg.undeclared().to_string(), "classifying it instead".into()),
+        };
+        self.journal.remark(
+            Remark::new(
+                "unknown-declared-language",
+                format!("unknown language `{declared}`, {how}"),
+            )
+            .at(note)
+            .on_line(line),
+        );
+        chosen
     }
 }
 
@@ -1346,7 +1379,7 @@ fn chunk_file(
     path: &Path,
     rel: &str,
     text: &str,
-    lang: Option<&LangConfig>,
+    lang: Option<&mut Lang<'_>>,
     cfg: &Config,
     target: Target,
     budget: &Budget,
@@ -1386,7 +1419,8 @@ fn chunk_file(
     // Set by a heading, cleared by whatever line follows: only the line directly
     // beneath a headline can be its planning line.
     let mut at_planning = false;
-    let mut cur_lang = lang.map(|l| l.undeclared().to_string()).unwrap_or_default();
+    let mut lang = lang;
+    let mut cur_lang = lang.as_deref().map(|l| l.cfg.undeclared().to_string()).unwrap_or_default();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
     // they apply to the whole file either way.
@@ -1557,7 +1591,7 @@ fn chunk_file(
             continue;
         }
         // Takes effect from here on, so a note may switch language part-way.
-        if let Some((cfg, l)) = lang.zip(ltex_language(line)) {
+        if let Some((policy, l)) = lang.as_deref_mut().zip(ltex_language(line)) {
             flush(
                 &mut chunks,
                 &paras,
@@ -1573,7 +1607,7 @@ fn chunk_file(
             );
             paras.clear();
             open = false;
-            cur_lang = cfg.accept_declared(&l, rel);
+            cur_lang = policy.declared(&l, rel, n);
             continue;
         }
         // Blocks: what happens to the body is policy, not prose.
@@ -1681,7 +1715,7 @@ fn chunk_file(
     // its markup: drawers, keywords and `#+begin_src` are largely ASCII and
     // would pull every note towards English.  Only chunks that took the default
     // are replaced — an explicit `# ltex: language=…` always wins.
-    if let Some(lang) = lang.filter(|l| l.detects()) {
+    if let Some(lang) = lang.as_deref().map(|l| l.cfg).filter(|c| c.detects()) {
         let undeclared = lang.undeclared();
         let prose: Vec<&str> =
             chunks.iter().filter(|c| c.lang == undeclared).map(|c| c.text.as_str()).collect();
@@ -2991,14 +3025,19 @@ fn cmd_index_lexical(
     // field the schema does not have, and a schema change means the whole index
     // is rebuilt — so the language set is carried in the stored key and only
     // ever grows.
+    //
+    // Into a scratch journal, because this pass is discarded whole if the
+    // analyzer turns out to have changed — and a note reported here and then
+    // read again below would be reported twice.
     let mut chunks: Vec<Chunk> = Vec::new();
+    let mut speculative = Journal::quiet();
     for st in &scan.stale {
         let f = vault.join(&st.path);
         chunks.extend(chunk_file(
             &f,
             &st.path,
             &st.text,
-            Some(lang),
+            Some(&mut Lang { cfg: lang, journal: &mut speculative }),
             cfg,
             Target::Lexical,
             &LEXICAL_BUDGET,
@@ -3019,7 +3058,7 @@ fn cmd_index_lexical(
                     f,
                     &path,
                     &text,
-                    Some(lang),
+                    Some(&mut Lang { cfg: lang, journal: j }),
                     cfg,
                     Target::Lexical,
                     &LEXICAL_BUDGET,
@@ -3028,9 +3067,11 @@ fn cmd_index_lexical(
             }
         }
     } else {
-        // Reported here rather than beside the scan, because a rebuild re-reads
-        // every note above and would otherwise name the same broken file twice
-        // — which is what the two `eprintln!`s this replaced used to do.
+        // Nothing was discarded, so the speculative pass is the real one.
+        // Reported here rather than beside the scan for the same reason: a
+        // rebuild re-reads every note above, and naming the same broken file
+        // twice is exactly what the two `eprintln!`s this replaced did.
+        j.absorb(speculative);
         report_unreadable(&scan, j);
     }
 
@@ -4123,6 +4164,7 @@ fn cmd_chunks(
     m: &Model,
     cfg: &Config,
     target: Target,
+    j: &mut Journal,
 ) -> Result<()> {
     let tok = tokenizer_for(m)?;
     println!(
@@ -4150,7 +4192,9 @@ fn cmd_chunks(
             f,
             &rel_path(vault, f),
             &text,
-            (target == Target::Lexical).then_some(lang),
+            // Only the lexical preview reads a note's `# ltex:`, so only it can
+            // report a bad one.
+            (target == Target::Lexical).then_some(Lang { cfg: lang, journal: j }).as_mut(),
             cfg,
             target,
             budget,
@@ -4368,7 +4412,7 @@ fn main() -> Result<()> {
             } else {
                 Target::Semantic
             };
-            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target)
+            cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target, &mut j)
         }
         Some("serve") => serve::serve(),
         Some("models") => {
@@ -4425,6 +4469,16 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `chunk_file` reads a note's own `# ltex:` only for the lexical index, and
+    /// reports a bad one through a journal.  A macro rather than a function so
+    /// the journal is a temporary at the call site, living exactly as long as
+    /// the `chunk_file` call that borrows it.
+    macro_rules! speaking {
+        ($cfg:expr) => {
+            Some(&mut Lang { cfg: $cfg, journal: &mut Journal::quiet() })
+        };
+    }
 
     /// A stand-in for the tokenizer: one "token" per whitespace-separated word.
     /// Keeps these tests independent of a 129 MB model download, and the
@@ -4837,7 +4891,7 @@ mod tests {
                 Path::new("/v/n.org"),
                 "n.org",
                 &note,
-                Some(&LangConfig::default()),
+                speaking!(&LangConfig::default()),
                 &cfg,
                 target,
                 b,
@@ -5879,7 +5933,7 @@ mod tests {
                 Path::new("/v/n.org"),
                 "n.org",
                 &note,
-                Some(&LangConfig::default()),
+                speaking!(&LangConfig::default()),
                 &cfg,
                 target,
                 b,
@@ -6264,7 +6318,7 @@ mod tests {
             Path::new("/v/N.org"),
             "N.org",
             "#+title: T\n* English part\nalpha\n\n# ltex: language=de-DE\n* Deutscher Teil\nbeta\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
@@ -6274,6 +6328,33 @@ mod tests {
         assert_eq!(by("beta").lang, "de-DE");
     }
 
+    /// A declared language the classifier has never heard of is a typo far more
+    /// often than a real language, so the note is silently read as something
+    /// else — and silence is the problem.  Reported with the line, which is what
+    /// makes it fixable rather than merely known.
+    #[test]
+    fn a_language_nobody_recognises_is_reported_where_it_was_declared() {
+        let cfg = LangConfig::default();
+        let mut j = Journal::quiet();
+        let c = chunk_file(
+            Path::new("/v/N.org"),
+            "N.org",
+            "#+title: T\n* One\nalpha\n\n# ltex: language=klingon\n* Two\nbeta\n",
+            Some(&mut Lang { cfg: &cfg, journal: &mut j }),
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        // It still indexes, under the vault's default rather than nothing.
+        assert_eq!(c.iter().find(|x| x.text.trim() == "beta").unwrap().lang, "en-US");
+        let rs = j.drain();
+        assert_eq!(rs.len(), 1, "one bad declaration, one remark: {rs:?}");
+        assert_eq!(rs[0].kind, "unknown-declared-language");
+        assert_eq!(rs[0].path.as_deref(), Some("N.org"));
+        assert_eq!(rs[0].line, Some(5), "the line the declaration is on");
+        assert!(rs[0].message.contains("klingon"), "names it: {}", rs[0].message);
+    }
+
     #[test]
     fn the_default_language_is_configurable() {
         let cfg = LangConfig::parse("it-IT");
@@ -6281,7 +6362,7 @@ mod tests {
             Path::new("/v/N.org"),
             "N.org",
             "#+title: T\nciao\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
@@ -6443,7 +6524,7 @@ mod tests {
             Path::new("/v/de.org"),
             "de.org",
             "#+title: Notiz\n* Abschnitt\nDie Wörter der deutschen Sprache sind manchmal sehr lang\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
                 &UNSPLIT,
@@ -6453,7 +6534,7 @@ mod tests {
             Path::new("/v/en.org"),
             "en.org",
             "#+title: Note\n* Section\nThe damped oscillations of a trapped atom in the tweezer\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
@@ -6470,7 +6551,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n             # ltex: language=it-IT\n* Two\nThe text here is still English but declared Italian\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
                 &UNSPLIT,
@@ -6490,7 +6571,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nThe damped oscillations of a trapped atom in the tweezer\n\n# ltex: language=it-IT\n* Two\nQuesto paragrafo dichiara la propria lingua\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
                 &UNSPLIT,
@@ -6508,7 +6589,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             "#+title: N\n* One\nPlain English body text here\n\n# ltex: language=de-DE\n* Two\nDieser Abschnitt ist auf Deutsch geschrieben\n",
-            Some(&cfg),
+            speaking!(&cfg),
             &Config::default(),
             Target::Lexical,
                 &UNSPLIT,
@@ -6529,7 +6610,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             body,
-            Some(&LangConfig::parse("de-DE,en-US")),
+            speaking!(&LangConfig::parse("de-DE,en-US")),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
@@ -6540,7 +6621,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             body,
-            Some(&LangConfig::parse("en-US")),
+            speaking!(&LangConfig::parse("en-US")),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
@@ -6552,7 +6633,7 @@ mod tests {
             Path::new("/v/n.org"),
             "n.org",
             body,
-            Some(&LangConfig::parse("auto")),
+            speaking!(&LangConfig::parse("auto")),
             &Config::default(),
             Target::Lexical,
             &UNSPLIT,
