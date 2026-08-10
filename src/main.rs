@@ -1217,8 +1217,7 @@ fn chunk_file(
         // where the heading is known.  The floor guarantees forward progress
         // when that prelude is itself longer than the budget; see the known hole
         // in CLAUDE.md.
-        let prelude = format!("{}{}\n", budget.prefix, heading);
-        let room = limit.saturating_sub(measure(&prelude)).max(MIN_ROOM);
+        let room = limit.saturating_sub(measure(&budget.prelude(&heading))).max(MIN_ROOM);
         for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
@@ -1481,7 +1480,21 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 /// Measuring the real prelude needs neither.
 struct Budget<'a> {
     measure: &'a dyn Fn(&str) -> usize,
-    prefix: &'a str,
+    /// The model's own prefix, when this index prepends anything to the body at
+    /// all.  `None` means it does not: tantivy indexes `Chunk::text` as it
+    /// stands — the heading goes into its own field, not in front of the body —
+    /// so nothing comes out of the lexical budget, where the heading used to.
+    prefix: Option<&'a str>,
+}
+
+impl Budget<'_> {
+    /// What precedes the body in the string this index stores.
+    fn prelude(&self, heading: &str) -> String {
+        match self.prefix {
+            Some(p) => format!("{p}{heading}\n"),
+            None => String::new(),
+        }
+    }
 }
 
 /// Add a kept line to the paragraph being built, or start a new one.
@@ -1604,7 +1617,7 @@ fn chars(s: &str) -> usize {
 
 /// The word index's budget: characters, and nothing in front of the heading —
 /// tantivy indexes the passage as it stands, with no model prefix.
-const LEXICAL_BUDGET: Budget = Budget { measure: &chars, prefix: "" };
+const LEXICAL_BUDGET: Budget = Budget { measure: &chars, prefix: None };
 
 /// Greedily pack paragraphs up to BUDGET, in whatever unit MEASURE counts, with
 /// one paragraph of overlap between consecutive pieces; hard-split any single
@@ -1936,14 +1949,14 @@ mod lexical {
         /// self-contained; bump it whenever the schema changes, so a stale index
         /// is discarded rather than opened against the wrong schema.
         pub fn key(&self) -> String {
-            format!("v4 langs={} fold={}", self.langs.join("+"), self.fold)
+            format!("v5 langs={} fold={}", self.langs.join("+"), self.fold)
         }
 
         /// Rebuild the analyzer from a stored key.  This is what lets the
         /// lexical index be searched without `chunks.json`: the languages come
         /// back from the index's own metadata rather than from the corpus.
         pub fn from_key(key: &str) -> Option<Self> {
-            let rest = key.strip_prefix("v4 ")?;
+            let rest = key.strip_prefix("v5 ")?;
             let (langs, fold) = rest.split_once(" fold=")?;
             Some(Analyzer {
                 langs: langs.strip_prefix("langs=")?.split('+').map(String::from).collect(),
@@ -2268,7 +2281,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 7;
+const INDEX_VERSION: u32 = 8;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -2836,7 +2849,7 @@ fn cmd_index(
         // One pass, in the model's own tokens.  Sections that had to be divided
         // are counted from the result — several chunks sharing a heading line —
         // rather than reported by the packer.
-        let budget = Budget { measure: &measure, prefix: m.passage };
+        let budget = Budget { measure: &measure, prefix: Some(m.passage) };
         let cs = chunk_file(f, &path, text, None, cfg, Target::Semantic, &budget);
         // A section that had to be divided shows up as consecutive chunks on one
         // heading line, so it is counted from the result rather than reported by
@@ -3441,7 +3454,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let m = model_named(DEFAULT_MODEL)?;
     let tok = tokenizer_for(m)?;
     let measure = |t: &str| n_tokens(&tok, t);
-    let budget = Budget { measure: &measure, prefix: m.passage };
+    let budget = Budget { measure: &measure, prefix: Some(m.passage) };
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3530,7 +3543,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
     let measure = |s: &str| n_tokens(&tok, s);
-    let budget = Budget { measure: &measure, prefix: m.passage };
+    let budget = Budget { measure: &measure, prefix: Some(m.passage) };
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3707,7 +3720,7 @@ fn cmd_chunks(
         // Each index is previewed in its own unit, because each is packed in
         // its own: showing a lexical preview cut to token boundaries would be
         // showing something that never reaches disk.
-        let semantic = Budget { measure: &measure, prefix: m.passage };
+        let semantic = Budget { measure: &measure, prefix: Some(m.passage) };
         let budget = match target {
             Target::Semantic => &semantic,
             Target::Lexical => &LEXICAL_BUDGET,
@@ -4303,7 +4316,7 @@ mod tests {
         };
         // Long enough that ignoring it would show: ten words of prefix.
         let prefix = "one two three four five six seven eight nine ten ";
-        let budget = Budget { measure: &words, prefix };
+        let budget = Budget { measure: &words, prefix: Some(prefix) };
         let cs = chunk_file(
             Path::new("/v/n.org"),
             "n.org",
@@ -4391,10 +4404,10 @@ mod tests {
 
     /// A measure for tests that are about parsing, not packing: nothing ever
     /// exceeds a budget, so a note comes back as the sections it has.
-    const UNSPLIT: Budget = Budget { measure: &unsplit, prefix: "" };
+    const UNSPLIT: Budget = Budget { measure: &unsplit, prefix: Some("") };
 
     /// Words, for the tests that *are* about packing.
-    const WORDS: Budget = Budget { measure: &words, prefix: "" };
+    const WORDS: Budget = Budget { measure: &words, prefix: Some("") };
 
     fn scratch(name: &str) -> PathBuf {
         // No tempfile dependency: a per-test directory under the system temp,
@@ -5250,6 +5263,39 @@ mod tests {
         assert!(at(TOKEN_LIMIT).is_ok());
         assert!(at(MIN_ROOM * 2 + 1).is_ok());
         assert!(Config::default().check().is_ok(), "the defaults must pass their own check");
+    }
+
+    /// The lexical budget bounds the body alone, because that is all tantivy
+    /// indexes: the heading goes into its own `title` field, never in front of
+    /// the body. Subtracting it made a long-headed note's word chunks smaller
+    /// than asked for, to leave room for something that was never added.
+    #[test]
+    fn only_the_semantic_budget_pays_for_the_heading() {
+        let heading = para("h", 30);
+        let note = format!("#+title: T\n* {heading}\n{}\n", para("w", 60));
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: 100, lexical_chars: 100 },
+            ..Config::default()
+        };
+        let at = |target, b: &Budget| {
+            chunk_file(
+                Path::new("/v/n.org"),
+                "n.org",
+                &note,
+                Some(&LangConfig::default()),
+                &cfg,
+                target,
+                b,
+            )
+        };
+        // 30 words of heading out of 100 leaves ~66 for the body, so 60 words fit.
+        assert_eq!(at(Target::Semantic, &WORDS).len(), 1);
+        // The word index counts characters and owes the heading nothing, so its
+        // 100 characters are all for the body — which 60 words overrun.
+        assert!(at(Target::Lexical, &LEXICAL_BUDGET).len() > 1);
+        for c in at(Target::Lexical, &LEXICAL_BUDGET) {
+            assert!(chars(&c.text) <= 100, "{} chars over a 100-char budget", chars(&c.text));
+        }
     }
 
     /// The two indexes want opposite things from a date, so the policy is split
