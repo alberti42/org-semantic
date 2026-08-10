@@ -9,14 +9,14 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 ```console
 $ org-semantic index ~/notes --both
 951 org files
-  180 sections ran past 512 tokens and were divided
-5794 chunks · 5794 to embed · scanned in 1.5s
-model loaded in 0.7s
-  embedding 5794/5794 · 29 chunk/s · 6.1k tok/s · eta 0s
-embedded 5794 chunks in 198.9s (29/s)
-wrote ~/notes/.org-semantic/semantic/e5-small (8.9 MB of vectors) in 201.3s total
+  643 sections were divided to fit the 350-token budget
+6531 chunks · 6531 to embed · scanned in 5.0s
+model loaded in 0.9s
+  embedding 6531/6531 · 34 chunk/s · 6.5k tok/s · eta 0s
+embedded 6531 chunks in 194.1s (34/s)
+wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 200.1s total
 951 org files
-lexical index: 5780 chunks written in 1.2s
+lexical index: 5969 chunks written in 1.2s
 
 $ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
 
@@ -32,13 +32,13 @@ $ org-semantic search ~/notes "why do the atoms heat up and get lost from the tr
        :Literature:
        Optical tweezers are subject to power drifts and pointing instabilities…
 
-0.876 (+1.9σ)  2024-04-12 Atom sorting specifications > Atom sorting -- shared specification document
-       01 Daily notes/2024/2024-04-12 Atom sorting specifications.org:43
-       id:ce45cf4b-1cf8-434e-9129-fc2952877ea9
-       :Daily:
-       Rearranging a partially filled array into a defect-free one, with the…
+0.882 (+2.0σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Motion and gate timing
+       03 Literature review/2025-06-06 Review - Probing topological matter.org:682
+       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
+       :Literature:
+       During dynamical reconfiguration (AOD-based transport), atoms might spend too long outside…
 
-[model load 640ms · query embed 9ms · search over 5794 vectors 1.3ms]
+[model load 698ms · query embed 7ms · search over 6531 vectors 1.7ms]
 ```
 
 Not one word of that query appears in the top note's title, and the passage it

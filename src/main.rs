@@ -2818,7 +2818,13 @@ fn cmd_index(
         writeln!(out, "{} org files", files.len())?;
     }
     if resplit > 0 {
-        eprintln!("  {resplit} sections ran past {TOKEN_LIMIT} tokens and were divided");
+        // The budget that actually divided them, not the model's ceiling: those
+        // were the same number when a single hardcoded limit did both jobs, and
+        // this went on printing 512 after the budget became policy at 350.
+        eprintln!(
+            "  {resplit} sections were divided to fit the {}-token budget",
+            cfg.chunk.of(Target::Semantic)
+        );
     }
     // The carried count is what makes a large note cheap to edit, so it is
     // worth saying out loud rather than leaving as an unexplained small number
