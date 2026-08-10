@@ -195,6 +195,14 @@ fn each_index_reports_its_own_pass_over_the_same_notes() {
         seq.contains(&("semantic".into(), "embed".into())),
         "and only the semantic index embeds: {seq:?}"
     );
+
+    // Every phase obeys the same send rate, embedding included — a batch takes
+    // far longer than the floor, so nothing is withheld without an exemption
+    // for it.  If this ever drops reports, batches have become faster than
+    // 100 ms and the question is whether a client wants them all.
+    let embed: Vec<&&Value> = values.iter().filter(|v| v["phase"] == "embed").collect();
+    let chunks = embed.last().expect("something was embedded")["total"].as_u64().unwrap();
+    assert_eq!(embed.len() as u64, chunks.div_ceil(64), "one report per batch of 64: {embed:?}");
 }
 
 /// The send rate is flow control, not display policy. Files are far too fine a

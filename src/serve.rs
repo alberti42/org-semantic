@@ -418,10 +418,17 @@ fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
         // and was thinned away as though it were more of the same.
         let opening = running != Some((p.target, p.phase));
         running = Some((p.target, p.phase));
-        // The embedding batch *is* the unit — ~1.8 s apart on a large vault —
-        // so it is never withheld.  Nor is the last report of a phase, or a
-        // client would be left rendering 6,400 of 6,522 for ever.
-        let paced = p.phase != "embed" && !p.last && !opening;
+        // Nor is the last report of a phase, or a client would be left
+        // rendering 6,400 of 6,522 for ever.
+        //
+        // One rule for every phase, deliberately.  Embedding used to be exempt
+        // on the grounds that a batch is the unit and must not be withheld, but
+        // a batch is 154–282 ms even on the smallest model with tiny notes, and
+        // 1.8 s on a real vault — always clear of the floor, so the exemption
+        // never once changed what was sent.  It could only bite above ~640
+        // chunks/s, and at that speed ten reports a second is already more than
+        // anything displaying them can use.
+        let paced = !p.last && !opening;
         if gone || (paced && sent.elapsed() < FLOOR) {
             return;
         }

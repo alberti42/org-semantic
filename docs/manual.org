@@ -387,11 +387,14 @@ decide how often to show. The phases are =scan=, =chunk=, =embed= and
 =download=, and =mode: "both"= runs =scan= and =chunk= once per index --- which
 is why every report says which one it belongs to.
 
-Rates are chosen for the pipe, not for your display. Embedding reports *once per
-batch*, about every two seconds on a large vault. Scanning and chunking count
-files, which is far too fine a unit to send one by one, so they are held to one
-report per 100 ms --- except the =last= of a phase, which always goes, so you
-never end up rendering 6,400 of 6,522 for ever.
+Rates are chosen for the pipe, not for your display: at most one report per
+100 ms, whatever the phase. The first and =last= of a phase are never held back,
+so you always see one start and you never end up rendering 6,400 of 6,522.
+
+In practice that cap only touches scanning and chunking, which count files and
+would otherwise fire hundreds of times a second. An embedding batch takes a
+fifth of a second at its very fastest and closer to two seconds on a real vault,
+so every batch is reported.
 
 A =download= report has a size and no total. Nothing counts up towards it:
 fastembed hands over no increments, and a bar frozen at nought for four minutes
