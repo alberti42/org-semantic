@@ -84,11 +84,14 @@ notes by meaning, and a lexical one, which finds them by word.
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
-  search <vault> <query> [k] [--per-file N] [--model NAME] [--json]
+  search <vault> <query> [k] [--per-file N] [--merge-sections] [--model NAME]
+         [--json]
          Rank by meaning: describe what you are after, not its words.
          k bounds the notes shown (default 8); --per-file bounds how many
          passages any one of them may contribute (default 3).  Keeping a
          year of meetings in one meetings.org?  Raise --per-file.
+         A section too long for one passage answers as several, each with
+         its own lines; --merge-sections folds those back into one hit.
   search <vault> <query> [k] --lexical [--any] [--json]
          Rank by word (BM25, over a per-language stemmed index).  Every
          term must match; --any matches notes carrying any of them.
@@ -3054,6 +3057,25 @@ fn select<'a>(scored: &[(f32, &'a Chunk)], lim: Limits) -> Vec<Group<'a>> {
     groups
 }
 
+/// A section's passages, as the caller wants to see them: each on its own, or
+/// the section once.
+///
+/// Off by default, because the index now knows where each passage *is* — a
+/// divided section's pieces have their own spans, so they can be jumped to
+/// individually and there is no reason to hide the one that actually matched
+/// behind the top of its section. On, a section appears once, scored by its
+/// best passage and spanning all of them, which suits a list where one line per
+/// place is the point.
+fn merged<'a>(g: &Group<'a>, merge: bool) -> Vec<(f32, &'a Chunk, (usize, usize))> {
+    if !merge {
+        return g.hits.iter().map(|(s, c)| (*s, *c, (c.start_line, c.end_line))).collect();
+    }
+    let (best, c) = g.hits[0];
+    let start = g.hits.iter().map(|(_, c)| c.start_line).min().unwrap_or(c.start_line);
+    let end = g.hits.iter().map(|(_, c)| c.end_line).max().unwrap_or(c.end_line);
+    vec![(best, c, (start, end))]
+}
+
 /// Notes opened while rendering one result list, so a file holding several hits
 /// is read once.
 type Notes = std::collections::HashMap<String, Option<Vec<String>>>;
@@ -3068,17 +3090,16 @@ type Notes = std::collections::HashMap<String, Option<Vec<String>>>;
 /// A file that has moved or shrunk since indexing yields nothing rather than an
 /// error or the wrong lines: an index a little behind its vault should still
 /// answer, visibly missing a preview rather than inventing one.
-fn passage(vault: &Path, c: &Chunk, notes: &mut Notes) -> String {
-    let lines = notes.entry(c.path.clone()).or_insert_with(|| {
-        fs::read_to_string(vault.join(&c.path))
-            .ok()
-            .map(|s| s.lines().map(str::to_string).collect())
+fn passage(vault: &Path, path: &str, span: (usize, usize), notes: &mut Notes) -> String {
+    let (start, end) = span;
+    let lines = notes.entry(path.to_string()).or_insert_with(|| {
+        fs::read_to_string(vault.join(path)).ok().map(|s| s.lines().map(str::to_string).collect())
     });
     let Some(lines) = lines else { return String::new() };
-    if c.start_line == 0 || c.start_line > c.end_line || c.end_line > lines.len() {
+    if start == 0 || start > end || end > lines.len() {
         return String::new();
     }
-    lines[c.start_line - 1..c.end_line].join("\n")
+    lines[start - 1..end].join("\n")
 }
 
 /// Everything an editor needs to show a hit and jump to it, without parsing
@@ -3089,13 +3110,14 @@ fn hits_json(
     vault: &Path,
     scored: &[(f32, &Chunk)],
     lim: Limits,
+    merge: bool,
     base: Option<Baseline>,
 ) -> serde_json::Value {
     let mut notes = Notes::new();
     let hits: Vec<serde_json::Value> = select(scored, lim)
         .iter()
-        .flat_map(|g| g.hits.iter())
-        .map(|(score, c)| {
+        .flat_map(|g| merged(g, merge))
+        .map(|(score, c, span)| {
             let (title, section) = match c.heading.split_once(" > ") {
                 Some((t, rest)) => (t, Some(rest)),
                 None => (c.heading.as_str(), None),
@@ -3106,7 +3128,7 @@ fn hits_json(
                 // deviations.  Comparable across models and queries where the
                 // raw score is not.  Null for lexical hits: BM25 is unbounded
                 // and has no such floor.
-                "z": base.map(|b| b.z(*score)),
+                "z": base.map(|b| b.z(score)),
                 "path": c.path,
                 "file": vault.join(&c.path),
                 // The heading's line, which is what a client jumps to.  Named
@@ -3115,8 +3137,8 @@ fn hits_json(
                 "headingLine": c.heading_line,
                 // The lines this passage was built from, so a client can read
                 // or highlight the region itself rather than trusting `text`.
-                "startLine": c.start_line,
-                "endLine": c.end_line,
+                "startLine": span.0,
+                "endLine": span.1,
                 "id": c.id,
                 "title": title,
                 "section": section,
@@ -3128,7 +3150,7 @@ fn hits_json(
                 "lang": (!c.lang.is_empty()).then_some(&c.lang),
                 // Read from the note, not from the index: the real passage,
                 // code blocks and all.
-                "text": passage(vault, c, &mut notes),
+                "text": passage(vault, &c.path, span, &mut notes),
             })
         })
         .collect();
@@ -3143,7 +3165,13 @@ fn hits_json(
 /// under BGE and 0.80 under E5 — so it cannot be read without that context.
 /// BM25 has no such floor, so lexical hits pass `None` and show their score
 /// alone.
-fn report(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
+fn report(
+    vault: &Path,
+    scored: &[(f32, &Chunk)],
+    lim: Limits,
+    merge: bool,
+    baseline: Option<&Baseline>,
+) {
     let groups = select(scored, lim);
     let mut notes = Notes::new();
     // The headline figure, where notes are compared with each other.
@@ -3170,18 +3198,20 @@ fn report(vault: &Path, scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<
                 if c.tags.is_empty() { String::new() } else { format!(":{}:", c.tags.join(":")) };
             println!("       {todo}{tags}");
         }
-        for (score, c) in &g.hits {
-            let preview: String = passage(vault, c, &mut notes)
+        let shown = merged(g, merge);
+        for (score, c, span) in &shown {
+            let preview: String = passage(vault, &c.path, *span, &mut notes)
                 .split_whitespace()
                 .take(20)
                 .collect::<Vec<_>>()
                 .join(" ");
             // Several passages here means one section outran the budget and was
-            // divided; they are numbered by line so they can be told apart.
-            // Raw score: within one node every passage shares the same offset,
-            // so the comparison that matters is between them.
-            if g.hits.len() > 1 {
-                println!("       · {score:.3} L{:<5}", c.heading_line);
+            // divided; each is labelled with the lines it covers, since they
+            // share a heading and only the span tells them apart.  Raw score:
+            // within one node every passage shares the same offset, so the
+            // comparison that matters is between them.
+            if shown.len() > 1 {
+                println!("       · {score:.3} L{}–{}", span.0, span.1);
                 println!("               {preview}…");
             } else {
                 println!("       {preview}…");
@@ -3242,6 +3272,7 @@ fn cmd_search(
     vault: &Path,
     query: &str,
     lim: Limits,
+    merge: bool,
     want: Option<&'static Model>,
     json: bool,
 ) -> Result<()> {
@@ -3273,7 +3304,7 @@ fn cmd_search(
         // No match is an answer, not an error: a caller reading JSON gets an
         // empty list rather than prose it would have to recognise.
         if json {
-            println!("{}", hits_json(vault, &[], lim, None));
+            println!("{}", hits_json(vault, &[], lim, merge, None));
         } else {
             println!("no chunk matches those filters");
         }
@@ -3309,10 +3340,10 @@ fn cmd_search(
     let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
     let baseline = Baseline::of(&vectors, m.dim);
     if json {
-        println!("{}", hits_json(vault, &hits, lim, baseline));
+        println!("{}", hits_json(vault, &hits, lim, merge, baseline));
         return Ok(());
     }
-    report(vault, &hits, lim, baseline.as_ref());
+    report(vault, &hits, lim, merge, baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -3651,6 +3682,7 @@ fn cmd_lexical(
     vault: &Path,
     query: &str,
     lim: Limits,
+    merge: bool,
     conjunction: bool,
     json: bool,
 ) -> Result<()> {
@@ -3678,14 +3710,14 @@ fn cmd_lexical(
     if json {
         // No baseline: BM25 scores are unbounded, so there is nothing to
         // standardise them against.
-        println!("{}", hits_json(vault, &hits, lim, None));
+        println!("{}", hits_json(vault, &hits, lim, merge, None));
         return Ok(());
     }
     if hits.is_empty() {
         println!("no match");
         return Ok(());
     }
-    report(vault, &hits, lim, None);
+    report(vault, &hits, lim, merge, None);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
@@ -3766,7 +3798,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 4,
-                &["--lexical", "--any", "--json", "--model", "--per-file"],
+                &["--lexical", "--any", "--json", "--model", "--per-file", "--merge-sections"],
             )?;
             // `k` bounds the notes; `--per-file` bounds how much of the list any
             // one of them may take.  A vault kept in a few large files wants the
@@ -3788,6 +3820,9 @@ fn main() -> Result<()> {
                 files: args.get(4).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_FILES),
                 per_file,
             };
+            // A section divided by the budget answers as several passages, each
+            // with its own span.  This folds them back into one result.
+            let merge = args.iter().skip(4).any(|a| a == "--merge-sections");
             let lexical = args.iter().skip(4).any(|a| a == "--lexical");
             // Structured output for an editor: the same hits, without prose to
             // parse back out.
@@ -3799,9 +3834,9 @@ fn main() -> Result<()> {
             };
             if lexical {
                 let conjunction = !args.iter().skip(4).any(|a| a == "--any");
-                cmd_lexical(vault, query, lim, conjunction, json)
+                cmd_lexical(vault, query, lim, merge, conjunction, json)
             } else {
-                cmd_search(vault, query, lim, want, json)
+                cmd_search(vault, query, lim, merge, want, json)
             }
         }
         Some("chunks") => {

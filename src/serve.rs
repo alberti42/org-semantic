@@ -107,6 +107,10 @@ impl Server {
                 .max(1) as usize,
         };
         let lexical_mode = p.get("mode").and_then(|v| v.as_str()) == Some("lexical");
+        // A section divided by the budget answers as several passages, each with
+        // its own span.  `mergeSections` folds them back into one result — off
+        // by default, since the spans make the pieces individually reachable.
+        let merge = p.get("mergeSections").and_then(|v| v.as_bool()).unwrap_or(false);
         let want = match p.get("model").and_then(|v| v.as_str()) {
             Some(name) => Some(model_named(name)?),
             None => None,
@@ -151,7 +155,7 @@ impl Server {
             let hits = lexical::search(&state_dir(&vault), &f, pool, conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
-            return Ok(hits_json(&vault, &hits, lim, None));
+            return Ok(hits_json(&vault, &hits, lim, merge, None));
         }
 
         if !f.langs.is_empty() {
@@ -179,7 +183,7 @@ impl Server {
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &s.chunks[*i])).collect();
-        Ok(hits_json(&vault, &hits, lim, s.baseline))
+        Ok(hits_json(&vault, &hits, lim, merge, s.baseline))
     }
 
     /// `index` — rebuild either index, or both, without leaving the process.
