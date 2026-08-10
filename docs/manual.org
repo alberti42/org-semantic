@@ -207,26 +207,28 @@ offer one command with a toggle and never branch on the reply. Each hit carries
 an absolute =file=, the =heading= path, the =line=, and the =:ID:= when there is
 one.
 
-*The address of a hit is =path= and =line=.* =path= is relative to the vault
-root --- the directory holding =.org-semantic= --- which identifies the note
-uniquely and survives the whole tree being moved; =file= is the same thing made
-absolute, for convenience. =line= is the line of the *heading that owns the
-passage*, so jumping there lands on the heading itself and org can take it from
-there: the section, its subtree, its properties. Nothing needs to be matched
-against a string we stored.
+*The address of a hit is =path= and =line=, and there is no second way to go.*
+=path= is relative to the vault root --- the directory holding =.org-semantic=
+--- so it names the note uniquely and survives the whole tree being moved;
+=file= is the same thing made absolute, for convenience. =line= is a line in the
+*real file*, counted over the raw text: the parser drops drawers, keywords and
+block bodies from what it indexes, but never from what it counts, so a fifteen
+line source block collapsed to =[src bash]= shifts nothing.
 
-=heading= is for showing the hit in a result list, and is part of what was
-embedded. It is not a navigation anchor --- deriving the section from the buffer
-is both cheaper and more accurate than searching for the text of a heading that
-may since have been edited.
+That line is where the *heading owning the passage* starts --- or line 1 for text
+that sits above every heading. So a client opens the file and goes to the line,
+and it is on the section. There is nothing to resolve, match or choose: org
+supplies the subtree, the properties and anything else from the buffer. This
+holds for both modalities.
 
-=id= is an extra for the vaults that carry them.
+=heading= is for showing a hit in a result list, and is part of what was
+embedded; it is not a navigation anchor. =id= is an extra for the vaults that
+carry them.
 
-One consequence of =line= naming the node: a section long enough to be divided
-yields several passages that all report the same =path= and =line=. They are
-distinct hits with distinct =text=, at one address. If a client wants to put
-point on the passage rather than the section, =text= is what locates it inside
-the subtree.
+One consequence of =line= naming the section: a section long enough to be
+divided yields several passages reporting the same =path= and =line=. They are
+distinct hits with distinct =text= at one address, which is the right answer
+when the jump is to the section.
 
 One trap if you build an org link to the heading rather than jumping yourself:
 =org-link-search= prompts /"Create new heading?"/ when it misses, which over
