@@ -296,26 +296,37 @@ fn warnings_ride_the_reply() {
 /// release and one version. That is the whole of the compatibility story: the
 /// package checks the binary is its own, and fetches the right one if not.
 ///
-/// The check that matters happens with `--version`, before a server is spawned.
-/// `status` carries the same string for a client already talking to one, and the
-/// two must not disagree.
+/// Asked two ways because a client needs it at two moments. `--version` reads
+/// the file on disk, which is what to check before spawning anything. The
+/// `version` method asks the *process*, which is a different thing the moment a
+/// new binary has been installed under a server that is still running.
 #[test]
 fn the_binary_says_which_release_it_is() {
     let flag = Command::new(env!("CARGO_BIN_EXE_org-semantic")).arg("--version").output().unwrap();
     let printed = String::from_utf8(flag.stdout).unwrap().trim().to_string();
     assert_eq!(printed, env!("CARGO_PKG_VERSION"), "`--version` is the crate's own");
 
+    // No vault: this is about the process, and nothing else.
+    let msgs =
+        talk(&[json!({ "jsonrpc": "2.0", "id": 7, "method": "version", "params": {} })], None);
+    let result = &msgs.iter().find(|m| m["id"] == 7).expect("a reply")["result"];
+    assert_eq!(result["version"], printed, "the same release the flag prints");
+}
+
+/// `status` answers about a vault and nothing else: which indexes it has, so a
+/// client can offer the commands that will work and explain the ones that will
+/// not. The release is a separate question with a separate method.
+#[test]
+fn status_answers_about_a_vault() {
     let v = vault("status", 2);
     let msgs = talk(
         &[json!({ "jsonrpc": "2.0", "id": 7, "method": "status", "params": { "vault": v } })],
         None,
     );
     let result = &msgs.iter().find(|m| m["id"] == 7).expect("a reply")["result"];
-    assert_eq!(result["version"], printed, "the same release the flag prints");
-    // Its own job, unchanged: what this vault has, so a client can offer the
-    // commands that will work and explain the ones that will not.
     assert_eq!(result["lexical"], false, "nothing built here yet");
     assert_eq!(result["semantic"], json!([]));
+    assert!(result.get("version").is_none(), "not its question to answer: {result:?}");
 }
 
 // --------------------------------------------------------------- cancellation

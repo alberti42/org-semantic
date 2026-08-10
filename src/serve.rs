@@ -328,10 +328,6 @@ impl Server {
 
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
-    ///
-    /// `version` rides along because it costs a field and answers a question a
-    /// live client may still have.  It is *not* how the release is normally
-    /// checked — that happens with `--version`, before anything is spawned.
     fn status(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
@@ -342,7 +338,6 @@ impl Server {
             .collect();
         let lexical = lexical::stored_key(&state_dir(&vault)).is_some();
         Ok(serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
             "vault": vault,
             "semantic": models,
             "lexical": lexical,
@@ -362,6 +357,14 @@ impl Server {
             "search" => self.search(params),
             "index" => self.index(params, token),
             "status" => self.status(params),
+            // Its own method rather than a field on `status`, which answers
+            // about a *vault*.  This answers about the process, and the two
+            // have neither the same subject nor the same lifetime.
+            //
+            // Worth asking even though `--version` exists: a client that has
+            // just installed a new binary finds the old one still serving, and
+            // the file on disk no longer says what this process is.
+            "version" => Ok(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") })),
             // A resident process must be able to drop what it holds without
             // being restarted: an index rebuilt underneath it is otherwise
             // served stale until the editor exits.

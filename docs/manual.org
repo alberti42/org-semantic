@@ -204,7 +204,8 @@ Methods:
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=   | =vault=                                                                                  | the release, and which indexes this vault has |
+| =status=   | =vault=                                                                                  | which indexes this vault has, and which are loaded |
+| =version=  | ---                                                                                      | the release this process is                   |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
 | =shutdown= | ---                                                                                      | exit                                          |
 
@@ -280,24 +281,20 @@ so there is one version between them and nothing to negotiate. A client checks
 that the binary is the one its own release expects, and installs the right one
 if it is not.
 
-That check needs no server --- it happens before one is started:
+Ask the *file*, before starting anything:
 
 #+begin_src console
 $ org-semantic --version
 0.1.0
 #+end_src
 
-=status= carries the same string, for a client that is already talking to a
-running server and would rather ask than assume. Its own answer is about the
-vault: which semantic indexes exist and whether there is a lexical one, so an
-editor can offer the commands that will work and explain the ones that will not
-rather than failing when they are used.
+Ask the *process*, which is a different question the moment a new binary has
+been installed underneath a server that is still running --- the file on disk no
+longer says what that process is:
 
 #+begin_src json
---> { "jsonrpc": "2.0", "id": 1, "method": "status", "params": { "vault": "/home/you/notes" } }
-<-- { "version": "0.1.0", "vault": "/home/you/notes", "loaded": 1,
-      "semantic": [ { "name": "e5-small", "dim": 384, "about": "100 languages" } ],
-      "lexical": true }
+--> { "jsonrpc": "2.0", "id": 1, "method": "version" }
+<-- { "version": "0.1.0" }
 #+end_src
 
 *** Errors you are meant to act on
