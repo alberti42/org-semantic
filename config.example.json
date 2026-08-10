@@ -9,6 +9,7 @@
     "verse":   { "semantic": true,          "lexical": true }
   },
   "planning_line": { "semantic": false, "lexical": true },
+  "chunk": { "semantic_tokens": 350, "lexical_chars": 1500 },
   "exclude_tagged": ["noexport", "ARCHIVE"],
   "todo_keywords": ["TODO", "DONE"]
 }

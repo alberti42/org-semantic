@@ -147,10 +147,10 @@ notes by meaning, and a lexical one, which finds them by word.
   bench  <vault> [n] [config]               embedding throughput on a slice
 
 Everything about how a vault is indexed is policy, not flags: which languages
-it is written in, whether accents are folded, which subtrees are skipped, and
-what happens to src and example blocks.  It goes in a JSON file passed with
---config, remembered afterwards so later runs need not repeat it.  Copy
-config.example.json and edit it.
+it is written in, whether accents are folded, which subtrees are skipped, how
+large a passage may get, and what happens to src and example blocks.  It goes
+in a JSON file passed with --config, remembered afterwards so later runs need
+not repeat it.  Copy config.example.json and edit it.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
@@ -589,6 +589,7 @@ edit it:
     "verse":   { "semantic": true,          "lexical": true }
   },
   "planning_line": { "semantic": false, "lexical": true },
+  "chunk": { "semantic_tokens": 350, "lexical_chars": 1500 },
   "exclude_tagged": ["noexport", "ARCHIVE"],
   "todo_keywords": ["TODO", "DONE"]
 }
@@ -601,6 +602,24 @@ it), =false= (drop it) or ="placeholder"=;
 would only make =[src]= a searchable word. Babel =#+RESULTS:= and bare =: =
 fixed-width lines count as output, not prose. Quote and verse stay in both ---
 they are prose someone chose to set off, not machine output.
+
+=chunk= is how large a passage may get, and the two numbers are in different
+units on purpose. An embedding has a hard context limit, so the semantic budget
+is counted in the *model's own tokens*. Counting characters instead would be a
+proxy that drifts with the content: chars-per-token runs about 2 in LaTeX-heavy
+notes and 4 in prose, and German compounds tokenize worse than English, so one
+figure in characters means different amounts of context in different notes of
+the same vault --- and how coarse a hit is should not depend on which language a
+note happens to be in.
+
+BM25 has no context limit, and the word index deliberately loads no tokenizer
+--- that is what keeps =index --lexical= to a second's work rather than a model
+download. Its budget is therefore in characters, which it can measure exactly,
+rather than an approximation of tokens it has no way to count.
+
+The heading is prepended to every passage before it is embedded, so it comes out
+of the semantic budget once. Raise =semantic_tokens= for more context per hit and
+fewer, coarser hits; lower it for finer ones and a larger index.
 
 =planning_line= is a heading's =DEADLINE:= / =SCHEDULED:= / =CLOSED:= line, and is
 split by index for the same reason Babel output is. A date carries almost

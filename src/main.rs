@@ -109,10 +109,10 @@ notes by meaning, and a lexical one, which finds them by word.
   bench  <vault> [n] [config]               embedding throughput on a slice
 
 Everything about how a vault is indexed is policy, not flags: which languages
-it is written in, whether accents are folded, which subtrees are skipped, and
-what happens to src and example blocks.  It goes in a JSON file passed with
---config, remembered afterwards so later runs need not repeat it.  Copy
-config.example.json and edit it.
+it is written in, whether accents are folded, which subtrees are skipped, how
+large a passage may get, and what happens to src and example blocks.  It goes
+in a JSON file passed with --config, remembered afterwards so later runs need
+not repeat it.  Copy config.example.json and edit it.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.";
@@ -127,10 +127,6 @@ fn model_named(name: &str) -> Result<&'static Model> {
         )
     })
 }
-
-/// Roughly a screenful.  Small enough that a hit points at a passage rather
-/// than at a whole note, large enough to carry its own context.
-const MAX_CHARS: usize = 1500;
 
 const STATE_DIR: &str = ".org-semantic";
 
@@ -486,6 +482,48 @@ impl PlanningLinePolicy {
     }
 }
 
+/// How large a passage may get, in the unit each index actually cares about.
+///
+/// Two numbers rather than one because the two indexes are bounded by different
+/// things. An embedding has a hard context limit, so the semantic budget is in
+/// the model's own tokens — a character count is a proxy that drifts with the
+/// content: chars-per-token runs about 2 in LaTeX-heavy notes to 4 in prose, and
+/// German compounds tokenize worse than English, so one figure in characters
+/// means different amounts of context in different notes of the same vault.
+///
+/// BM25 has no such limit, and the lexical index deliberately loads no
+/// tokenizer — that is what makes `index --lexical` a second's work rather than
+/// a model download. Its budget is therefore in characters, which it can measure
+/// exactly, rather than an approximation of tokens it has no way to count.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+struct Chunking {
+    /// Tokens per passage, heading included, as the embedding model counts them.
+    semantic_tokens: usize,
+    /// Characters per passage for the word index.
+    lexical_chars: usize,
+}
+
+impl Default for Chunking {
+    fn default() -> Self {
+        // 350 keeps roughly the granularity the old 1500-character budget
+        // produced — a median of 177 tokens and a p90 of 399 on a 951-note
+        // vault — so moving to the right unit is not also a change in how
+        // coarse a hit is.  Small enough that a hit points at a passage rather
+        // than a whole note, large enough to carry its own context.
+        Chunking { semantic_tokens: 350, lexical_chars: 1500 }
+    }
+}
+
+impl Chunking {
+    fn of(&self, target: Target) -> usize {
+        match target {
+            Target::Semantic => self.semantic_tokens,
+            Target::Lexical => self.lexical_chars,
+        }
+    }
+}
+
 /// Indexing policy: what in a vault is worth indexing at all.
 ///
 /// Kept in a file the user owns, wherever they like, and named with `--config`.
@@ -515,6 +553,8 @@ struct Config {
     blocks: Blocks,
     /// What to do with a heading's `DEADLINE:` / `SCHEDULED:` / `CLOSED:` line.
     planning_line: PlanningLinePolicy,
+    /// How large a passage may get, per index.
+    chunk: Chunking,
     /// Anything tagged with one of these is not indexed — the tag names what to
     /// leave out, not what to strip from the index.  `noexport` is org's own
     /// "not for consumption" marker and `ARCHIVE` its "put this away"; both
@@ -556,6 +596,7 @@ impl Default for Config {
             fold_diacritics: false,
             blocks: Blocks::default(),
             planning_line: PlanningLinePolicy::default(),
+            chunk: Chunking::default(),
             exclude_tagged: vec!["noexport".into(), "ARCHIVE".into()],
             todo_keywords: DEFAULT_TODO_KEYWORDS.iter().map(|s| (*s).into()).collect(),
         }
@@ -606,6 +647,8 @@ impl Config {
             key.push_str(&format!(";{kind}={v}"));
         }
         key.push_str(&format!(";planning_line={}", self.planning_line.keeps(target)));
+        // Only this index's own budget: the other one cannot move a boundary here.
+        key.push_str(&format!(";chunk={}", self.chunk.of(target)));
         content_hash(key.as_bytes())
     }
 
@@ -665,6 +708,17 @@ impl Config {
                 }
                 _ => {}
             }
+        }
+        if self.chunk.of(target) != other.chunk.of(target) {
+            let unit = match target {
+                Target::Semantic => "semantic_tokens",
+                Target::Lexical => "lexical_chars",
+            };
+            out.push(format!(
+                "chunk.{unit}: was {}, now {}",
+                other.chunk.of(target),
+                self.chunk.of(target)
+            ));
         }
         let (mine, theirs) = (self.planning_line.keeps(target), other.planning_line.keeps(target));
         if mine != theirs {
@@ -958,7 +1012,7 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 }
 
 /// Split TEXT into chunks, one per heading, further split when a section runs
-/// past `MAX_CHARS`.
+/// past the budget this index is packed to.
 ///
 /// REL is the note's path relative to the vault root, and is what the chunk
 /// stores.  PATH is only used to fall back to the filename when a note has no
@@ -989,7 +1043,11 @@ fn chunk_file(
     lang: Option<&LangConfig>,
     cfg: &Config,
     target: Target,
+    measure: &dyn Fn(&str) -> usize,
 ) -> Vec<Chunk> {
+    // The unit the caller measures in decides which budget applies: the
+    // semantic index counts the model's tokens, the lexical one characters.
+    let limit = cfg.chunk.of(target);
     let mut chunks = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     // Tags of each open heading, so a chunk can inherit from every ancestor.
@@ -1080,7 +1138,12 @@ fn chunk_file(
         }
         let todo = todo_stack.iter().rev().find_map(|t| t.clone());
         let priority = prio_stack.iter().rev().find_map(|p| *p);
-        for piece in split_long(body) {
+        // The heading is prepended to every piece before it is embedded, so it
+        // comes out of the budget once, here, where it is known.  The floor
+        // guarantees forward progress when a heading path is itself longer than
+        // the budget — see the known hole in CLAUDE.md.
+        let room = limit.saturating_sub(measure(&heading) + 4).max(32);
+        for piece in split_to_fit(body, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
                 id: id.clone(),
@@ -1333,58 +1396,7 @@ where
     vec![next]
 }
 
-/// Break a section longer than `MAX_CHARS` on paragraph boundaries, with one
-/// paragraph of overlap between consecutive pieces.
-fn split_long(body: &str) -> Vec<String> {
-    if body.len() <= MAX_CHARS {
-        return vec![body.to_string()];
-    }
-    let fits = |s: &str| s.len() <= MAX_CHARS;
-    let mut out: Vec<String> = Vec::new();
-    let mut cur: Vec<&str> = Vec::new();
-
-    for para in body.split("\n\n") {
-        if para.len() > MAX_CHARS {
-            // A single paragraph over the limit has no boundary to overlap on;
-            // flush what is pending and hard-split it on char boundaries.
-            if !cur.is_empty() {
-                out.push(cur.join("\n\n"));
-                cur.clear();
-            }
-            let mut rest = para;
-            while rest.len() > MAX_CHARS {
-                let mut cut = MAX_CHARS;
-                while cut > 0 && !rest.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                out.push(rest[..cut].to_string());
-                rest = &rest[cut..];
-            }
-            if !rest.trim().is_empty() {
-                cur.push(rest);
-            }
-            continue;
-        }
-        if cur.is_empty() {
-            cur.push(para);
-            continue;
-        }
-        let cand = format!("{}\n\n{}", cur.join("\n\n"), para);
-        if fits(&cand) {
-            cur.push(para);
-        } else {
-            out.push(cur.join("\n\n"));
-            cur = carry_over(&cur, para, fits);
-        }
-    }
-    let last = cur.join("\n\n");
-    if !last.trim().is_empty() {
-        out.push(last);
-    }
-    out
-}
-
-// ------------------------------------------------------- token-limit enforcement
+// --------------------------------------------------------------- measuring
 
 /// BGE-small truncates at 512 tokens, and fastembed applies that silently
 /// through `TruncationParams` — an over-long chunk simply loses its tail with
@@ -1398,40 +1410,20 @@ fn n_tokens(tok: &tokenizers::Tokenizer, s: &str) -> usize {
     tok.encode(s, true).map(|e| e.len()).unwrap_or(usize::MAX)
 }
 
-/// Re-split any chunk whose heading+body exceeds LIMIT tokens.  Returns the new
-/// chunks and how many originals had to be divided.
-fn enforce_token_limit(
-    chunks: Vec<Chunk>,
-    measure: &dyn Fn(&str) -> usize,
-    limit: usize,
-) -> (Vec<Chunk>, usize, Vec<usize>) {
-    let mut out = Vec::with_capacity(chunks.len());
-    let mut lens = Vec::with_capacity(chunks.len());
-    let mut resplit = 0usize;
-    for c in chunks {
-        // Measured once, here, and handed back: the caller needs these lengths
-        // to sort batches and to estimate remaining work, and re-tokenizing the
-        // corpus to recover them would double the startup cost.
-        let n = measure(&format!("{}\n{}", c.heading, c.text));
-        if n <= limit {
-            out.push(c);
-            lens.push(n);
-            continue;
-        }
-        resplit += 1;
-        // The heading rides on every piece, so it comes out of the budget once.
-        let budget = limit.saturating_sub(measure(&c.heading) + 4).max(32);
-        for piece in split_to_fit(&c.text, measure, budget) {
-            lens.push(measure(&format!("{}\n{}", c.heading, piece)));
-            out.push(Chunk { text: piece, ..c.clone() });
-        }
-    }
-    (out, resplit, lens)
+/// The lexical index's unit.  Characters, because it loads no tokenizer — that
+/// is what keeps `index --lexical` to a second's work — and BM25 has no context
+/// limit to be exact about anyway.
+fn chars(s: &str) -> usize {
+    s.len()
 }
 
-/// Greedily pack paragraphs up to BUDGET tokens, with one paragraph of overlap
-/// between consecutive pieces; hard-split any single paragraph that cannot fit
-/// on its own.
+/// Greedily pack paragraphs up to BUDGET, in whatever unit MEASURE counts, with
+/// one paragraph of overlap between consecutive pieces; hard-split any single
+/// paragraph that cannot fit on its own.
+///
+/// The only packer.  There used to be a second one working in characters, run
+/// before this one, so a section could be cut twice on rules that knew nothing
+/// of each other.
 fn split_to_fit(text: &str, measure: &dyn Fn(&str) -> usize, budget: usize) -> Vec<String> {
     let fits = |s: &str| measure(s) <= budget;
     let mut out: Vec<String> = Vec::new();
@@ -2411,7 +2403,7 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     for st in &scan.stale {
         let f = vault.join(&st.path);
-        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg, Target::Lexical));
+        chunks.extend(chunk_file(&f, &st.path, &st.text, Some(lang), cfg, Target::Lexical, &chars));
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -2424,9 +2416,15 @@ fn cmd_index_lexical(
         for f in &files {
             let path = rel_path(vault, f);
             match fs::read_to_string(f) {
-                Ok(text) => {
-                    chunks.extend(chunk_file(f, &path, &text, Some(lang), cfg, Target::Lexical))
-                }
+                Ok(text) => chunks.extend(chunk_file(
+                    f,
+                    &path,
+                    &text,
+                    Some(lang),
+                    cfg,
+                    Target::Lexical,
+                    &chars,
+                )),
                 Err(e) => eprintln!("skipping {}: {e}", f.display()),
             }
         }
@@ -2602,13 +2600,24 @@ fn cmd_index(
         let Some(text) = stale_text.get(path.as_str()) else { continue };
         let tok = tok.as_ref().expect("tokenizer is loaded whenever anything is stale");
         let measure = |t: &str| n_tokens(tok, t);
-        let (cs, n, lens) = enforce_token_limit(
-            chunk_file(f, &path, text, None, cfg, Target::Semantic),
-            &measure,
-            TOKEN_LIMIT,
-        );
-        resplit += n;
-        for (c, len) in cs.into_iter().zip(lens) {
+        // One pass, in the model's own tokens.  Sections that had to be divided
+        // are counted from the result — several chunks sharing a heading line —
+        // rather than reported by the packer.
+        let cs = chunk_file(f, &path, text, None, cfg, Target::Semantic, &measure);
+        // A section that had to be divided shows up as consecutive chunks on one
+        // heading line, so it is counted from the result rather than reported by
+        // the packer — and counted once however many pieces it became.
+        let (mut prev_line, mut counted) = (None, false);
+        for c in cs {
+            if prev_line == Some(c.line) {
+                if !counted {
+                    resplit += 1;
+                    counted = true;
+                }
+            } else {
+                prev_line = Some(c.line);
+                counted = false;
+            }
             // Confirmed against the strings themselves: the key only finds the
             // candidate, so a hash collision cannot attach the wrong vector.
             let hit = cached.get(&chunk_key(&c.heading, &c.text)).copied().filter(|&j| {
@@ -2623,8 +2632,11 @@ fn cmd_index(
                     carried += 1;
                 }
                 None => {
+                    // Measured only for what will actually be embedded, which on
+                    // an incremental run is a fraction of the corpus — the pass
+                    // this replaced measured every chunk, reused ones included.
                     pending.push(chunks.len());
-                    pending_len.push(len);
+                    pending_len.push(measure(&format!("{}\n{}", c.heading, c.text)));
                     chunks.push(c);
                     vectors.extend(std::iter::repeat_n(0.0, m.dim));
                 }
@@ -2962,7 +2974,7 @@ fn report(scored: &[(f32, &Chunk)], lim: Limits, baseline: Option<&Baseline>) {
         }
         for (score, c) in &g.hits {
             let preview: String = c.text.split_whitespace().take(20).collect::<Vec<_>>().join(" ");
-            // Several passages here means one section outran `MAX_CHARS` and was
+            // Several passages here means one section outran the budget and was
             // divided; they are numbered by line so they can be told apart.
             // Raw score: within one node every passage shares the same offset,
             // so the comparison that matters is between them.
@@ -3116,6 +3128,10 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
+    // Packed with the real tokenizer, or this measures chunks the indexer would
+    // never produce.
+    let tok = tokenizer_for(model_named(DEFAULT_MODEL)?)?;
+    let measure = |t: &str| n_tokens(&tok, t);
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3126,6 +3142,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
                 None,
                 &Config::default(),
                 Target::Semantic,
+                &measure,
             ));
         }
         if chunks.len() >= n {
@@ -3200,6 +3217,9 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
     files.sort();
+    // The same packing the index applies — one pass, in tokens — so this reports
+    // what is actually embedded rather than the raw sections.
+    let measure = |s: &str| n_tokens(&tok, s);
     let mut chunks = Vec::new();
     for f in &files {
         if let Ok(text) = fs::read_to_string(f) {
@@ -3210,15 +3230,11 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
                 None,
                 &Config::default(),
                 Target::Semantic,
+                &measure,
             ));
         }
     }
-    // Same splitting the index applies, so this reports what is actually
-    // embedded rather than the raw sections.
-    let raw = chunks.len();
-    let measure = |s: &str| n_tokens(&tok, s);
-    let (chunks, resplit, _) = enforce_token_limit(chunks, &measure, limit);
-    println!("{raw} raw chunks · {resplit} re-split · {} embedded", chunks.len());
+    println!("{} chunks packed to the policy's budget", chunks.len());
     let texts: Vec<String> = chunks.iter().map(|c| format!("{}\n{}", c.heading, c.text)).collect();
 
     let mut lens: Vec<(usize, usize)> = Vec::with_capacity(texts.len());
@@ -3377,21 +3393,22 @@ fn cmd_chunks(
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
-        let raw = chunk_file(
+        // Each index is previewed in its own unit, because each is packed in
+        // its own: showing a lexical preview cut to token boundaries would be
+        // showing something that never reaches disk.
+        let unit: &dyn Fn(&str) -> usize = match target {
+            Target::Semantic => &measure,
+            Target::Lexical => &chars,
+        };
+        let chunks = chunk_file(
             f,
             &rel_path(vault, f),
             &text,
             (target == Target::Lexical).then_some(lang),
             cfg,
             target,
+            unit,
         );
-        // Only the semantic index re-splits at the token limit; showing a
-        // lexical preview cut the same way would be showing something that
-        // never reaches disk.
-        let chunks = match target {
-            Target::Semantic => enforce_token_limit(raw, &measure, TOKEN_LIMIT).0,
-            Target::Lexical => raw,
-        };
         println!("\n=== {} — {} chunks", f.display(), chunks.len());
         for (i, c) in chunks.iter().enumerate() {
             let full = format!("{}\n{}", c.heading, c.text);
@@ -3701,6 +3718,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
+            &unsplit,
         )
     }
 
@@ -3801,45 +3819,62 @@ mod tests {
         }
     }
 
+    /// Pack a note under a budget counted in whatever `words` counts.
+    fn packed(note: &str, budget: usize) -> Vec<Chunk> {
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: budget, ..Chunking::default() },
+            ..Config::default()
+        };
+        chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, Target::Semantic, &words)
+    }
+
+    /// The heading is prepended to every piece before it is embedded, so it has
+    /// to come out of the budget.  Packing a body to the whole budget and then
+    /// adding the heading would hand the model more than it takes, and fastembed
+    /// truncates that in silence.
     #[test]
-    fn enforce_token_limit_accounts_for_the_heading() {
-        let long = para("w", 200);
-        let c = vec![Chunk {
-            path: "n.org".into(),
-            id: Some("id".into()),
-            heading: para("h", 10),
-            line: 1,
-            tags: Vec::new(),
-            todo: None,
-            priority: None,
-            lang: "en-US".into(),
-            text: long,
-        }];
-        let (out, resplit, _) = enforce_token_limit(c, &words, 50);
-        assert_eq!(resplit, 1);
-        for ch in &out {
-            let full = format!("{}\n{}", ch.heading, ch.text);
+    fn the_heading_comes_out_of_the_budget() {
+        let note = format!("#+title: T\n* {}\n{}\n", para("h", 10), para("w", 200));
+        let cs = packed(&note, 50);
+        assert!(cs.len() > 1, "200 words cannot fit a budget of 50");
+        for c in &cs {
+            let full = format!("{}\n{}", c.heading, c.text);
             assert!(words(&full) <= 50, "heading + text must fit: {}", words(&full));
         }
     }
 
+    /// And a section already within budget is left whole, with its metadata.
     #[test]
-    fn enforce_token_limit_leaves_conforming_chunks_alone() {
-        let c = vec![Chunk {
-            path: "n.org".into(),
-            id: None,
-            heading: "H".into(),
-            line: 3,
-            tags: Vec::new(),
-            todo: None,
-            priority: None,
-            lang: "en-US".into(),
-            text: "short body".into(),
-        }];
-        let (out, resplit, _) = enforce_token_limit(c, &words, 50);
-        assert_eq!(resplit, 0);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].line, 3, "metadata must survive the pass");
+    fn a_section_within_budget_is_left_whole() {
+        let cs = packed("#+title: T\n* H\nshort body\n", 50);
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].text.trim(), "short body");
+        assert_eq!(cs[0].line, 2, "the heading's own line");
+    }
+
+    /// Each index is packed in its own unit, so one budget cannot govern both:
+    /// the same note divides differently for words than for characters.
+    #[test]
+    fn each_index_is_packed_in_its_own_unit() {
+        let note = format!("#+title: T\n* H\n{}\n", para("word", 100));
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: 20, lexical_chars: 10_000 },
+            ..Config::default()
+        };
+        let at = |target, m: &dyn Fn(&str) -> usize| {
+            chunk_file(
+                Path::new("/v/n.org"),
+                "n.org",
+                &note,
+                Some(&LangConfig::default()),
+                &cfg,
+                target,
+                m,
+            )
+            .len()
+        };
+        assert!(at(Target::Semantic, &words) > 1, "100 words exceed a 20-word budget");
+        assert_eq!(at(Target::Lexical, &chars), 1, "but not 10,000 characters");
     }
 
     #[test]
@@ -3867,6 +3902,13 @@ mod tests {
     /// seed and assert.
     fn sem(v: &Path) -> PathBuf {
         semantic_dir(v, model_named(DEFAULT_MODEL).unwrap())
+    }
+
+    /// A measure for tests that are about parsing, not packing: nothing ever
+    /// exceeds a budget, so a note comes back as the sections it has.  Packing
+    /// itself is exercised directly against `split_to_fit`.
+    fn unsplit(_: &str) -> usize {
+        0
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -3930,7 +3972,15 @@ mod tests {
         for p in paths {
             let abs = dir.join(p);
             let text = fs::read_to_string(&abs).unwrap();
-            chunks.extend(chunk_file(&abs, p, &text, None, &Config::default(), Target::Semantic));
+            chunks.extend(chunk_file(
+                &abs,
+                p,
+                &text,
+                None,
+                &Config::default(),
+                Target::Semantic,
+                &unsplit,
+            ));
             files.insert((*p).to_string(), content_hash(text.as_bytes()));
         }
         let stamps =
@@ -4002,7 +4052,8 @@ mod tests {
         // `chunk_file` rather than `cmd_index`, which would load the model to
         // embed the one new passage.
         let text = fs::read_to_string(&abs).unwrap();
-        let fresh = chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic);
+        let fresh =
+            chunk_file(&abs, &a, &text, None, &Config::default(), Target::Semantic, &unsplit);
         let old = load_index(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).unwrap();
         let cached: std::collections::HashMap<u64, usize> = old
             .chunks
@@ -4105,6 +4156,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
+            &unsplit,
         );
         let texts: Vec<&str> = c.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(texts.len(), 1, "only the public section survives: {texts:?}");
@@ -4113,7 +4165,15 @@ mod tests {
         // The exclusion is inherited, so it is the child that proves it works:
         // a per-heading rule would have kept "Deeper".
         let keep = Config { exclude_tagged: vec![], ..Config::default() };
-        let all = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &keep, Target::Semantic);
+        let all = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            text,
+            None,
+            &keep,
+            Target::Semantic,
+            &unsplit,
+        );
         assert_eq!(all.len(), 3, "and nothing is dropped when nothing is excluded");
     }
 
@@ -4123,8 +4183,17 @@ mod tests {
                     #+begin_src bash\nrm -rf /tmp/x\n#+end_src\n\n\
                     after the snippet\n";
         let cfg = Config::default();
-        let sem = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Semantic);
-        let lex = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical);
+        let sem = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            text,
+            None,
+            &cfg,
+            Target::Semantic,
+            &unsplit,
+        );
+        let lex =
+            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &unsplit);
 
         // The body is not embedded, but the seam and the fact survive: without
         // the placeholder the two paragraphs would read as adjacent.
@@ -4142,13 +4211,22 @@ mod tests {
         let text = "#+title: T\n* S\nprose\n\n#+RESULTS:\n: mounted ok\n: 0 errors\n\n\
                     #+begin_quote\nA quotation is prose set off.\n#+end_quote\n";
         let cfg = Config::default();
-        let sem = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Semantic);
+        let sem = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            text,
+            None,
+            &cfg,
+            Target::Semantic,
+            &unsplit,
+        );
         // Babel output is generated and nobody looks for it by meaning; a
         // quotation is prose someone chose to set off.
         assert!(!sem[0].text.contains("mounted ok"), "{:?}", sem[0].text);
         assert!(sem[0].text.contains("quotation is prose"), "{:?}", sem[0].text);
 
-        let lex = chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical);
+        let lex =
+            chunk_file(Path::new("/v/n.org"), "n.org", text, None, &cfg, Target::Lexical, &unsplit);
         assert!(lex[0].text.contains("mounted ok"), "still findable by word");
     }
 
@@ -4507,7 +4585,7 @@ mod tests {
         assert_eq!(g[1].heading, "Meetings > Meeting 030");
     }
 
-    /// The other direction: one section divided because it outran `MAX_CHARS`
+    /// The other direction: one section divided because it outran the budget
     /// is still one place in the vault, so it stays a single result.
     #[test]
     fn a_divided_section_stays_one_result() {
@@ -4671,7 +4749,15 @@ mod tests {
     fn planning_is_kept_for_words_and_dropped_for_meaning_by_default() {
         let note = "#+title: T\n* Task\nDEADLINE: <2026-09-01 Tue>\nBody.\n";
         let of = |target| {
-            chunk_file(Path::new("/v/n.org"), "n.org", note, None, &Config::default(), target)
+            chunk_file(
+                Path::new("/v/n.org"),
+                "n.org",
+                note,
+                None,
+                &Config::default(),
+                target,
+                &unsplit,
+            )
         };
         assert!(!of(Target::Semantic)[0].text.contains("DEADLINE"), "noise to an embedding");
         assert!(of(Target::Lexical)[0].text.contains("DEADLINE: <2026-09-01 Tue>"), "searchable");
@@ -4686,7 +4772,8 @@ mod tests {
             planning_line: PlanningLinePolicy { semantic: true, lexical: false },
             ..Config::default()
         };
-        let of = |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target);
+        let of =
+            |target| chunk_file(Path::new("/v/n.org"), "n.org", note, None, &cfg, target, &unsplit);
         assert!(of(Target::Semantic)[0].text.contains("DEADLINE"));
         assert!(!of(Target::Lexical)[0].text.contains("DEADLINE"));
 
@@ -4757,6 +4844,7 @@ mod tests {
             None,
             &cfg,
             Target::Semantic,
+            &unsplit,
         );
         assert_eq!(c[0].todo.as_deref(), Some("NEXT"));
         assert_eq!(c[0].heading, "T > Rewire");
@@ -4802,6 +4890,7 @@ mod tests {
             None,
             &Config::default(),
             Target::Semantic,
+            &unsplit,
         );
         assert_eq!(c[0].path, "sub/Note.org", "relative, so the vault can move");
     }
@@ -5009,6 +5098,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         let by = |n: &str| c.iter().find(|x| x.text.trim() == n).unwrap();
         assert_eq!(by("alpha").lang, "en-US", "the configured default");
@@ -5025,6 +5115,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         assert_eq!(c[0].lang, "it-IT");
     }
@@ -5182,7 +5273,8 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-        );
+                &unsplit,
+);
         assert_eq!(de[0].lang, "de");
         let en = chunk_file(
             Path::new("/v/en.org"),
@@ -5191,6 +5283,7 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         assert_eq!(en[0].lang, "en");
     }
@@ -5207,7 +5300,8 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-        );
+                &unsplit,
+);
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en", "classified");
         assert_eq!(by("declared").lang, "it-IT", "declared, and not overruled");
@@ -5226,7 +5320,8 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-        );
+                &unsplit,
+);
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("damped").lang, "en-US", "classified, from the candidates");
         assert_eq!(by("dichiara").lang, "it-IT", "declared, outside the candidates");
@@ -5243,7 +5338,8 @@ mod tests {
             Some(&cfg),
             &Config::default(),
             Target::Lexical,
-        );
+                &unsplit,
+);
         let by = |n: &str| c.iter().find(|x| x.text.contains(n)).unwrap();
         assert_eq!(by("Plain").lang, "en-US");
         assert_eq!(by("Abschnitt").lang, "de-DE");
@@ -5263,6 +5359,7 @@ mod tests {
             Some(&LangConfig::parse("de-DE,en-US")),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         assert_eq!(listed[0].lang, "de-DE", "first configured language wins");
 
@@ -5273,6 +5370,7 @@ mod tests {
             Some(&LangConfig::parse("en-US")),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         assert_eq!(single[0].lang, "en-US");
 
@@ -5284,6 +5382,7 @@ mod tests {
             Some(&LangConfig::parse("auto")),
             &Config::default(),
             Target::Lexical,
+            &unsplit,
         );
         assert_eq!(auto[0].lang, "en");
     }
