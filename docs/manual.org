@@ -202,7 +202,7 @@ Methods:
 |------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
 | =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=   | =vault=                                                                                  | which indexes are built, and which are loaded |
+| =status=   | =vault= (optional)                                                                       | the release, and which indexes are built and loaded |
 | =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
 | =shutdown= | ---                                                                                      | exit                                          |
 
@@ -267,6 +267,40 @@ the index was built under* --- see
 [[#what-gets-indexed][what gets indexed]] for what that is for and what a client
 should do with the error. Leaving it out searches whatever is there, which is
 what the CLI does.
+
+*** Which binary you are talking to
+:PROPERTIES:
+:CUSTOM_ID: version
+:END:
+
+The Emacs package and the binary are one release, shipped from one repository,
+so there is one version between them and nothing to negotiate. A client checks
+that the binary is the one its own release expects, and installs the right one
+if it is not.
+
+Ask before anything is running:
+
+#+begin_src console
+$ org-semantic --version
+0.1.0
+#+end_src
+
+or over the pipe once it is, where =vault= is optional precisely because the
+first question is which binary is on the other end:
+
+#+begin_src json
+--> { "jsonrpc": "2.0", "id": 1, "method": "status", "params": {} }
+<-- { "version": "0.1.0", "loaded": 0 }
+#+end_src
+
+Name a vault and the answer also says which indexes that vault has, and how many
+are resident:
+
+#+begin_src json
+<-- { "version": "0.1.0", "loaded": 1, "vault": "/home/you/notes",
+      "semantic": [ { "name": "e5-small", "dim": 384, "about": "100 languages" } ],
+      "lexical": true }
+#+end_src
 
 *** Errors you are meant to act on
 :PROPERTIES:

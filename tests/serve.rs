@@ -292,6 +292,27 @@ fn warnings_ride_the_reply() {
     assert_eq!(unreadable[0]["path"], "broken.org", "vault-relative, as a hit is");
 }
 
+/// The Emacs package ships from this repo and moves with it, so the two are one
+/// release and one version. That is the whole of the compatibility story: the
+/// package checks the binary is its own, and fetches the right one if not.
+///
+/// So the version has to be askable both ways — from a shell before anything is
+/// running, and over the wire once it is — and the two must agree.
+#[test]
+fn the_binary_says_which_release_it_is() {
+    let flag = Command::new(env!("CARGO_BIN_EXE_org-semantic")).arg("--version").output().unwrap();
+    let printed = String::from_utf8(flag.stdout).unwrap().trim().to_string();
+    assert_eq!(printed, env!("CARGO_PKG_VERSION"), "`--version` is the crate's own");
+
+    // Over the wire, and *without* a vault: a client's first question is which
+    // binary it is talking to, and it should not have to name one to ask.
+    let msgs =
+        talk(&[json!({ "jsonrpc": "2.0", "id": 7, "method": "status", "params": {} })], None);
+    let result = &msgs.iter().find(|m| m["id"] == 7).expect("a reply")["result"];
+    assert_eq!(result["version"], printed, "and the same one the flag prints");
+    assert!(result.get("vault").is_none(), "no vault asked about, none reported: {result:?}");
+}
+
 // --------------------------------------------------------------- cancellation
 
 /// Stopping a run that is already under way.

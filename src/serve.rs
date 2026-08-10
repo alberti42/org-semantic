@@ -328,21 +328,25 @@ impl Server {
 
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
+    /// `vault` is optional here, unlike everywhere else: a client's first
+    /// question is which binary it is talking to, and it should not have to name
+    /// a vault to ask.  With one, the answer also says what that vault has.
     fn status(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
-        let vault = PathBuf::from(
-            p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
-        );
+        let mut out = serde_json::Map::new();
+        out.insert("version".into(), env!("CARGO_PKG_VERSION").into());
+        out.insert("loaded".into(), self.semantic.len().into());
+
+        let Some(vault) = p.get("vault").and_then(|v| v.as_str()).map(PathBuf::from) else {
+            return Ok(serde_json::Value::Object(out));
+        };
         let models: Vec<serde_json::Value> = built_models(&vault)
             .iter()
             .map(|m| serde_json::json!({ "name": m.name, "dim": m.dim, "about": m.about }))
             .collect();
-        let lexical = lexical::stored_key(&state_dir(&vault)).is_some();
-        Ok(serde_json::json!({
-            "vault": vault,
-            "semantic": models,
-            "lexical": lexical,
-            "loaded": self.semantic.len(),
-        }))
+        out.insert("lexical".into(), lexical::stored_key(&state_dir(&vault)).is_some().into());
+        out.insert("semantic".into(), models.into());
+        out.insert("vault".into(), serde_json::to_value(vault)?);
+        Ok(serde_json::Value::Object(out))
     }
 
     /// TOKEN is the request's id, which doubles as the progress token: a

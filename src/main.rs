@@ -614,6 +614,8 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
+  --version                                 the release this binary is from
+
 Everything about how a vault is indexed is policy, not flags: which languages
 it is written in, whether accents are folded, which subtrees are skipped, how
 large a passage may get, and what happens to src and example blocks.  It goes
@@ -4865,6 +4867,13 @@ fn main() -> Result<()> {
             cmd_chunks(vault, needle, &lang, model_arg(&args, 3)?, &cfg, target, &mut j)
         }
         Some("serve") => serve::serve(),
+        // The Emacs package ships from this repo and moves with it, so the two
+        // are one release.  This is how the package checks it is talking to its
+        // own binary — before it starts one, where `status` cannot answer.
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("models") => {
             reject_unknown_flags(&args, 2, &[])?;
             // With a vault, say which of them are actually built for it.

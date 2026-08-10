@@ -78,6 +78,7 @@ starting from [`config.example.json`](config.example.json).
 - [Install](https://alberti42.github.io/org-semantic/#install)
 - [Use](https://alberti42.github.io/org-semantic/#use)
   - [Driving it from Emacs, or anything else](https://alberti42.github.io/org-semantic/#driving-it-from-an-editor) — `--json` and `serve`
+    - [Which binary you are talking to](https://alberti42.github.io/org-semantic/#version) — one repo, one release, one version
     - [Errors you are meant to act on](https://alberti42.github.io/org-semantic/#errors-a-client-acts-on) — labelled, so a client can offer the fix
     - [Watching an index happen](https://alberti42.github.io/org-semantic/#progress) — `$/progress` while a reindex runs
     - [Stopping a run](https://alberti42.github.io/org-semantic/#cancelling) — SIGINT, and why not `$/cancelRequest`
