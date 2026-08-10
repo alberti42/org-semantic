@@ -223,6 +223,15 @@ struct Chunk {
     /// `[src bash]` stands for is in the file.
     #[serde(skip)]
     text: String,
+    /// The heading as it was *embedded*, when that is not the whole path — set
+    /// only where `fit_heading` had to cut one down.
+    ///
+    /// Never stored, and never shown: `heading` stays the full outline path, so
+    /// a result still says where it is and an editor still jumps there. This is
+    /// only what the model was given, computed once here so the budget and the
+    /// embedding cannot disagree about it.
+    #[serde(skip)]
+    embed_heading: Option<String>,
 }
 
 // ---------------------------------------------------------------- collecting
@@ -1212,12 +1221,13 @@ fn chunk_file(
         }
         let todo = todo_stack.iter().rev().find_map(|t| t.clone());
         let priority = prio_stack.iter().rev().find_map(|p| *p);
-        // Exactly what precedes the body in the embedded string — the model's
-        // prefix, the heading, the newline — comes out of the budget once, here,
-        // where the heading is known.  The floor guarantees forward progress
-        // when that prelude is itself longer than the budget; see the known hole
-        // in CLAUDE.md.
-        let room = limit.saturating_sub(measure(&budget.prelude(&heading))).max(MIN_ROOM);
+        // Exactly what precedes the body in the stored string comes out of the
+        // budget once, here, where the heading is known.  A path too long to
+        // leave the body any room is cut down rather than left to overrun the
+        // model, which would truncate the body instead.
+        let embed_heading = fit_heading(&heading, budget, limit);
+        let measured = embed_heading.as_deref().unwrap_or(&heading);
+        let room = limit.saturating_sub(measure(&budget.prelude(measured))).max(MIN_ROOM);
         for piece in split_to_fit(paras, measure, room) {
             chunks.push(Chunk {
                 path: rel.to_string(),
@@ -1230,8 +1240,11 @@ fn chunk_file(
                 todo: todo.clone(),
                 priority,
                 lang: lang.to_string(),
-                hash: chunk_key(&heading, &piece.text),
+                // Keyed on what was embedded, so shortening an over-long
+                // heading invalidates the vectors built from the old one.
+                hash: chunk_key(measured, &piece.text),
                 text: piece.text,
+                embed_heading: embed_heading.clone(),
             });
         }
     };
@@ -1495,6 +1508,56 @@ impl Budget<'_> {
             None => String::new(),
         }
     }
+}
+
+/// The string this chunk is embedded as, exactly: the model's prefix, the
+/// heading it was measured under, the body.
+///
+/// One place, so a diagnostic can never report a different string from the one
+/// the indexer sends — `tokens` did, and told you a note was 920 tokens after
+/// the heading had already been cut down.
+fn embedded_as(m: &Model, c: &Chunk) -> String {
+    let h = c.embed_heading.as_deref().unwrap_or(&c.heading);
+    format!("{}{}\n{}", m.passage, h, c.text)
+}
+
+/// Cut a heading path down until the body is left some room.
+///
+/// Only ever fires when the path alone would leave less than `MIN_ROOM`, which
+/// takes a heading many times longer than anything real — the worst in a
+/// 951-note vault is 52 tokens against a budget of 350. Without it the floor
+/// applies and the chunk overruns the model, which truncates the *end*: the
+/// body, all of it. Better to lose the tail of an absurd heading than the whole
+/// passage underneath it.
+///
+/// Cut from the tail, keeping the front. A heading path reads outside-in
+/// (`Note > Section > Subsection`), so the front carries which note this is,
+/// and one component long enough to trigger this is long enough that its opening
+/// words are what identify it. The ellipsis marks that something was dropped, so
+/// an embedding built from it is not silently claiming to be the whole path.
+///
+/// Sized like `hard_split`: guess from this text's own characters-per-token,
+/// then shrink until it actually fits.
+fn fit_heading(heading: &str, budget: &Budget, limit: usize) -> Option<String> {
+    let measure = budget.measure;
+    let room_for_prelude = limit.saturating_sub(MIN_ROOM);
+    if measure(&budget.prelude(heading)) <= room_for_prelude {
+        return None;
+    }
+    let fits = |h: &str| measure(&budget.prelude(&format!("{h}…"))) <= room_for_prelude;
+    let toks = measure(heading).max(1);
+    let mut cut = ((room_for_prelude as f64 * heading.len() as f64 / toks as f64) as usize)
+        .clamp(1, heading.len());
+    loop {
+        while cut > 1 && !heading.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut <= 1 || fits(&heading[..cut]) {
+            break;
+        }
+        cut = (cut * 9 / 10).max(1);
+    }
+    Some(format!("{}…", &heading[..cut]))
 }
 
 /// Add a kept line to the paragraph being built, or start a new one.
@@ -2908,6 +2971,27 @@ fn cmd_index(
             cfg.chunk.of(Target::Semantic)
         );
     }
+    // Rare enough to be worth naming when it happens: the heading was too long
+    // to leave the passage room, so it was cut and the note is embedded under a
+    // shortened path.  Silence here used to mean the body was truncated instead.
+    let cut: Vec<&Chunk> = chunks.iter().filter(|c| c.embed_heading.is_some()).collect();
+    if !cut.is_empty() {
+        let mut seen: Vec<(&str, usize)> = Vec::new();
+        for c in &cut {
+            let key = (c.path.as_str(), c.heading_line);
+            if !seen.contains(&key) {
+                seen.push(key);
+            }
+        }
+        eprintln!(
+            "  {} heading{} too long to leave the passage room, shortened for embedding:",
+            seen.len(),
+            if seen.len() == 1 { "" } else { "s" }
+        );
+        for (path, line) in seen.iter().take(3) {
+            eprintln!("    {path}:{line}");
+        }
+    }
     // The carried count is what makes a large note cheap to edit, so it is
     // worth saying out loud rather than leaving as an unexplained small number
     // next to a file the user knows they changed.
@@ -2964,10 +3048,7 @@ fn cmd_index(
 
         let t2 = Instant::now();
         // Heading path prepended so a passage carries the context it sits under.
-        let texts: Vec<String> = pending
-            .iter()
-            .map(|&i| format!("{}{}\n{}", m.passage, chunks[i].heading, chunks[i].text))
-            .collect();
+        let texts: Vec<String> = pending.iter().map(|&i| embedded_as(m, &chunks[i])).collect();
         let total_tokens: usize = pending_len.iter().sum();
 
         // Sorted by tokens, not characters.  fastembed pads each batch to its
@@ -3486,7 +3567,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
         lens[lens.len() - 1]
     );
 
-    let texts: Vec<String> = chunks.iter().map(|c| format!("{}\n{}", c.heading, c.text)).collect();
+    let texts: Vec<String> = chunks.iter().map(|c| embedded_as(m, c)).collect();
 
     // One configuration per process: an ORT session that is merely dropped does
     // not necessarily return its arena, and running four in a row was enough to
@@ -3559,7 +3640,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
         }
     }
     println!("{} chunks packed to the policy's budget", chunks.len());
-    let texts: Vec<String> = chunks.iter().map(|c| format!("{}\n{}", c.heading, c.text)).collect();
+    let texts: Vec<String> = chunks.iter().map(|c| embedded_as(m, c)).collect();
 
     let mut lens: Vec<(usize, usize)> = Vec::with_capacity(texts.len());
     for (i, t) in texts.iter().enumerate() {
@@ -4337,6 +4418,36 @@ mod tests {
         }
     }
 
+    /// A heading longer than the budget used to take the floor, and the chunk
+    /// then overran the model — which truncates the *end*, so the body went and
+    /// the heading stayed. Now the heading is cut instead, and the passage
+    /// survives.
+    #[test]
+    fn an_over_long_heading_is_cut_so_the_passage_survives() {
+        let note =
+            format!("#+title: T\n* {}\nThe regulator oscillates at 1.4 Hz.\n", para("h", 300));
+        let cs = packed(&note, 100);
+        assert_eq!(cs.len(), 1);
+        let c = &cs[0];
+
+        assert!(c.heading.starts_with("T > h h h"), "the full path is kept for display");
+        assert!(words(&c.heading) > 100, "and it really is over the budget");
+
+        let embedded = c.embed_heading.as_deref().expect("it must have been cut");
+        assert!(embedded.ends_with('…'), "and marked as cut: {embedded:?}");
+        let whole = format!("{embedded}\n{}", c.text);
+        assert!(words(&whole) <= 100, "{} words over a 100-word budget", words(&whole));
+        assert!(c.text.contains("regulator"), "the passage is what had to survive");
+    }
+
+    /// And an ordinary heading is left exactly alone — this must never fire on
+    /// a real note.
+    #[test]
+    fn an_ordinary_heading_is_not_touched() {
+        let cs = packed("#+title: T\n* A perfectly normal heading\nSome prose.\n", 100);
+        assert_eq!(cs[0].embed_heading, None);
+    }
+
     /// And a section already within budget is left whole, with its metadata.
     #[test]
     fn a_section_within_budget_is_left_whole() {
@@ -4448,6 +4559,7 @@ mod tests {
                 lang: "en-US".into(),
                 hash: 0,
                 text: "body".into(),
+                embed_heading: None,
             });
             files.insert((*p).to_string(), content_hash(&fs::read(dir.join(p)).unwrap()));
         }
@@ -5064,6 +5176,7 @@ mod tests {
             lang: String::new(),
             hash: 0,
             text: format!("body at {line}"),
+            embed_heading: None,
         }
     }
 
@@ -5467,6 +5580,7 @@ mod tests {
             lang: "en-US".into(),
             hash: 0,
             text: "body".into(),
+            embed_heading: None,
         }
     }
 
@@ -5555,6 +5669,7 @@ mod tests {
                 lang: "en-US".into(),
                 hash: 0,
                 text: "the quick brown fox".into(),
+                embed_heading: None,
             },
             Chunk {
                 path: b.clone(),
@@ -5569,6 +5684,7 @@ mod tests {
                 lang: "en-US".into(),
                 hash: 0,
                 text: "der schnelle braune Fuchs".into(),
+                embed_heading: None,
             },
         ];
         let dir = state_dir(&v);
@@ -5614,6 +5730,7 @@ mod tests {
             lang: "en-US".into(),
             hash: 0,
             text: t.into(),
+            embed_heading: None,
         };
         let dir = state_dir(&v);
         fs::create_dir_all(&dir).unwrap();
@@ -5738,6 +5855,7 @@ mod tests {
             lang: lang.into(),
             hash: 0,
             text: t.into(),
+            embed_heading: None,
         };
         let chunks = vec![
             mk(&en, "en-US", "the damped oscillations of a trapped atom"),
