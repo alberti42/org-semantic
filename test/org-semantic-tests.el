@@ -109,6 +109,22 @@ first `index' has to be reachable too."
     (should (equal (org-semantic-vault (expand-file-name "pumps.org" dir))
                    (org-semantic--canonical dir)))))
 
+(ert-deftest a-declaration-is-read-even-from-a-buffer-visiting-nothing ()
+  "`M-x' is pressed from Dired, from an agenda, from *scratch*.
+
+None of those has had the directory's local variables applied to
+it, so reading `org-semantic-vault-root' out of the buffer finds
+nothing and the declaration appears not to work -- which is how a
+command run from anywhere but a note failed to find the vault it
+was standing in."
+  (org-semantic-tests--with-vault dir
+    (with-temp-file (expand-file-name ".dir-locals.el" dir)
+      (insert "((nil . ((org-semantic-vault-root . t))))\n"))
+    (with-temp-buffer
+      (setq default-directory (file-name-as-directory dir))
+      (should-not (local-variable-p 'org-semantic-vault-root))
+      (should (equal (org-semantic-vault) (org-semantic--canonical dir))))))
+
 (ert-deftest a-declaration-may-name-a-directory-under-the-project ()
   "A string names the root, for notes that sit below what declares them."
   (org-semantic-tests--with-vault dir

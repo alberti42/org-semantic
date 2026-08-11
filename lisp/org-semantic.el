@@ -201,14 +201,13 @@ that is where an index lives."
                 (if (file-directory-p where)
                     (file-name-as-directory where)
                   (file-name-directory (expand-file-name where)))))
-         (declared (if buffer
-                       (buffer-local-value 'org-semantic-vault-root buffer)
-                     ;; A path was named rather than a buffer, so nothing
-                     ;; has applied that directory's local variables.
-                     (with-temp-buffer
-                       (setq default-directory dir)
-                       (hack-dir-local-variables-non-file-buffer)
-                       org-semantic-vault-root))))
+         (declared (or (and buffer
+                            (buffer-local-value 'org-semantic-vault-root buffer))
+                       ;; Nothing has applied that directory's local
+                       ;; variables when a path was named -- and also not
+                       ;; when the buffer is not visiting a file, which is
+                       ;; where `M-x' is most likely to be pressed from.
+                       (org-semantic--declared dir))))
     (cond
      ;; Both declared forms are relative to where the declaration came
      ;; from -- the nearest `.dir-locals.el', which is the only one Emacs
@@ -236,6 +235,19 @@ WHERE is as in `org-semantic-vault'."
                "and no org-semantic-vault-root declared for it")
        (abbreviate-file-name
         (if (bufferp where) (buffer-name where) (or where default-directory))))))
+
+(defun org-semantic--declared (dir)
+  "What DIR's directory-local variables say `org-semantic-vault-root' is.
+
+Read here rather than taken from the buffer, because a buffer that
+is not visiting a file has never had them applied -- `*scratch*',
+an agenda buffer, anything a command is invoked from that is not
+one of the notes.  Only consulted when the buffer itself says
+nothing, so a visited file costs no extra file reads."
+  (with-temp-buffer
+    (setq default-directory dir)
+    (hack-dir-local-variables-non-file-buffer)
+    org-semantic-vault-root))
 
 (defun org-semantic--canonical (dir)
   "Return DIR as the server will be asked about it.
