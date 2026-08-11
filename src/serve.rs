@@ -95,6 +95,12 @@ struct Plan {
     rehash: bool,
     want: &'static Model,
     cfg: Config,
+    /// Never hold a second set of weights, whatever it costs a search.
+    ///
+    /// A **parameter and not policy**: it changes nothing about what the index
+    /// contains, so putting it in `Config` would hash it into the manifest and
+    /// demand a reindex the first time someone toggled a memory setting.
+    conserve: bool,
 }
 
 impl Server {
@@ -287,6 +293,10 @@ impl Server {
         };
         let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
+        // For a client whose user is short of memory rather than of patience.
+        // Off by default: the second model is transient and a rebuild is rare,
+        // so most people would rather have the responsive search.
+        let conserve = p.get("conserveMemory").and_then(|v| v.as_bool()).unwrap_or(false);
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
@@ -329,7 +339,7 @@ impl Server {
                 )?;
             }
         }
-        Ok(Plan { vault, semantic, lexical, full, rehash, want, cfg })
+        Ok(Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve })
     }
 
     /// Start an `index` and return to the loop.
@@ -389,7 +399,7 @@ impl Server {
 
     /// The run itself, on the worker.
     fn run(&self, plan: Plan, j: &mut Journal) -> Result<serde_json::Value> {
-        let Plan { vault, semantic, lexical, full, rehash, want, cfg } = plan;
+        let Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve } = plan;
         let mut done = serde_json::Map::new();
 
         if semantic {
@@ -398,13 +408,22 @@ impl Server {
             // journal: a flag is something you can forget to clear, a mark is
             // not.
             let mark = j.remarks.len();
-            // Lend the resident model if this vault's index is already loaded.
-            // A vault nobody has searched has no entry and no model to lend, so
+            // Offer the resident model if this vault's index is already loaded.
+            // A vault nobody has searched has no entry and no model to offer, so
             // the run loads one of its own and drops it; the first search after
             // it reads the committed index from disk, as it always did.
+            //
+            // Whether the offer is *taken* for a long run is `cmd_index`'s call,
+            // since it is the one that knows how many chunks there are — unless
+            // the client has asked us never to hold two sets of weights, which is
+            // an answer no chunk count overrides.
             let loaded = lock(&self.semantic).get(&key).cloned();
-            let out =
-                cmd_index(&vault, full, rehash, want, &cfg, j, loaded.as_ref().map(|s| &s.model))?;
+            let lend = match (loaded.as_ref(), conserve) {
+                (Some(s), true) => Lend::Always(&s.model),
+                (Some(s), false) => Lend::IfShort(&s.model),
+                (None, _) => Lend::Own,
+            };
+            let out = cmd_index(&vault, full, rehash, want, &cfg, j, lend)?;
             for r in &mut j.remarks[mark..] {
                 r.target = Some("semantic");
             }

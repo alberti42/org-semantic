@@ -3646,6 +3646,61 @@ struct IndexReport {
     secs: f64,
 }
 
+/// What the caller wants done about the embedding model.
+///
+/// A resident server holds one, and lending it to an indexing run is what makes
+/// re-embedding a just-saved note cost the embedding and nothing else. But the
+/// lend is a `Mutex`, so a search during a long run waits out the batch in
+/// flight — every time. The choice is between a model load and that wait, and it
+/// depends on how long the run turns out to be, which only `cmd_index` knows.
+///
+/// Hence three cases rather than an `Option`: the caller says what it wants and
+/// the decision is made where the chunk count is.
+enum Lend<'a> {
+    /// Nothing to share — the CLI, where there is no second user and no wait to
+    /// protect anyone from.
+    Own,
+    /// Share this one however long the run turns out to be. What a
+    /// RAM-constrained client asks for: a search during a rebuild pays for it,
+    /// and the process never holds a second set of weights.
+    Always(&'a Mutex<TextEmbedding>),
+    /// Share it for a short run, load a private one for a long one.
+    ///
+    /// A search waits one batch whether the run is two batches or two thousand —
+    /// what a long run changes is how *many* searches pay it. So a run that will
+    /// be over in a moment is not worth a model load, and one that will take
+    /// minutes is.
+    IfShort(&'a Mutex<TextEmbedding>),
+}
+
+/// Above this many chunks to embed, an indexing run loads its own model rather
+/// than borrowing the resident one, so that searches keep the resident one to
+/// themselves.
+///
+/// Four batches — expressed in `BATCH` because the wait being avoided is exactly
+/// one of those. On a real corpus that is ~6 s of embedding; under it, the run
+/// ends about as quickly as a second model could be loaded, and the load would
+/// cost more than the contention. A judgement, not a measurement: the two costs
+/// are within a factor of a few of each other around here, and the numbers that
+/// were measured are the ones either side of it — see `Lend`.
+const SHARE_UP_TO: usize = 4 * BATCH;
+
+/// How many chunks go to the model at once — and, because the model is locked for
+/// exactly one of these, **how long a search waits during a rebuild**.
+///
+/// It was 64. Halving it halves the wait, exactly, and costs nothing measurable:
+/// swept over 64/32/16/8 on 1,022 chunks of 20–400-word notes, p90 search latency
+/// went 7.2 s → 3.7 s → 2.0 s → 0.9 s while throughput stayed at 10.4–12.1
+/// chunks/s with the *ordering between batch sizes reshuffling run to run* — so
+/// the differences are below a ~7% noise floor, not a trend. 16 takes 4× of the
+/// available latency and keeps room above the size where per-call overhead would
+/// start to tell on short notes, which is not a corpus this was measured on.
+///
+/// Throughput survives because `order` is sorted by token length: a smaller group
+/// is still made of similar-length chunks, so fastembed's padding-to-longest
+/// costs no more than it did. **Shrink this only while that sort is there.**
+const BATCH: usize = 16;
+
 /// What an index run yields: the numbers, and — when it wrote — the index it
 /// wrote.
 ///
@@ -3666,7 +3721,7 @@ fn cmd_index(
     m: &Model,
     cfg: &Config,
     j: &mut Journal,
-    resident: Option<&Mutex<TextEmbedding>>,
+    lend: Lend<'_>,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
     let mut files = Vec::new();
@@ -3933,17 +3988,18 @@ fn cmd_index(
     if pending.is_empty() {
         writeln!(j.out, "no new text to embed; rewriting the manifest")?;
     } else {
-        // A resident process already holds the model; loading a second copy
-        // would cost the 0.12–0.64 s this whole design exists to avoid.
+        // Borrow the resident model, or load one of our own — the trade is a
+        // model load against a search waiting out our batches.  See `Lend`.
         //
-        // Behind a `Mutex` even when we own it outright, so there is one path
-        // rather than two.  Uncontended, that costs ~20 ns against a batch of
-        // 150 ms–1.8 s; contended, it is the whole point — see the loop below.
+        // Behind a `Mutex` either way, so there is one path rather than two.
+        // Uncontended that costs ~20 ns against a batch of seconds; contended, it
+        // is the whole point — see the loop below.
         let t1 = Instant::now();
         let owned;
-        let model: &Mutex<TextEmbedding> = match resident {
-            Some(m) => m,
-            None => {
+        let model: &Mutex<TextEmbedding> = match lend {
+            Lend::Always(m) => m,
+            Lend::IfShort(m) if pending.len() <= SHARE_UP_TO => m,
+            _ => {
                 owned = Mutex::new(model_with(m.which.clone(), None, false)?);
                 writeln!(j.out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
                 &owned
@@ -3963,25 +4019,6 @@ fn cmd_index(
         let mut order: Vec<usize> = (0..texts.len()).collect();
         order.sort_unstable_by_key(|&i| pending_len[i]);
 
-        // How many chunks go to the model at once — and, because the model is
-        // locked for exactly one of these, **how long a search waits during a
-        // rebuild**.  Both things at once, which is why the number was measured
-        // against both.
-        //
-        // It was 64.  Halving it halves the wait, exactly, and costs nothing
-        // measurable: swept over 64/32/16/8 on 1,022 chunks of 20–400-word notes,
-        // p90 search latency went 7.2 s → 3.7 s → 2.0 s → 0.9 s while throughput
-        // stayed at 10.4–12.1 chunks/s with the *ordering between batch sizes
-        // reshuffling run to run* — so the differences are below a ~7% noise
-        // floor, not a trend.  16 takes 4× of the available latency, and keeps
-        // room above the size where per-call overhead would start to tell on
-        // short notes, which is not a corpus this was measured on.
-        //
-        // Throughput survives because `order` is sorted by token length: a
-        // smaller group is still made of similar-length chunks, so fastembed's
-        // padding-to-longest costs no more than it did.  **Shrink this only while
-        // that sort is there.**
-        const BATCH: usize = 16;
         let (mut done, mut tokens_done) = (0usize, 0usize);
         for group in order.chunks(BATCH) {
             stop_requested()?;
@@ -4930,7 +4967,7 @@ fn main() -> Result<()> {
                 }
             }
             if both || !lexical {
-                cmd_index(vault, full, rehash, model, &cfg, &mut j, None)?;
+                cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own)?;
             }
             if both || lexical {
                 prepare_lang(&lang, &mut j)?;
@@ -5655,9 +5692,10 @@ mod tests {
         let body = fs::read_to_string(&abs).unwrap();
         fs::write(&abs, format!("{body}\n\n")).unwrap();
 
-        let r = cmd_index(&v, false, false, m, &Config::default(), &mut Journal::quiet(), None)
-            .unwrap()
-            .report;
+        let r =
+            cmd_index(&v, false, false, m, &Config::default(), &mut Journal::quiet(), Lend::Own)
+                .unwrap()
+                .report;
 
         assert_eq!(r.embedded, 0, "no passage changed, so none may be embedded");
         assert!(r.carried > 0, "its passages must be carried over, not rebuilt");
@@ -5727,7 +5765,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            None,
+            Lend::Own,
         )
         .unwrap();
 
@@ -5756,7 +5794,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            None,
+            Lend::Own,
         )
         .unwrap();
         assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
@@ -6103,7 +6141,8 @@ mod tests {
         let (mut j, log) = watched();
         let m = model_named(DEFAULT_MODEL).unwrap();
         // Nothing changed since the seed, so every file takes an early exit.
-        let r = cmd_index(&v, false, false, m, &Config::default(), &mut j, None).unwrap().report;
+        let r =
+            cmd_index(&v, false, false, m, &Config::default(), &mut j, Lend::Own).unwrap().report;
         assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
 
         let seen = lock(&log);
@@ -6544,7 +6583,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            None,
+            Lend::Own,
         )
         .unwrap();
 

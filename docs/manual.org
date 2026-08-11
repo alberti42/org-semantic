@@ -213,7 +213,7 @@ Methods:
 |-------------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
 | =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...], "indexing": false}= |
-| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
+| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config=, =conserveMemory= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=          | =vault=                                                                                  | which indexes this vault has, which are loaded, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |
@@ -477,15 +477,33 @@ Grey the list, or label it; the next search after the run replies will be curren
 
 Two things worth knowing before you build on this.
 
-*A semantic search during a semantic rebuild is slow.* There is one embedding
-model and the indexer holds it for one batch at a time, so your query waits for
-the batch in flight --- *about two seconds* at the worst, against 9 ms when
-nothing is running. Many are answered at once, because scanning and chunking need
-no model at all; it is the ones landing mid-embedding that wait. It answers
-instead of blocking for the whole rebuild, which is the point; it is not fast
-enough to type into. *Lexical search is unaffected* --- it uses no model --- and
-stays at a few milliseconds throughout, which makes it the better fallback while
-a rebuild is going.
+*A long rebuild loads its own copy of the model, so that searching stays fast.*
+The server keeps one model resident for queries. Lending it to an indexing run is
+what makes re-embedding a note you just saved cost the embedding and nothing else
+--- but a borrowed model is a shared one, and a query then waits for whatever
+batch is being embedded. So the run borrows it only while there is little to do,
+and loads its own for anything longer, leaving the resident one to the searcher.
+
+The difference is large. Measured on 600 notes: a full rebuild that loads its own
+model answers searches in *41 ms* at the ninetieth percentile, against *1.7
+seconds* when it shares --- and the rebuild itself takes the same time either way.
+
+What it costs is memory, and more of it than the second model alone. Measured on
+the same vault with the small English model: the server sits at 255 MB answering
+queries, reaches 691 MB through a rebuild that shares the model, and 920 MB
+through one that loads its own. So the second copy is about 230 MB --- more like
+800 MB for =e5-small=, a couple of gigabytes for the large multilingual ones ---
+while the rest is the runtime's own working memory, which a rebuild needs either
+way. *And it does not come back when the run ends*: the process stays at its high
+mark until you restart it.
+
+If that is the wrong trade for your machine, pass =conserveMemory: true= with the
+=index= request and the run will share the one model however long it takes. In
+Emacs this is =org-semantic-conserve-memory=.
+
+*Lexical search is unaffected either way* --- it uses no model --- and stays at a
+few milliseconds throughout, which makes it the better fallback while a semantic
+rebuild is going.
 
 *A second =index= is refused, not queued.* It comes back as an error with
 =data.kind= of ="indexing"=. Keep at most one in flight on your side and re-fire
