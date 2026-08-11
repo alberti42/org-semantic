@@ -404,12 +404,14 @@ enum Sent {
 /// on the descriptor — the reply above all — keeps the blocking behaviour it
 /// needs, and no caller can be surprised by an `EAGAIN` it did not ask for.
 ///
-/// The flag is what makes "did it fit?" a question the write itself answers.  A
-/// pipe write of at most `PIPE_BUF` bytes is all-or-nothing under it: ours are
-/// ~202 bytes against a floor of 512.  A stdout that is *not* a pipe — a socket
-/// — can still write partially, and half a frame would desynchronise the client
-/// permanently, so a short write is finished blocking rather than abandoned.
-/// The choice is whether to begin a write; once begun, it is always finished.
+/// The flag is what makes "did it fit?" a question the write itself answers.
+///
+/// A short write is finished blocking, whatever the size — half a frame would
+/// desynchronise the client permanently, so the choice is only whether to begin
+/// a write, never how to stop one.  Reaching that path costs a wait, though, so
+/// it is also worth not reaching it: a pipe write of at most `PIPE_BUF` is
+/// all-or-nothing, and a report is ~202 bytes against a floor of 512.  A stdout
+/// that is *not* a pipe — a socket — can go short at any size.
 #[cfg(unix)]
 fn write_without_waiting(fd: std::os::fd::RawFd, v: &serde_json::Value) -> Sent {
     let Ok(body) = serde_json::to_vec(v) else { return Sent::Gone };
@@ -622,17 +624,18 @@ mod tests {
         assert!(!deliver(false, false, Duration::ZERO), "and not before");
     }
 
-    /// The size the all-or-nothing guarantee depends on.
+    /// The size below which a report is written without waiting.
     ///
-    /// A pipe write of at most `PIPE_BUF` either goes entirely or not at all, so
-    /// a report is delivered or dropped and never half-sent. Above that limit a
-    /// write can go short, and half a frame desynchronises the client for good —
-    /// the tail is finished blocking for exactly that reason, but on a pipe that
-    /// branch should be unreachable.
+    /// Not about truncation — a short write is always finished, at any size.
+    /// This is what keeps that from being *needed*: a pipe write of at most
+    /// `PIPE_BUF` goes entirely or not at all, so the report is delivered or
+    /// dropped and never half-sent-then-waited-on.
     ///
-    /// Nothing in `Progress` is user text, so the message is small and of fixed
-    /// shape. This is here so that stays true: add a path or a message to it and
-    /// this fails rather than the guarantee quietly evaporating.
+    /// Nothing in `Progress` is user text, which is what keeps it small. This
+    /// measures a constructed worst case — every optional field, every number at
+    /// its widest — so it catches a field the builder fills and would miss one
+    /// only a call site does. Keeping user text out is the rule; this is the
+    /// reminder.
     #[test]
     fn a_report_fits_in_one_atomic_write() {
         // Every optional field present, every number at its widest.
