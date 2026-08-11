@@ -560,12 +560,12 @@ reply it is no longer waiting for and discards it. What does hurt is the
 *timeout* --- ten searches queued behind a rebuild will outlast
 =jsonrpc-default-request-timeout= --- and one-in-flight is what avoids that.
 
-*A second =SIGINT= ends the process.* The first is honoured only between units
-of work, so a wait with no units --- a model download, mid-flight --- does not
-see it. The second does.
-
-On the command line none of this applies: one thing is running, so =SIGINT=
-ends the program outright.
+*=SIGINT= is not part of this.* It once was --- there was a handler that stopped a
+run politely --- but that only existed because the server could not read a
+cancellation while it was busy, and it can now. Ctrl-C means what it means
+everywhere else: the process ends. That is also the honest answer for a model
+download, which has no units of work to check a flag between and so was never
+really interruptible.
 
 *** Warnings that do not stop the run
 :PROPERTIES:
@@ -614,11 +614,16 @@ when both indexes trip over it. Where it matters, =target= says which index a
 remark came from.
 
 *Reindexing happens in-process too.* Spawning a CLI for it would pay the model
-load again, which is the cost the resident process exists to avoid --- so the
-loaded model is lent to the indexer. Re-indexing a vault after saving one note
-takes ~95 ms and embeds only that note. The cached vectors and the score baseline
-are refreshed straight after, so the next query cannot answer from what was just
-replaced.
+load again, which is the cost the resident process exists to avoid --- so a short
+run borrows the resident model and re-indexing a vault after saving one note takes
+under a tenth of a second, embedding only that note. A long run loads its own
+instead, so that searching stays quick while it works; see
+[[#during-a-reindex][above]].
+
+Either way the new index is *adopted, not re-read*: the run already holds it in
+memory when it writes it, and hands it over. So the next query answers from the
+version just built, never from the one it replaced, and without reading the file
+back.
 
 ** Letting an agent search for you
 :PROPERTIES:

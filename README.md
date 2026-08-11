@@ -81,7 +81,7 @@ starting from [`config.example.json`](config.example.json).
     - [Which binary you are talking to](https://alberti42.github.io/org-semantic/#version) — one repo, one release, one version
     - [Errors you are meant to act on](https://alberti42.github.io/org-semantic/#errors-a-client-acts-on) — labelled, so a client can offer the fix
     - [Watching an index happen](https://alberti42.github.io/org-semantic/#progress) — `$/progress` while a reindex runs
-    - [Stopping a run](https://alberti42.github.io/org-semantic/#cancelling) — SIGINT, and why not `$/cancelRequest`
+    - [Stopping a run](https://alberti42.github.io/org-semantic/#cancelling) — `$/cancelRequest`, by the id it answers under
     - [Warnings that do not stop the run](https://alberti42.github.io/org-semantic/#remarks) — what indexing found but survived
   - [Letting an agent search for you](https://alberti42.github.io/org-semantic/#letting-an-agent-search-for-you) — RAG, and the skill in [`skills/`](skills/org-semantic/SKILL.md)
   - [Scores](https://alberti42.github.io/org-semantic/#scores-and-why-the-raw-one-is-not-worth-showing) — and why the raw one is not worth showing
