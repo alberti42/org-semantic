@@ -3616,6 +3616,23 @@ fn lex_manifest_path(dir: &Path) -> PathBuf {
     dir.join("lexical.json")
 }
 
+/// Write the lexical index's staleness record.
+///
+/// Its own function because there are two ways to reach it: a run that indexed
+/// something, and a run that found nothing to index but stamps worth trusting
+/// next time.  The second must not go through `lexical::sync`, which allocates a
+/// 50 MB writer and takes a commit to change nothing.
+///
+/// No staging dance here, unlike `save_index`: the lexical index and this record
+/// are not positionally paired, so a torn write costs a scan and not a wrong
+/// answer — the record is only ever a claim about what is already in `tantivy/`,
+/// and a missing or stale claim re-reads notes rather than mispairing them.
+fn save_lex_manifest(dir: &Path, m: &LexManifest) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(lex_manifest_path(dir), serde_json::to_vec(m)?)?;
+    Ok(())
+}
+
 /// Build or update the lexical index, and nothing else.
 ///
 /// Deliberately free of the embedding model: no vectors, no tokenizer, no
@@ -3781,7 +3798,34 @@ fn cmd_index_lexical(
         secs: t0.elapsed().as_secs_f64(),
         ..Default::default()
     };
+    // A stamp that moved without its note changing is still news, and it is
+    // this side's turn to record it: the semantic index has always refused the
+    // early return for it, and this one returned before the manifest was
+    // written — so a note that was `touch`ed, or restored by a sync, was re-read
+    // and re-hashed by every lexical run from then on, which is precisely the
+    // work a stamp exists to avoid.  The report said "1 restamped" each time.
+    //
+    // Written directly rather than by falling through to `lexical::sync`, which
+    // would allocate a 50 MB writer and take an empty commit to index nothing.
+    let restamped = old.as_ref().is_some_and(|m| m.stamps != scan.stamps);
     if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
+        if restamped {
+            writeln!(j.out, "no chunks to write; refreshing the stamps")?;
+            save_lex_manifest(
+                &dir,
+                &LexManifest {
+                    key: analyzer.key(),
+                    config: cfg.hash_for(Target::Lexical),
+                    files: scan.hashes,
+                    stamps: scan.stamps,
+                },
+            )?;
+            // Not `unchanged`: the searchable index is exactly as it was, but
+            // this run did write, and the semantic side says the same of the
+            // same case.
+            report.secs = t0.elapsed().as_secs_f64();
+            return Ok(report);
+        }
         writeln!(j.out, "nothing changed; lexical index left as it is")?;
         report.unchanged = true;
         return Ok(report);
@@ -3798,15 +3842,14 @@ fn cmd_index_lexical(
     }
 
     lexical::sync(&dir, &chunks, &scan.dropped, rebuilding, &analyzer)?;
-    fs::create_dir_all(&dir)?;
-    fs::write(
-        lex_manifest_path(&dir),
-        serde_json::to_vec(&LexManifest {
+    save_lex_manifest(
+        &dir,
+        &LexManifest {
             key: analyzer.key(),
             config: cfg.hash_for(Target::Lexical),
             files: scan.hashes,
             stamps: scan.stamps,
-        })?,
+        },
     )?;
     writeln!(
         j.out,
@@ -4186,7 +4229,16 @@ fn cmd_index(
     // `stale` rather than `pending`, now that a changed note can need no
     // embedding at all: its passages may all have been carried over, but its
     // line numbers moved and its hash is new, and both belong on disk.
-    let restamped = by_hash > 0 || old.as_ref().is_some_and(|ix| ix.stamps.len() != stamps.len());
+    //
+    // The question is whether the stamps *differ*, and it used to be asked as
+    // `by_hash > 0` — "was anything confirmed by its hash".  Those come apart
+    // under `--rehash`, which ignores every stamp and so hashes every note:
+    // `by_hash` was then the file count on a vault where nothing had moved at
+    // all, and each rehash rewrote the whole index — 10 MB on the reference
+    // vault — to store stamps identical to the ones already there.  Comparing
+    // the maps is exact, and a `BTreeMap` comparison of a few thousand keys
+    // costs nothing beside what it saves.
+    let restamped = old.as_ref().is_some_and(|ix| ix.stamps != stamps);
     if pending.is_empty() && stale.is_empty() && dropped == 0 && !restamped && old.is_some() {
         writeln!(j.out, "nothing changed; index left as it is")?;
         report.unchanged = true;
@@ -5990,6 +6042,82 @@ mod tests {
             old_hash,
             "the new content hash must reach the manifest, or this repeats every run"
         );
+    }
+
+    /// A stamp that moved without its note changing is written back — by both
+    /// indexes, and by neither when there is nothing to write back.
+    ///
+    /// Two failures in one place, and both silent.  The lexical index returned
+    /// before its manifest was written, so a `touch`ed or synced note was read
+    /// and hashed again by every run from then on — the work a stamp exists to
+    /// avoid — while the report cheerfully counted it as "restamped" each time.
+    /// And the semantic index asked `by_hash > 0` instead of whether the stamps
+    /// differed, which under `--rehash` is every note: each rehash rewrote the
+    /// whole index to store stamps identical to the ones already there.
+    #[test]
+    fn a_stamp_that_moved_without_its_note_is_written_back() {
+        let v = scratch("restamp");
+        let a = note(&v, "alpha");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let lex = |full: bool, rehash: bool| {
+            cmd_index_lexical(
+                &v,
+                full,
+                rehash,
+                &lang,
+                false,
+                &cfg,
+                &mut Journal::quiet(),
+                &Cancel::default(),
+            )
+            .unwrap()
+        };
+        let semantic = |rehash: bool| {
+            cmd_index(
+                &v,
+                false,
+                rehash,
+                m,
+                &cfg,
+                &mut Journal::quiet(),
+                Lend::Own,
+                &Cancel::default(),
+            )
+            .unwrap()
+            .report
+        };
+        let recorded = || -> LexManifest {
+            serde_json::from_slice(&fs::read(lex_manifest_path(&state_dir(&v))).unwrap()).unwrap()
+        };
+
+        lex(true, false);
+        seed_real(&v, &[a.as_str()]);
+        let was = recorded().stamps[&a];
+
+        // The same bytes written again: the content is identical and the mtime
+        // has moved, which is what `touch` and a sync leave behind.
+        let abs = v.join(&a);
+        let body = fs::read_to_string(&abs).unwrap();
+        fs::write(&abs, &body).unwrap();
+        let now = stamp_of(&abs).unwrap();
+        assert_ne!(now, was, "the filesystem must have moved it, or this proves nothing");
+
+        let r = lex(false, false);
+        assert_eq!(recorded().stamps[&a], now, "the refreshed stamp must reach lexical.json");
+        assert_eq!(r.chunks, 0, "and nothing needed indexing to get it there");
+        assert!(!r.unchanged, "a run that wrote is not an unchanged one");
+        assert!(!semantic(false).unchanged, "the semantic manifest is rewritten for it");
+        assert_eq!(loaded(&sem(&v), m).unwrap().stamps[&a], now, "with the same stamp");
+
+        // Nothing left to learn, so both may take the early return -- including
+        // under `--rehash`, which trusts no stamp and hashes every note, and
+        // must still not rewrite an index to store what is already stored.
+        assert!(lex(false, false).unchanged);
+        assert!(semantic(false).unchanged);
+        assert!(lex(false, true).unchanged, "a rehash with nothing to correct writes nothing");
+        assert!(semantic(true).unchanged, "and the same on the side that pays for it");
     }
 
     /// The saving that makes a large note cheap to edit: one new section costs
