@@ -386,6 +386,53 @@ impl Server {
 /// fill rather than half a second.
 const FLOOR: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Whether stdout can take a message without waiting for the client to read.
+///
+/// A progress report is worth less than the work it would delay: the next one
+/// supersedes it a tenth of a second later. So when the client has stopped
+/// draining — a long `call-process` elsewhere in Emacs, a GC pause — the report
+/// is dropped and the indexing carries on, rather than the indexing stopping so
+/// that a number nobody is looking at can be delivered.
+///
+/// This makes a stall unlikely, not impossible. `POLLOUT` promises that *a*
+/// write would not block, not that a 202-byte one would not; a client that
+/// stops reading in the narrow window where the buffer has room for some of a
+/// message and not all of it can still wedge the run until it resumes.
+#[cfg(unix)]
+fn stdout_has_room() -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd { fd: io::stdout().as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+    // Zero timeout: this is a question, not a wait.
+    unsafe { libc::poll(&mut p, 1, 0) > 0 && (p.revents & libc::POLLOUT) != 0 }
+}
+
+#[cfg(not(unix))]
+fn stdout_has_room() -> bool {
+    true
+}
+
+/// Whether a report goes out now.
+///
+/// Two of them always do. A phase's **opening** is news rather than repetition —
+/// it is what the protocol says ends the previous run of reports — and a phase's
+/// **last** is what lets a client stop rendering 6,400 of 6,522. Neither can be
+/// reconstructed from its neighbours, so neither is ever withheld.
+///
+/// Everything between them is superseded a tenth of a second later, and is
+/// therefore held to two conditions: enough time since the last one, and room in
+/// the pipe. `ROOM` is a function rather than a bool so this can be tested
+/// without a client on the other end.
+///
+/// The second condition is the one that decides what happens when the client
+/// stops draining: a report is worth less than the work delivering it would
+/// hold up, so it is dropped and the indexing carries on.
+fn deliver(opening: bool, last: bool, since: std::time::Duration, room: impl Fn() -> bool) -> bool {
+    if opening || last {
+        return true;
+    }
+    since >= FLOOR && room()
+}
+
 /// Report the work as it happens, under the id the caller is already waiting on.
 ///
 /// The token is that id rather than one negotiated first: LSP's
@@ -408,28 +455,9 @@ fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
     let mut sent = Instant::now() - FLOOR;
     let mut running: Option<(&'static str, &'static str)> = None;
     j.watch = Some(Box::new(move |p: &Progress| {
-        // Only reports *within* a run of them are thinned.  A phase change is
-        // not repetition — it is the news — and the protocol says as much: a
-        // change of `target` or `phase` is what ends the previous run.
-        //
-        // Dropping one cost the whole point of this channel once already: a
-        // cold `download`, which is announced exactly once and means minutes of
-        // network, landed half a millisecond after the scan's closing report
-        // and was thinned away as though it were more of the same.
         let opening = running != Some((p.target, p.phase));
         running = Some((p.target, p.phase));
-        // Nor is the last report of a phase, or a client would be left
-        // rendering 6,400 of 6,522 for ever.
-        //
-        // One rule for every phase, deliberately.  Embedding used to be exempt
-        // on the grounds that a batch is the unit and must not be withheld, but
-        // a batch is 154–282 ms even on the smallest model with tiny notes, and
-        // 1.8 s on a real vault — always clear of the floor, so the exemption
-        // never once changed what was sent.  It could only bite above ~640
-        // chunks/s, and at that speed ten reports a second is already more than
-        // anything displaying them can use.
-        let paced = !p.last && !opening;
-        if gone || (paced && sent.elapsed() < FLOOR) {
+        if gone || !deliver(opening, p.last, sent.elapsed(), stdout_has_room) {
             return;
         }
         sent = Instant::now();
@@ -534,4 +562,53 @@ pub fn serve() -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// What a client sees when it stops reading.
+    ///
+    /// The end-to-end version of this is not worth its cost: the reports that
+    /// may be dropped only exist in a run long enough to produce hundreds of
+    /// them, which is a semantic reindex — minutes of wall clock and a model on
+    /// disk. In a short run every report is an opening or a last, so nothing is
+    /// droppable and there is nothing to observe. What is worth pinning is the
+    /// rule itself.
+    #[test]
+    fn a_client_that_stops_reading_loses_reports_rather_than_stalling_the_run() {
+        let full = || false;
+        let room = || true;
+        let (long, short) = (FLOOR, Duration::ZERO);
+
+        // The two a client cannot reconstruct go out regardless — of the clock,
+        // and of whether anyone is listening.
+        assert!(deliver(true, false, short, full), "a phase must be seen to begin");
+        assert!(deliver(false, true, short, full), "and to end");
+
+        // Everything between them yields, to either condition.
+        assert!(deliver(false, false, long, room), "otherwise: time, and room");
+        assert!(!deliver(false, false, short, room), "too soon");
+        assert!(!deliver(false, false, long, full), "nowhere to put it");
+    }
+
+    /// `room` is consulted only when the answer can change the outcome — asking
+    /// costs a syscall, and a report that is already too soon to send is not
+    /// made sendable by the pipe being empty.
+    #[test]
+    fn the_pipe_is_not_asked_about_when_the_answer_cannot_matter() {
+        let asked = std::cell::Cell::new(0);
+        let counting = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        deliver(true, false, Duration::ZERO, counting);
+        deliver(false, true, Duration::ZERO, counting);
+        deliver(false, false, Duration::ZERO, counting);
+        assert_eq!(asked.get(), 0, "openings, endings, and reports too soon to send");
+        deliver(false, false, FLOOR, counting);
+        assert_eq!(asked.get(), 1, "only a report that is otherwise ready");
+    }
 }
