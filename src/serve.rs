@@ -17,13 +17,21 @@
 //!
 //! **An `index` runs on a worker; everything else is answered on the loop.**
 //! That is what makes search-during-reindex possible, and it is also what
-//! retired three earlier workarounds: cancellation is `$/cancelRequest` again
-//! (it now arrives while there is still something to stop, and it carries the
-//! id), and the session has an `initialize` to answer `serverInfo.version` at.
+//! retired the rest of the workarounds: cancellation is `$/cancelRequest`, which
+//! now arrives while there is still something to stop *and* carries the id; and
+//! the session has an `initialize` to answer `serverInfo.version` at, so there
+//! is no `version` method.  Each of those had been written the other way for one
+//! reason — the loop used to sit inside `index` and read nothing until it
+//! answered.  When that went, so did the reasons.
 //!
 //! Searches stay on the loop, serial with each other.  Each is ~10 ms and they
 //! would serialize on the one model regardless, so a second thread would buy
 //! nothing.
+//!
+//! What a query *does* wait for during a rebuild is one embedding batch:
+//! measured at a median of 3.4 s, against 9 ms idle.  It answers instead of
+//! blocking for the whole run; it is not fast enough to type into.  Lexical
+//! search touches no model and is unaffected.
 
 use crate::*;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response, ResponseError};
@@ -237,9 +245,12 @@ impl Server {
         if candidates.is_empty() || f.text.trim().is_empty() {
             return Ok(answer(serde_json::json!({ "hits": [] })));
         }
-        // The one place a query waits on an indexing run: the batch in flight,
-        // 154 ms on small notes and ~1.8 s on a real vault.  It answers rather
-        // than blocking for the whole rebuild, which is the trade.
+        // The one place a query waits on an indexing run: the batch in flight.
+        // Measured on 600 notes through this server — median 3.4 s, max 4.4 s,
+        // min 9 ms for a query that lands between two batches.  The median *is*
+        // a batch: 64 chunks at the 17.6/s that rebuild sustained.  It answers
+        // rather than blocking for the whole run, which is the trade, and it is
+        // not the same thing as staying fast.
         let mut q = lock(&s.model)
             .embed(&[format!("{}{}", s.which.query, f.text)], None)
             .map_err(|e| anyhow!("embedding query: {e}"))?
@@ -579,15 +590,33 @@ pub fn serve() -> Result<()> {
     )?;
 
     let server = Arc::new(Server::default());
+    // LSP's two steps, and they are two for a reason: `shutdown` says stop
+    // accepting work, `exit` says end the process.
+    let mut closing = false;
     for msg in &conn.receiver {
         match msg {
             Message::Request(req) => {
                 if req.method == "shutdown" {
-                    // Waited on, so a run in flight still answers.  `exit` is
-                    // the one that does not wait.
+                    // Waited on, so a run in flight still answers under its own
+                    // id before we say we are done.  `exit` is the one that does
+                    // not wait.
                     server.join();
+                    closing = true;
                     let _ = conn.sender.send(Response::new_ok(req.id, ()).into());
-                    break;
+                    // Deliberately not a `break`.  Ending the loop here means
+                    // `io.join()` below, which waits on a reader thread still
+                    // blocked on a stdin the client has not closed — so a clean
+                    // `shutdown` hung the process until the pipe went. Found by
+                    // driving it by hand; the tests close stdin and never saw it.
+                    continue;
+                }
+                if closing {
+                    // The spec's answer for anything asked after `shutdown`.
+                    let _ = conn.sender.send(
+                        Response::new_err(req.id, -32600, "the server is shutting down".into())
+                            .into(),
+                    );
+                    continue;
                 }
                 // `index` answers from its own thread; everything else here.
                 let answer = match req.method.as_str() {

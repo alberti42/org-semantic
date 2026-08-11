@@ -2,10 +2,20 @@
 //!
 //! Everything here spawns the real binary and speaks JSON-RPC 2.0 over its
 //! stdio with LSP framing, because that is the half of `serve.rs` no unit test
-//! reaches: framing, the request id doubling as a progress token, the send-rate
-//! floor, and what a notification with no id is owed. Those were checked by hand
-//! from a scratch script until this file existed, which is how the floor came to
-//! be dropping the one notification that matters.
+//! reaches: the handshake, framing, the request id doubling as a progress token,
+//! the send-rate floor, and what a notification with no id is owed. Those were
+//! checked by hand from a scratch script until this file existed, which is how
+//! the floor came to be dropping the one notification that matters.
+//!
+//! **Two harnesses, and the difference matters.** `talk` writes every request at
+//! once and reads after the process exits — deterministic, and blind to anything
+//! the server does *while* it is busy. `Session` keeps the pipe open and reads
+//! one reply at a time, which is the only way to see a search answered during a
+//! reindex. Reach for `talk` unless the test is about concurrency.
+//!
+//! The concurrency tests use `mode: "lexical"` on both sides so they need no
+//! embedding model and run offline; what they prove is the *loop*. The model
+//! lock needs both sides semantic and so is `#[ignore]`d.
 //!
 //! An **integration** test rather than a module in `main.rs` for one practical
 //! reason: Cargo builds the binary for these and hands over its path in
@@ -471,6 +481,32 @@ fn a_search_says_when_the_index_is_moving() {
     let after = s.reply();
     assert_eq!(after["result"]["indexing"], false, "and current once nothing is running");
     s.close();
+}
+
+/// LSP's two steps are two for a reason, and getting it wrong hangs the process
+/// rather than failing it.
+///
+/// `shutdown` says stop accepting work; `exit` ends the process. Ending the loop
+/// on `shutdown` meant waiting on a reader thread still blocked on a stdin the
+/// client had not closed — a clean shutdown that never returned. Every test here
+/// closes stdin, so none of them saw it; driving the server by hand did.
+#[test]
+fn shutdown_stops_the_work_and_exit_stops_the_process() {
+    let mut s = Session::open();
+    s.send(&json!({ "jsonrpc": "2.0", "id": 1, "method": "shutdown" }));
+    assert_eq!(s.reply()["id"], 1, "it answers");
+
+    // Still there, with stdin open and no `exit` sent.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(s.child.try_wait().unwrap().is_none(), "shutdown is not exit");
+
+    s.send(
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "status", "params": { "vault": "/tmp" } }),
+    );
+    assert_eq!(s.reply()["error"]["code"], -32600, "and takes no more work");
+
+    s.send(&json!({ "jsonrpc": "2.0", "method": "exit", "params": {} }));
+    assert!(s.child.wait().unwrap().success(), "which is what ends it");
 }
 
 /// The model lock, which the lexical tests above cannot reach: a *semantic*

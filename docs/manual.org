@@ -195,19 +195,30 @@ choice is for the client's sake: Emacs ships =jsonrpc.el= --- the library Eglot
 runs on --- so the editor needs no protocol code of its own. It starts the
 process with =make-process=, and request/response correlation and notifications
 come for free. No socket, no port, no authentication, and the server lives
-exactly as long as the editor does. [[#cancelling][Stopping a run]] is the one
-thing that does not travel over the pipe.
+exactly as long as the editor does.
+
+A session opens with =initialize= and the =initialized= notification, as LSP
+sessions do; =jsonrpc.el= and Eglot do this for you. Nothing is negotiated there
+--- the package and the binary are [[#version][one release]] --- but it is where
+the server says which one it is.
+
+*An index runs on a thread of its own, so the server keeps answering while it
+works.* A =search= sent during a reindex is answered from the version committed
+before it, and marked =indexing: true= so you can say so in the UI. It is also
+slower --- see [[#during-a-reindex][below]].
 
 Methods:
 
-| method     | params                                                                                   | returns                                       |
-|------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =search=   | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...]}= |
-| =index=    | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=   | =vault=                                                                                  | which indexes this vault has, and which are loaded |
-| =version=  | ---                                                                                      | the release this process is                   |
-| =reload=   | ---                                                                                      | drop cached indexes after a rebuild           |
-| =shutdown= | ---                                                                                      | exit                                          |
+| method            | params                                                                                   | returns                                       |
+|-------------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
+| =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
+| =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...], "indexing": false}= |
+| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
+| =status=          | =vault=                                                                                  | which indexes this vault has, which are loaded, whether one is being built |
+| =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
+| =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |
+| =shutdown=        | ---                                                                                      | stop accepting work, and wait for a run in flight |
+| =exit=            | ---                                                                                      | end the process                               |
 
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
@@ -290,11 +301,13 @@ $ org-semantic --version
 
 Ask the *process*, which is a different question the moment a new binary has
 been installed underneath a server that is still running --- the file on disk no
-longer says what that process is:
+longer says what that process is. The handshake answers it, which is also the
+one moment a client is certain to be listening:
 
 #+begin_src json
---> { "jsonrpc": "2.0", "id": 1, "method": "version" }
-<-- { "version": "0.1.0" }
+--> { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }
+<-- { "capabilities": {},
+      "serverInfo": { "name": "org-semantic", "version": "0.1.0" } }
 #+end_src
 
 *** Errors you are meant to act on
@@ -331,6 +344,7 @@ nothing to decide.
 | =index-corrupt=   | the chunk table and the vectors disagree in length           | =target=, =chunks=, =vectors= |
 | =unknown-model=   | no such model                                                | =known=                      |
 | =ambiguous-model= | several indexes exist and none is the default                | =built=                      |
+| =indexing=        | an index is already running; only one runs at a time         | =remedy= (=wait=)            |
 
 Every one carries =remedy=, which is the call to offer rather than a sentence to
 parse: =index= means /build it/, =reindex-full= means /rebuild it from scratch/.
@@ -359,9 +373,7 @@ notifications so you are not staring at a pipe:
 
 *The token is the request's own id*, so there is nothing to set up first. LSP
 would have the server ask for a token with =window/workDoneProgress/create=;
-that is a server-to-client /request/, and answering it would mean reading a
-reply from inside a request already being served, which this server does not do.
-You are waiting on the id already --- it is the token.
+you are waiting on the id already, so there is nothing to negotiate.
 
 *There is no =begin= or =end=.* An =index= that fails answers with an error, and
 would skip its =end= --- leaving you holding a token nothing will ever close.
@@ -387,14 +399,14 @@ decide how often to show. The phases are =scan=, =chunk=, =embed= and
 =download=, and =mode: "both"= runs =scan= and =chunk= once per index --- which
 is why every report says which one it belongs to.
 
-Rates are chosen for the pipe, not for your display: at most one report per
-100 ms, whatever the phase. The first and =last= of a phase are never held back,
-so you always see one start and you never end up rendering 6,400 of 6,522.
+Rates are chosen so as not to flood your event loop, not as a display policy: at
+most one report per 100 ms, whatever the phase. The first and =last= of a phase
+are never held back, so you always see one start and you never end up rendering
+6,400 of 6,522.
 
 In practice that cap only touches scanning and chunking, which count files and
-would otherwise fire hundreds of times a second. An embedding batch takes a
-fifth of a second at its very fastest and closer to two seconds on a real vault,
-so every batch is reported.
+would otherwise fire hundreds of times a second. An embedding batch takes
+seconds, so every batch is reported.
 
 A =download= report has a size and no total. Nothing counts up towards it:
 fastembed hands over no increments, and a bar frozen at nought for four minutes
@@ -421,19 +433,56 @@ Ctrl-C ends both, and there is nothing else to want. Behind an editor they are
 two --- you want this reindex abandoned and the server still there for the next
 query --- and separating them is what this is for.
 
-Send the server *=SIGINT=* --- =(interrupt-process proc)= from Emacs. It stops
-between units of work and answers the request it was serving with LSP's
-=-32800= /RequestCancelled/ and =data.kind= of ="cancelled"=. The session
-survives: one request ended, not the server.
+Send *=$/cancelRequest=* with the id of the =index= request:
 
-Not =$/cancelRequest=, and this is the reason: the server reads its next message
-only after answering the current one, so a cancellation sent over the pipe would
-arrive after the thing it cancels. A signal does not queue behind the work. It
-carries no id, which is unambiguous only because requests are served one at a
-time --- it stops whatever is running.
+#+begin_src json
+{ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 7 } }
+#+end_src
+
+The run stops at its next unit of work and answers under that id with LSP's
+=-32800= /RequestCancelled/ and a =data.kind= of ="cancelled"=. The session
+survives: one request ended, not the server. Because the id is carried, a
+cancellation that arrives after its run has already finished does nothing,
+rather than stopping whatever came next.
 
 Nothing is half-written. The checks sit between units and nowhere near a write,
 so an abandoned run leaves the previous index exactly as it was.
+
+Two things this cannot stop. A *model download* has no units to check between, so
+it runs to the end; and =shutdown= waits for a run in flight rather than
+abandoning it. Both are answered the same way: end the process. Ctrl-C means
+exactly that again, and =exit= is its polite form.
+
+*** Searching while it reindexes
+:PROPERTIES:
+:CUSTOM_ID: during-a-reindex
+:END:
+
+An index runs on its own thread, so the server goes on answering. A =search=
+during a reindex is answered from the version committed /before/ it, and the
+reply says so:
+
+#+begin_src json
+<-- { "hits": [ ... ], "indexing": true }
+#+end_src
+
+Grey the list, or label it; the next search after the run replies will be current.
+=status= carries the same flag for a client that wants to ask before searching.
+
+Two things worth knowing before you build on this.
+
+*A semantic search during a semantic rebuild is slow.* There is one embedding
+model and the indexer holds it for one batch at a time, so your query waits for
+the batch in flight --- measured at a *median of 3.4 seconds* on a full rebuild,
+against 9 ms when nothing is running. It answers instead of blocking for the
+whole rebuild, which is the point; it is not fast enough to type into. *Lexical
+search is unaffected* --- it uses no model --- and stays at a few milliseconds
+throughout, which makes it the better fallback while a rebuild is going.
+
+*A second =index= is refused, not queued.* It comes back as an error with
+=data.kind= of ="indexing"=. Keep at most one in flight on your side and re-fire
+from its reply; a queued reindex would be the same work again and would answer
+long past the request timeout.
 
 *A second =SIGINT= ends the process.* The first is honoured only between units
 of work, so a wait with no units --- a model download, mid-flight --- does not
