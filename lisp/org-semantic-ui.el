@@ -315,13 +315,19 @@ buys nothing."
                 (when next
                   (setf (org-semantic-ui-driver-pending os-driver) nil)
                   (org-semantic-ui--fire os-driver next)))))))
-    (setf (org-semantic-ui-driver-request driver)
-          (apply #'org-semantic-search-async
-                 (plist-get params :query)
-                 (append
-                  (org-semantic-ui--keys params)
-                  (list :success (lambda (reply) (funcall os-settle reply nil))
-                        :failure (lambda (err) (funcall os-settle nil err))))))))
+    ;; PARAMS is the whole truth about this search, including the absence
+    ;; of a policy.  `org-semantic-search-async' otherwise falls back to
+    ;; the setting, which would make a waived `config-drift' unwaivable:
+    ;; the caller drops `:config' to say "search the index as it stands"
+    ;; and the global would put it straight back.
+    (let ((org-semantic-config (plist-get params :config)))
+      (setf (org-semantic-ui-driver-request driver)
+            (apply #'org-semantic-search-async
+                   (plist-get params :query)
+                   (append
+                    (org-semantic-ui--keys params)
+                    (list :success (lambda (reply) (funcall os-settle reply nil))
+                          :failure (lambda (err) (funcall os-settle nil err)))))))))
 
 (defun org-semantic-ui--keys (params)
   "The part of PARAMS `org-semantic-search-async' will accept."

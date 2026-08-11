@@ -10,6 +10,7 @@ EMACS ?= emacs
 # In dependency order: one Emacs compiles the whole list, so a file that
 # requires an earlier one picks up the .elc just produced.
 ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
+	lisp/org-semantic-results.el \
 	test/org-semantic-tests.el
 
 all: build
