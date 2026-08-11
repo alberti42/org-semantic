@@ -624,24 +624,27 @@ fn one_model_serves_several_vaults_and_outlives_all_but_the_last() {
     s.send(&ask(2, &b));
     assert!(!s.reply()["result"]["hits"].as_array().unwrap().is_empty(), "b answers");
     s.send(&loaded(3, &a));
-    assert_eq!(s.reply()["result"]["loaded"], 2, "two vaults, one model");
+    assert_eq!(s.reply()["result"]["loaded"], true, "a is resident");
 
     s.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "close", "params": { "vault": a } }));
     assert_eq!(s.reply()["result"]["dropped"], 1);
-    s.send(&loaded(5, &b));
-    assert_eq!(s.reply()["result"]["loaded"], 1);
+    // Per vault, so this says which one went rather than merely how many did.
+    s.send(&loaded(5, &a));
+    assert_eq!(s.reply()["result"]["loaded"], false, "a was forgotten");
+    s.send(&loaded(6, &b));
+    assert_eq!(s.reply()["result"]["loaded"], true, "and b was not");
 
     // The half that a wrong lifetime would break: b never asked to be forgotten.
-    s.send(&ask(6, &b));
+    s.send(&ask(7, &b));
     assert!(
         !s.reply()["result"]["hits"].as_array().unwrap().is_empty(),
         "closing one vault must not unload the model another is using"
     );
 
     // And with the last owner gone, a search simply loads it again.
-    s.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "close", "params": { "vault": b } }));
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "close", "params": { "vault": b } }));
     assert_eq!(s.reply()["result"]["dropped"], 1);
-    s.send(&ask(8, &a));
+    s.send(&ask(9, &a));
     assert!(!s.reply()["result"]["hits"].as_array().unwrap().is_empty(), "and comes back");
     s.close();
 }

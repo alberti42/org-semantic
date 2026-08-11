@@ -238,7 +238,7 @@ Methods:
 | =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
 | =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...], "indexing": false}= |
 | =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config=, =conserveMemory= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=          | =vault=                                                                                  | which indexes this vault has, which are loaded, whether one is being built |
+| =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
 | =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |

@@ -593,7 +593,12 @@ impl Server {
             "vault": vault,
             "semantic": models,
             "lexical": lexical,
-            "loaded": lock(&self.semantic).len(),
+            // About *this* vault, like every other field here: whether its index
+            // is resident, so a client knows the next search is warm (~10 ms)
+            // rather than a model load (~150–300 ms).  It was the size of the
+            // whole cache — a process-wide number in a reply about one vault,
+            // which is the third time that particular mistake has been made here.
+            "loaded": lock(&self.semantic).keys().any(|(v, _)| v == &vault),
             "indexing": self.indexing(&vault),
         }))
     }
