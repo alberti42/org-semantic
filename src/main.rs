@@ -4908,6 +4908,38 @@ fn model_cache_root(m: &Model) -> Result<PathBuf> {
     Ok(cache_dir().join(format!("models--{}", code.replace('/', "--"))))
 }
 
+/// Bytes of `.onnx*` files under DIR, at any depth.
+///
+/// **Recursive, because the weights are not where a first guess puts them:**
+/// hf-hub lays them out as `snapshots/<rev>/onnx/model.onnx`, a level below the
+/// snapshot, and a flat scan reported `null` for a model that was plainly cached.
+/// Its own function so that can be tested without a model in the cache — the
+/// `#[ignore]`d integration test would let exactly that regression through on a
+/// machine with an empty cache.
+///
+/// `metadata` rather than `symlink_metadata`: it follows the link hf-hub threads
+/// to `blobs/`, which is where the bytes actually are.
+fn onnx_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| {
+            let p = e.path();
+            match fs::metadata(&p) {
+                Ok(md) if md.is_dir() => onnx_bytes(&p),
+                Ok(md)
+                    if p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.contains(".onnx")) =>
+                {
+                    md.len()
+                }
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
 /// The size on disk of M's weights, or `None` if they are not cached.
 ///
 /// A **proxy, not a measurement**, and the field carrying it is named
@@ -4918,32 +4950,6 @@ fn model_cache_root(m: &Model) -> Result<PathBuf> {
 /// keep their weights in a 2.2 GB `model.onnx_data` beside a 546 kB `model.onnx` —
 /// taking only the first would report half a megabyte for the largest model here.
 fn weight_bytes(m: &'static Model) -> Option<u64> {
-    /// Recursive, because the weights are not where a first guess puts them:
-    /// hf-hub lays them out as `snapshots/<rev>/onnx/model.onnx`, a level below
-    /// the snapshot. Looking only at the top level reported `null` for a model
-    /// that was plainly cached.
-    fn onnx_bytes(dir: &Path) -> u64 {
-        let Ok(entries) = fs::read_dir(dir) else { return 0 };
-        entries
-            .flatten()
-            .map(|e| {
-                let p = e.path();
-                // `metadata` follows the symlink hf-hub threads to `blobs/`,
-                // which is where the bytes actually are.
-                match fs::metadata(&p) {
-                    Ok(md) if md.is_dir() => onnx_bytes(&p),
-                    Ok(md)
-                        if p.file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.contains(".onnx")) =>
-                    {
-                        md.len()
-                    }
-                    _ => 0,
-                }
-            })
-            .sum()
-    }
     let total = onnx_bytes(&model_cache_root(m).ok()?.join("snapshots"));
     // Zero means "not cached", which is a different answer from "cached and
     // empty" — and only the first can happen.
@@ -6629,6 +6635,67 @@ mod tests {
         assert_eq!(f.data["changed"], serde_json::json!(["exclude_tagged"]));
         assert_eq!(f.data["target"], "semantic");
         assert_eq!(f.data["remedy"], "reindex-full");
+    }
+
+    /// The weights are a level deeper than a first guess puts them, and mostly in
+    /// a file whose name is not `model.onnx`.
+    ///
+    /// Both were bugs: a flat scan reported `null` for a cached model, and taking
+    /// the first match would report 546 kB for `e5-large`, whose 2.2 GB live in
+    /// `model.onnx_data` beside it. Offline, because the integration test that
+    /// covers this needs a model in the cache and would pass on a machine without
+    /// one — which is the case where a regression here goes unseen.
+    #[test]
+    fn weights_are_found_at_any_depth_and_summed() {
+        let root = scratch("onnx");
+        let snap = root.join("snapshots").join("abc123");
+        fs::create_dir_all(snap.join("onnx")).unwrap();
+        // Where hf-hub actually puts them, and how the large models split them.
+        fs::write(snap.join("onnx").join("model.onnx"), vec![0u8; 500]).unwrap();
+        fs::write(snap.join("onnx").join("model.onnx_data"), vec![0u8; 4000]).unwrap();
+        // Cached beside them, and none of it weights.
+        fs::write(snap.join("tokenizer.json"), vec![0u8; 9000]).unwrap();
+        fs::write(snap.join("config.json"), vec![0u8; 70]).unwrap();
+
+        assert_eq!(
+            onnx_bytes(&root.join("snapshots")),
+            4500,
+            "both weight files, and nothing that is not one"
+        );
+        assert_eq!(onnx_bytes(&root.join("nonesuch")), 0, "an absent cache is nought, not a panic");
+    }
+
+    /// A chunk table is summed rather than guessed at from the count, so the
+    /// figure has to move with the contents.
+    #[test]
+    fn a_chunk_table_is_measured_by_what_it_holds() {
+        let bare = vec![at("a.org", "H", 1)];
+        let wordy = vec![Chunk {
+            path: "a-rather-longer-path-than-the-other-one.org".into(),
+            heading: "Top > Middle > Bottom > Deeper still".into(),
+            tags: vec!["one".into(), "two".into(), "three".into()],
+            id: Some("11111111-2222-3333-4444-555555555555".into()),
+            ..at("a.org", "H", 1)
+        }];
+        let empty: Vec<Chunk> = Vec::new();
+
+        assert_eq!(table_bytes(&empty), 0, "nothing held, nothing reported");
+        assert!(
+            table_bytes(&bare) >= std::mem::size_of::<Chunk>() as u64,
+            "the struct itself counts, not only its heap"
+        );
+        assert!(
+            table_bytes(&wordy) > table_bytes(&bare),
+            "longer strings, more tags and an :ID: all cost something"
+        );
+    }
+
+    /// The one figure in `memory` that covers the runtime. Platform code, so worth
+    /// a test that fails loudly on a target where it silently answers `None`.
+    #[test]
+    fn the_process_can_say_how_resident_it_is() {
+        let n = rss().expect("a supported platform reports its own size");
+        assert!(n > 1_000_000, "a running test process is more than a megabyte: {n}");
     }
 
     /// One writer at a time, and the claim outlives neither its owner nor its
