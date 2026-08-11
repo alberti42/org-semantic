@@ -1,0 +1,288 @@
+;;; org-semantic-tests.el --- tests for the org-semantic client -*- lexical-binding: t; -*-
+
+;; SPDX-License-Identifier: MIT
+
+;;; Commentary:
+
+;; Two kinds of test, and the division is the same one the Rust suite
+;; makes.  Most of these need no server at all: what a vault is, what
+;; goes on the wire, how a labelled error is read.  The rest drive the
+;; real binary as a client does, and use the *lexical* index to do it --
+;; which needs no embedding model, so the whole file runs offline in a
+;; second or two, given a built binary and the cached classifier.
+;;
+;; Run them with:
+;;
+;;   make test-elisp
+;;
+;; What is deliberately not here: the semantic path, which would mean a
+;; model download, and the concurrency the server already tests on its
+;; own side.  Both were driven by hand instead -- see the manual.
+
+;;; Code:
+
+(require 'ert)
+(require 'org-semantic)
+
+(defconst org-semantic-tests--root
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory (or load-file-name buffer-file-name))))
+  "The repository, found from this file rather than from where Emacs was run.")
+
+(defun org-semantic-tests--binary ()
+  "The binary to test against, or nil if there is none built.
+
+Note that a plain file name is not enough to look for: an empty
+one, and any directory, answer `file-executable-p' with t."
+  (seq-find (lambda (path)
+              (and (stringp path) (not (string-empty-p path))
+                   (file-regular-p path) (file-executable-p path)))
+            (list (getenv "ORG_SEMANTIC")
+                  (expand-file-name "target/release/org-semantic"
+                                    org-semantic-tests--root)
+                  (expand-file-name "target/debug/org-semantic"
+                                    org-semantic-tests--root))))
+
+(defmacro org-semantic-tests--with-vault (dir &rest body)
+  "Run BODY with DIR bound to a temporary vault of three notes."
+  (declare (indent 1))
+  `(let ((,dir (make-temp-file "org-semantic-test" t)))
+     (unwind-protect
+         (progn
+           (dolist (note '(("pumps.org" . "The turbo pump was baked out.")
+                           ("atoms.org" . "Atom number in the science chamber.")
+                           ("laser.org" . "The laser was relocked at noon.")))
+             (with-temp-file (expand-file-name (car note) ,dir)
+               (insert "#+title: " (file-name-base (car note)) "\n\n")
+               (insert "* A heading\n" (cdr note) "\n")))
+           ,@body)
+       (delete-directory ,dir t))))
+
+
+;;;; What goes on the wire
+
+(ert-deftest a-parameter-nobody-set-is-not-sent ()
+  "Nil means \"the server's own default\", which is silence, not null.
+
+A nil `config' sent as JSON null fails to parse on the far side,
+where an absent one means \"whatever the index was built under\"."
+  (should (equal (org-semantic--params :vault "/v" :query "q" :k nil :model nil)
+                 '(:vault "/v" :query "q")))
+  (should (equal (org-semantic--params :a nil) nil))
+  ;; Order is kept, which only matters for reading the events buffer.
+  (should (equal (org-semantic--params :a 1 :b 2 :c 3) '(:a 1 :b 2 :c 3))))
+
+(ert-deftest false-is-said-out-loud-and-nil-is-not-false ()
+  "JSON has three things Lisp spells nil, so neither direction may guess."
+  (should (eq (org-semantic--bool nil) :json-false))
+  (should (eq (org-semantic--bool t) t))
+  ;; And coming back: `false' arrives as a keyword, which is not nil.
+  (should-not (org-semantic-true-p :json-false))
+  (should-not (org-semantic-true-p nil))
+  (should (org-semantic-true-p t)))
+
+
+;;;; Which vault a buffer belongs to
+
+(ert-deftest an-index-is-enough-to-find-a-vault ()
+  "The directory holding `.org-semantic' is the vault."
+  (org-semantic-tests--with-vault dir
+    (make-directory (expand-file-name ".org-semantic/semantic" dir) t)
+    (make-directory (expand-file-name "sub/deeper" dir) t)
+    (should (equal (org-semantic-vault (expand-file-name "sub/deeper" dir))
+                   (org-semantic--canonical dir)))
+    (should (equal (with-current-buffer
+                       (find-file-noselect (expand-file-name "pumps.org" dir))
+                     (org-semantic-vault))
+                   (org-semantic--canonical dir)))))
+
+(ert-deftest a-vault-can-say-so-before-it-has-an-index ()
+  "A declaration is the only way to find a vault with nothing built yet.
+
+Which is not an edge case: it is where every vault starts, and the
+first `index' has to be reachable too."
+  (org-semantic-tests--with-vault dir
+    (with-temp-file (expand-file-name ".dir-locals.el" dir)
+      (insert "((nil . ((org-semantic-vault-root . t))))\n"))
+    (should-not (file-exists-p (expand-file-name ".org-semantic" dir)))
+    (should (equal (org-semantic-vault (expand-file-name "pumps.org" dir))
+                   (org-semantic--canonical dir)))))
+
+(ert-deftest a-declaration-may-name-a-directory-under-the-project ()
+  "A string names the root, for notes that sit below what declares them."
+  (org-semantic-tests--with-vault dir
+    (make-directory (expand-file-name "notes" dir))
+    (with-temp-file (expand-file-name ".dir-locals.el" dir)
+      (insert "((nil . ((org-semantic-vault-root . \"notes\"))))\n"))
+    (should (equal (org-semantic-vault (expand-file-name "notes" dir))
+                   (org-semantic--canonical (expand-file-name "notes" dir))))))
+
+(ert-deftest somewhere-that-is-not-a-vault-is-not-one ()
+  "No index above it and nothing declared means no vault, not a guess."
+  (org-semantic-tests--with-vault dir
+    (should-not (org-semantic-vault dir))
+    (should-error (org-semantic-vault-or-error dir) :type 'user-error)))
+
+(ert-deftest a-vault-is-spelled-one-way-however-it-was-reached ()
+  "The server keys what it holds on this string, so `close' has to match."
+  (org-semantic-tests--with-vault dir
+    (let ((canonical (org-semantic--canonical dir)))
+      (should (equal canonical (org-semantic--canonical
+                                (file-name-as-directory dir))))
+      (should (equal canonical (org-semantic--canonical
+                                (expand-file-name "sub/.." dir))))
+      (should-not (string-suffix-p "/" canonical)))))
+
+
+;;;; Errors carry a label, and the label is what to branch on
+
+(ert-deftest a-failure-worth-acting-on-arrives-labelled ()
+  "`kind' is the branch and `data' is what it promised to carry."
+  (let ((err (should-error
+              (org-semantic--fail
+               '(:code -32000 :message "no semantic index"
+                       :data (:kind "no-index" :target "semantic"
+                                    :remedy "index")))
+              :type 'org-semantic-error)))
+    (should (equal (org-semantic-error-message err) "no semantic index"))
+    (should (equal (org-semantic-error-kind err) "no-index"))
+    (should (equal (plist-get (org-semantic-error-data err) :remedy) "index"))))
+
+(ert-deftest an-error-with-nothing-to-decide-carries-no-label ()
+  "Absence of `data' is itself the signal: show it, do not branch on it."
+  (let ((err (should-error
+              (org-semantic--fail '(:code -32000 :message "unknown method"))
+              :type 'org-semantic-error)))
+    (should-not (org-semantic-error-kind err))
+    (should-not (org-semantic-error-data err))))
+
+(ert-deftest a-label-survives-the-trip-through-jsonrpc ()
+  "The `data' member arrives in an alist sitting behind a bare string.
+
+Built with `list' rather than quoted, so that the byte compiler
+does not read the fixture as a call to `jsonrpc-error'."
+  (let ((err (should-error
+              (org-semantic--rethrow
+               (list 'jsonrpc-error "request id=3 failed:"
+                     (cons 'jsonrpc-error-code -32000)
+                     (cons 'jsonrpc-error-message "the policy changed")
+                     (cons 'jsonrpc-error-data
+                           '(:kind "config-drift"
+                                   :changed ["todo_keywords"]))))
+              :type 'org-semantic-error)))
+    (should (equal (org-semantic-error-kind err) "config-drift"))
+    (should (equal (org-semantic-error-message err) "the policy changed"))))
+
+
+;;;; Reading a reply
+
+(ert-deftest hits-are-a-list-whatever-json-made-of-them ()
+  "JSON arrays arrive as vectors; a caller should not have to know."
+  (should (equal (org-semantic-hits '(:hits [(:path "a.org") (:path "b.org")]))
+                 '((:path "a.org") (:path "b.org"))))
+  (should-not (org-semantic-hits '(:hits []))))
+
+(ert-deftest a-hit-above-every-heading-is-still-addressable ()
+  "Text before the first heading reports line 1, and must not report none."
+  (should (= (org-semantic-hit-line '(:file "/v/a.org")) 1))
+  (should (= (org-semantic-hit-line '(:file "/v/a.org" :headingLine 42)) 42)))
+
+
+;;;; Against the real binary, over the lexical index
+
+(defmacro org-semantic-tests--with-server (&rest body)
+  "Run BODY against a server of its own, or skip if there is no binary."
+  (declare (indent 0))
+  `(let ((binary (org-semantic-tests--binary)))
+     (unless binary (ert-skip "no org-semantic binary built"))
+     (let ((org-semantic-executable binary)
+           (org-semantic--connection nil)
+           (org-semantic--server-version nil))
+       (unwind-protect (progn ,@body)
+         (when (org-semantic-running-p) (org-semantic-quit 'hard))))))
+
+(defun org-semantic-tests--wait (seconds predicate)
+  "Run the event loop for up to SECONDS, or until PREDICATE returns non-nil."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (and (< (float-time) deadline) (not (funcall predicate)))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
+
+(ert-deftest the-handshake-says-which-binary-answered ()
+  "Asked at the one moment a client is certain to be listening."
+  (org-semantic-tests--with-server
+    (org-semantic-connection)
+    (should (org-semantic-running-p))
+    (should (equal org-semantic--server-version
+                   (org-semantic-binary-version)))))
+
+(ert-deftest a-vault-with-no-index-says-so-with-a-remedy ()
+  "And the remedy is the machine form, so nothing parses prose to act."
+  (org-semantic-tests--with-server
+    (org-semantic-tests--with-vault dir
+      (let ((status (org-semantic-status dir)))
+        (should-not (org-semantic-true-p (plist-get status :lexical)))
+        (should (equal (plist-get status :semantic) [])))
+      (let ((err (should-error (org-semantic-search "pump" :vault dir
+                                                    :mode "lexical")
+                               :type 'org-semantic-error)))
+        (should (equal (org-semantic-error-kind err) "no-index"))
+        (should (equal (plist-get (org-semantic-error-data err) :remedy)
+                       "index"))))))
+
+(ert-deftest an-index-reports-itself-and-then-answers ()
+  "The reply ends the run; the reports are what happened on the way."
+  (org-semantic-tests--with-server
+    (org-semantic-tests--with-vault dir
+      (let ((outcome nil) (phases '()))
+        (org-semantic-index
+         :vault dir :mode "lexical"
+         :progress (lambda (report)
+                     (let ((phase (plist-get report :phase)))
+                       (unless (member phase phases) (push phase phases))))
+         :success (lambda (result) (setq outcome (list 'ok result)))
+         :failure (lambda (error) (setq outcome (list 'failed error))))
+        (should (org-semantic-indexing-p dir))
+        (should (org-semantic-tests--wait 120 (lambda () outcome)))
+        (should (eq (car outcome) 'ok))
+        ;; Every phase reports its own unit, and a scan comes before a
+        ;; chunking pass -- so `push' leaves them in this order.
+        (should (equal phases '("chunk" "scan")))
+        (let ((report (plist-get (cadr outcome) :lexical)))
+          (should (= (plist-get report :files) 3))
+          (should (> (plist-get report :chunks) 0)))
+        ;; And the run is no longer ours to cancel.
+        (should-not (org-semantic-indexing-p dir))))))
+
+(ert-deftest a-word-index-finds-notes-by-word ()
+  "The end of it: index, search, and read the address of a hit."
+  (org-semantic-tests--with-server
+    (org-semantic-tests--with-vault dir
+      (let ((done nil))
+        (org-semantic-index :vault dir :mode "lexical"
+                            :success (lambda (_) (setq done t))
+                            :failure (lambda (e) (setq done (list 'failed e))))
+        (should (eq (org-semantic-tests--wait 120 (lambda () done)) t)))
+      (let* ((reply (org-semantic-search "turbo" :vault dir :mode "lexical"))
+             (hits (org-semantic-hits reply)))
+        (should (= (length hits) 1))
+        (should (equal (file-name-nondirectory
+                        (org-semantic-hit-file (car hits)))
+                       "pumps.org"))
+        ;; A note whose title is its filename headlines with it, and the
+        ;; heading owning the passage is what a client jumps to.
+        (should (= (org-semantic-hit-line (car hits)) 3))
+        (should-not (org-semantic-true-p (plist-get reply :indexing)))
+        ;; Nothing normalises a BM25 score, so there is no sigma for one.
+        (should-not (plist-get (car hits) :z)))
+      ;; An empty query is not an error: an editor may send one per keystroke.
+      (should-not (org-semantic-hits
+                   (org-semantic-search "" :vault dir :mode "lexical")))
+      (should-not (org-semantic-hits
+                   (org-semantic-search "helium" :vault dir :mode "lexical")))
+      ;; And a vault can be handed back.
+      (org-semantic-close dir))))
+
+(provide 'org-semantic-tests)
+;;; org-semantic-tests.el ends here
