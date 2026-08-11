@@ -479,11 +479,13 @@ Two things worth knowing before you build on this.
 
 *A semantic search during a semantic rebuild is slow.* There is one embedding
 model and the indexer holds it for one batch at a time, so your query waits for
-the batch in flight --- measured at a *median of 3.4 seconds* on a full rebuild,
-against 9 ms when nothing is running. It answers instead of blocking for the
-whole rebuild, which is the point; it is not fast enough to type into. *Lexical
-search is unaffected* --- it uses no model --- and stays at a few milliseconds
-throughout, which makes it the better fallback while a rebuild is going.
+the batch in flight --- *about two seconds* at the worst, against 9 ms when
+nothing is running. Many are answered at once, because scanning and chunking need
+no model at all; it is the ones landing mid-embedding that wait. It answers
+instead of blocking for the whole rebuild, which is the point; it is not fast
+enough to type into. *Lexical search is unaffected* --- it uses no model --- and
+stays at a few milliseconds throughout, which makes it the better fallback while
+a rebuild is going.
 
 *A second =index= is refused, not queued.* It comes back as an error with
 =data.kind= of ="indexing"=. Keep at most one in flight on your side and re-fire
@@ -501,6 +503,12 @@ comes, send the latest query the user has typed since. That bounds the queue at
 one without any protocol, and it slows down by itself exactly when the server
 does. =$/cancelRequest= is no help here --- it applies to an =index= run, and a
 search is answered before a cancellation for it could even be read.
+
+A pile of stale replies is untidy but harmless: replies are correlated by =id=,
+each is a whole frame, and they arrive in the order you asked. =jsonrpc.el= logs a
+reply it is no longer waiting for and discards it. What does hurt is the
+*timeout* --- ten searches queued behind a rebuild will outlast
+=jsonrpc-default-request-timeout= --- and one-in-flight is what avoids that.
 
 *A second =SIGINT= ends the process.* The first is honoured only between units
 of work, so a wait with no units --- a model download, mid-flight --- does not

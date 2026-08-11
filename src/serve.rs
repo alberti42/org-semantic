@@ -28,10 +28,10 @@
 //! would serialize on the one model regardless, so a second thread would buy
 //! nothing.
 //!
-//! What a query *does* wait for during a rebuild is one embedding batch:
-//! measured at a median of 3.4 s, against 9 ms idle.  It answers instead of
-//! blocking for the whole run; it is not fast enough to type into.  Lexical
-//! search touches no model and is unaffected.
+//! What a query *does* wait for during a rebuild is one embedding batch —
+//! `BATCH` divided by chunks per second, which is a p90 of ~2 s where a warm
+//! query is 9 ms.  It answers instead of blocking for the whole run; it is not
+//! fast enough to type into.  Lexical search touches no model and is unaffected.
 
 use crate::*;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response, ResponseError};
@@ -245,12 +245,13 @@ impl Server {
         if candidates.is_empty() || f.text.trim().is_empty() {
             return Ok(answer(serde_json::json!({ "hits": [] })));
         }
-        // The one place a query waits on an indexing run: the batch in flight.
-        // Measured on 600 notes through this server — median 3.4 s, max 4.4 s,
-        // min 9 ms for a query that lands between two batches.  The median *is*
-        // a batch: 64 chunks at the 17.6/s that rebuild sustained.  It answers
-        // rather than blocking for the whole run, which is the trade, and it is
-        // not the same thing as staying fast.
+        // The one place a query waits on an indexing run: the batch in flight,
+        // which is `BATCH` divided by chunks per second — a p90 of ~2 s on a real
+        // rebuild, against 9 ms warm.  Not a median: `scan` and `chunk` use no
+        // model, so most queries during a run are answered at once and a median
+        // measures the phase mix rather than the wait.  It answers rather than
+        // blocking for the whole run, which is the trade, and that is not the
+        // same thing as staying fast.
         let mut q = lock(&s.model)
             .embed(&[format!("{}{}", s.which.query, f.text)], None)
             .map_err(|e| anyhow!("embedding query: {e}"))?

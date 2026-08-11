@@ -3963,7 +3963,25 @@ fn cmd_index(
         let mut order: Vec<usize> = (0..texts.len()).collect();
         order.sort_unstable_by_key(|&i| pending_len[i]);
 
-        const BATCH: usize = 64;
+        // How many chunks go to the model at once — and, because the model is
+        // locked for exactly one of these, **how long a search waits during a
+        // rebuild**.  Both things at once, which is why the number was measured
+        // against both.
+        //
+        // It was 64.  Halving it halves the wait, exactly, and costs nothing
+        // measurable: swept over 64/32/16/8 on 1,022 chunks of 20–400-word notes,
+        // p90 search latency went 7.2 s → 3.7 s → 2.0 s → 0.9 s while throughput
+        // stayed at 10.4–12.1 chunks/s with the *ordering between batch sizes
+        // reshuffling run to run* — so the differences are below a ~7% noise
+        // floor, not a trend.  16 takes 4× of the available latency, and keeps
+        // room above the size where per-call overhead would start to tell on
+        // short notes, which is not a corpus this was measured on.
+        //
+        // Throughput survives because `order` is sorted by token length: a
+        // smaller group is still made of similar-length chunks, so fastembed's
+        // padding-to-longest costs no more than it did.  **Shrink this only while
+        // that sort is there.**
+        const BATCH: usize = 16;
         let (mut done, mut tokens_done) = (0usize, 0usize);
         for group in order.chunks(BATCH) {
             stop_requested()?;
