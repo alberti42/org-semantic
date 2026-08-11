@@ -177,6 +177,13 @@ fn progress_is_tagged_with_the_request_it_belongs_to() {
         assert_eq!(p["params"]["value"]["kind"], "report");
     }
     assert!(msgs.iter().any(|m| m["id"] == 7 && m.get("result").is_some()), "and it replies");
+
+    // "The response ends the last run of reports" — so no report may arrive after
+    // it. Reports go out on a thread of their own now, so this holds only because
+    // the run closes and drains that queue before sending the reply.
+    let reply = msgs.iter().position(|m| m["id"] == 7).expect("a reply");
+    let last_report = msgs.iter().rposition(|m| m["method"] == "$/progress").expect("a report");
+    assert!(last_report < reply, "a report overtook the reply it was meant to precede");
 }
 
 /// Phases run in the order the work happens, and each is closed exactly once —

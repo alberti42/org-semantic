@@ -366,12 +366,20 @@ impl Server {
         // rearming on every message would clear a cancellation already asked for.
         interrupt::rearm();
 
-        watch(&mut j, sender, &req.id);
+        let reports = watch(&mut j, sender, &req.id);
         let me = Arc::clone(self);
         let sender = sender.clone();
         let id = req.id.clone();
         let handle = std::thread::spawn(move || {
             let done = me.run(plan, &mut j);
+            // The queue is closed and drained *before* the reply, in that order.
+            // Reports go out on their own thread, so a reply sent straight to the
+            // transport could otherwise overtake ones still queued — and "the
+            // response ends the last run of reports" is the contract a client
+            // renders against.  Waiting here costs nothing that matters: the work
+            // is done, and a reply has always been delivered blocking.
+            j.watch = None;
+            let _ = reports.join();
             let _ = sender.send(replied(id, done, &mut j).into());
         });
         *run = Some((req.id.clone(), handle));
@@ -511,8 +519,56 @@ fn deliver(opening: bool, last: bool, since: std::time::Duration) -> bool {
 /// has no such hole: one report per completed unit, a change of `target` or
 /// `phase` ends the previous run of them, and the response — result or error —
 /// ends the last.
-fn watch(j: &mut Journal, sender: &crossbeam_channel::Sender<Message>, token: &RequestId) {
-    let sender = sender.clone();
+/// **A report is worth less than the work delivering it would hold up**, so
+/// reports go through a buffer of this depth and are dropped when it is full.
+/// That is the promise; the depth only decides when it starts costing anything.
+///
+/// Every channel `lsp-server` hands out is `bounded(0)` — a rendezvous — and its
+/// writer thread writes each frame before taking the next, so sending straight to
+/// it blocks as soon as the client stops reading and stdout fills. Which means
+/// the run stops until the editor breathes. This is what stands between those two
+/// facts.
+///
+/// 64 because `FLOOR` caps the stream at ten reports a second, so this is ~6 s of
+/// slack on top of stdout's own 16–64 kB, and ~13 kB if it ever does fill.
+const BACKLOG: usize = 64;
+
+/// Report the work as it happens, under the id the caller is already waiting on.
+///
+/// The token is that id rather than one negotiated through
+/// `window/workDoneProgress/create`: the client holds it already, so there is
+/// nothing to negotiate. (That request is *possible* now the loop is free to
+/// receive its response — it is simply not needed.)
+///
+/// There is no `begin` or `end`. An `index` that fails answers with an error and
+/// would skip its `end`, leaving a client holding a token for ever. The contract
+/// has no such hole: one report per completed unit, a change of `target` or
+/// `phase` ends the previous run of them, and the response — result or error —
+/// ends the last.
+///
+/// Returns the forwarding thread. Drop `Journal::watch` to close the queue, then
+/// join it: that drains what is left *before* the reply goes out, which is what
+/// keeps the response last. See the caller.
+fn watch(
+    j: &mut Journal,
+    out: &crossbeam_channel::Sender<Message>,
+    token: &RequestId,
+) -> std::thread::JoinHandle<()> {
+    let (tx, rx) = crossbeam_channel::bounded::<Message>(BACKLOG);
+    let out = out.clone();
+    // The only thread here allowed to wait on the client.  It has nothing else to
+    // do, which is the entire point.
+    let forwarder = std::thread::spawn(move || {
+        for msg in rx {
+            // Failing means the transport is gone and the session with it.
+            // Stopping now also latches that: `try_send` below then fails on a
+            // disconnected queue rather than collecting errors nobody reads.
+            if out.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+
     let token = serde_json::to_value(token).unwrap_or(serde_json::Value::Null);
     let mut sent = Instant::now() - FLOOR;
     let mut running: Option<(&'static str, &'static str)> = None;
@@ -523,9 +579,12 @@ fn watch(j: &mut Journal, sender: &crossbeam_channel::Sender<Message>, token: &R
             return;
         }
         sent = Instant::now();
-        // A send that fails means the writer is gone, which means the session
-        // is over.  Nothing to do about it here, and nothing owed.
-        let _ = sender.send(
+        // `try_send`, never `send`: this runs on the thread doing the work.  A
+        // full queue means the client is not reading, and the next report
+        // supersedes this one a tenth of a second later anyway.  So **any**
+        // report can be lost, an opening and a `last` included — a client learns
+        // where the run got to from the next phase, or from the reply.
+        let _ = tx.try_send(
             Notification::new(
                 "$/progress".into(),
                 serde_json::json!({ "token": token, "value": p }),
@@ -533,6 +592,7 @@ fn watch(j: &mut Journal, sender: &crossbeam_channel::Sender<Message>, token: &R
             .into(),
         );
     }));
+    forwarder
 }
 
 /// A run's answer, with whatever it found worth saying attached.
@@ -683,5 +743,44 @@ mod tests {
         fn shareable<T: Send + Sync>() {}
         shareable::<Server>();
         shareable::<Semantic>();
+    }
+
+    /// A client that has stopped reading costs reports, never the run.
+    ///
+    /// The transport is `bounded(0)`, so a sender nobody receives from *is* a
+    /// wedged editor: sending straight to it blocks for ever. Reporting must come
+    /// straight back regardless, which is what `BACKLOG` plus `try_send` buys.
+    ///
+    /// Every report here opens a phase, so none of them is thinned by `FLOOR` —
+    /// otherwise a fast loop would send one report and prove nothing.
+    ///
+    /// On a thread with a deadline, because the failure mode is a hang: a guard
+    /// that wedges the suite reports nothing and costs whatever patience is
+    /// watching it.
+    #[test]
+    fn a_client_that_stops_reading_costs_reports_and_not_the_run() {
+        let (out, wedged) = crossbeam_channel::bounded::<Message>(0);
+        let (tx, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut j = Journal::quiet();
+            let forwarder = watch(&mut j, &out, &RequestId::from(7));
+            for i in 0..BACKLOG * 20 {
+                let phase = if i % 2 == 0 { "chunk" } else { "embed" };
+                j.progress(&Progress::new("semantic", phase, "files", i, 0.0).of(BACKLOG * 20));
+            }
+            let _ = tx.send(());
+            // Closing the queue lets the forwarder go even though nobody ever
+            // read: `rx` disconnects, and its blocked `out.send` is the last thing
+            // it will ever try.
+            j.watch = None;
+            drop(wedged);
+            let _ = forwarder.join();
+        });
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(5)),
+            Ok(()),
+            "the run waited on a client instead of dropping a report"
+        );
+        worker.join().unwrap();
     }
 }

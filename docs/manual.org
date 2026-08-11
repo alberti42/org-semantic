@@ -414,6 +414,12 @@ reads as a crash. Show a spinner and the size. =bytes= is absent when the size
 could not be asked for, which is not an error --- the download is announced
 either way.
 
+*Reports are dropped rather than queued if you stop reading.* A report is worth
+less than the work that delivering it would hold up, so a client that stops
+draining loses some and the index carries on at full speed. Do not build anything
+that needs every one of them --- the reply is what always arrives, and it says
+where the run got to.
+
 #+begin_quote
 *The timeout will bite you before any of this does.*
 =jsonrpc-default-request-timeout= is *10 seconds*, and a reindex takes minutes.
@@ -483,6 +489,18 @@ throughout, which makes it the better fallback while a rebuild is going.
 =data.kind= of ="indexing"=. Keep at most one in flight on your side and re-fire
 from its reply; a queued reindex would be the same work again and would answer
 long past the request timeout.
+
+*Searches, by contrast, are all answered.* The server keeps no queue of its own
+and supersedes nothing: ten keystrokes are ten searches and ten replies, handled
+one at a time in the order they arrived. That is cheap when nothing is running ---
+about 10 ms each --- and expensive during a rebuild, where every one of them waits
+out an embedding batch.
+
+So debounce, or better, keep *one search in flight*: send, and when the reply
+comes, send the latest query the user has typed since. That bounds the queue at
+one without any protocol, and it slows down by itself exactly when the server
+does. =$/cancelRequest= is no help here --- it applies to an =index= run, and a
+search is answered before a cancellation for it could even be read.
 
 *A second =SIGINT= ends the process.* The first is honoured only between units
 of work, so a wait with no units --- a model download, mid-flight --- does not
