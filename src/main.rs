@@ -3081,6 +3081,59 @@ fn corrupt_index(chunks: usize, vectors: usize) -> anyhow::Error {
     )
 }
 
+/// What an index run produced: the chunk table and the vectors that pair with it
+/// **by position**.
+///
+/// Handed back by `cmd_index` so a resident caller can adopt what it just built
+/// rather than read back what it just wrote — on the reference vault, a 2.4 MB
+/// chunk table to re-parse and 10 MB of vectors to re-read, both of which it was
+/// still holding.
+struct Built {
+    chunks: Vec<Chunk>,
+    vectors: Vec<f32>,
+}
+
+/// A semantic index as something *searches* it: what was built, plus the noise
+/// floor derived from the vectors.
+///
+/// Constructed complete and adopted whole.  Nothing here edits one in place,
+/// which is what keeps a half-updated index from ever being observable — the two
+/// constructors are the two ways an index comes into existence: read from disk,
+/// or handed over by the run that built it.
+struct Index {
+    chunks: Vec<Chunk>,
+    vectors: Vec<f32>,
+    /// `None` for an index too small to sample a floor from.
+    baseline: Option<Baseline>,
+}
+
+impl Index {
+    /// The one reader for the searching paths, the CLI's and the server's alike.
+    ///
+    /// There were three — `cmd_search`, `Server::semantic` and `Server::refresh`
+    /// each decoded the pair for itself — and the third had lost the length
+    /// check, so a torn file installed a mispaired cache in silence.  A guard
+    /// that has to be repeated is a guard that will be forgotten.
+    fn read(dir: &Path, m: &Model) -> Result<Index> {
+        let chunks = read_chunks(dir, m)?;
+        let raw = fs::read(dir.join("vectors.f32"))?;
+        if raw.len() != chunks.len() * m.dim * 4 {
+            return Err(corrupt_index(chunks.len(), raw.len() / (m.dim * 4)));
+        }
+        let vectors: Vec<f32> =
+            raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        Ok(Index::of(Built { chunks, vectors }, m.dim))
+    }
+
+    /// Adopt what a run just built.  The baseline is derived here rather than
+    /// carried out of the indexer, which has no use for one and would spend
+    /// ~37 ms computing it.
+    fn of(b: Built, dim: usize) -> Index {
+        let baseline = Baseline::of(&b.vectors, dim);
+        Index { chunks: b.chunks, vectors: b.vectors, baseline }
+    }
+}
+
 /// Read a previous index, or `None` when there is none, when it was written by
 /// a different model or layout, or when its two halves disagree.
 ///
@@ -3125,6 +3178,25 @@ fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
     Some(LoadedIndex { chunks, vectors, files: manifest.files, stamps: manifest.stamps, by_path })
 }
 
+/// Write an index, replacing the previous one at a single commit point.
+///
+/// **The manifest is the commit: while it is absent there is no index.** Every
+/// reader already says exactly that, so nothing new has to learn the rule —
+/// `read_chunks` raises `no-index`, `load_index` returns `None`, `built_models`
+/// filters on the file being there.  The swap therefore happens with the
+/// manifest out of the way, and the run is committed by putting it back.
+///
+/// This was three bare writes in place, which left a window holding *new vectors
+/// against an old chunk table*.  The two are coupled by position, so when the
+/// chunk count happens to be unchanged — a note edited without gaining or losing
+/// a passage — the length check cannot see the mismatch, and every query the
+/// index answers from those chunks names the wrong note.  A crash mid-swap now
+/// costs a rebuild, which is loud and recoverable, and can never cost a
+/// mispairing, which is neither.
+///
+/// No fsync.  This makes the *process* dying safe, which is the case that
+/// happens; surviving power loss would mean syncing the files and the directory,
+/// for derived data whose loss costs one `index --full`.
 fn save_index(
     dir: &Path,
     m: &Model,
@@ -3139,19 +3211,28 @@ fn save_index(
     for x in vectors {
         bytes.extend_from_slice(&x.to_le_bytes());
     }
-    fs::write(dir.join("vectors.f32"), &bytes)?;
-    fs::write(dir.join("chunks.json"), serde_json::to_vec(chunks)?)?;
-    fs::write(
-        dir.join("manifest.json"),
-        serde_json::to_vec(&Manifest {
-            version: INDEX_VERSION,
-            config: cfg.hash_for(Target::Semantic),
-            model: m.name.into(),
-            dim: m.dim,
-            files,
-            stamps,
-        })?,
-    )?;
+    // Serialised before anything on disk is disturbed: a failure here must cost
+    // the run, never the index that is already sitting there.
+    let table = serde_json::to_vec(chunks)?;
+    let manifest = serde_json::to_vec(&Manifest {
+        version: INDEX_VERSION,
+        config: cfg.hash_for(Target::Semantic),
+        model: m.name.into(),
+        dim: m.dim,
+        files,
+        stamps,
+    })?;
+
+    let staged = |name: &str| dir.join(format!("{name}.new"));
+    fs::write(staged("vectors.f32"), &bytes)?;
+    fs::write(staged("chunks.json"), &table)?;
+    // The index ceases to exist here …
+    let _ = fs::remove_file(dir.join("manifest.json"));
+    fs::rename(staged("vectors.f32"), dir.join("vectors.f32"))?;
+    fs::rename(staged("chunks.json"), dir.join("chunks.json"))?;
+    fs::write(staged("manifest.json"), &manifest)?;
+    // … and exists again here, whole.
+    fs::rename(staged("manifest.json"), dir.join("manifest.json"))?;
     Ok(bytes.len())
 }
 
@@ -3571,6 +3652,19 @@ struct IndexReport {
     secs: f64,
 }
 
+/// What an index run yields: the numbers, and — when it wrote — the index it
+/// wrote.
+///
+/// The second exists for the resident server, which used to re-read from disk
+/// what this function had just held in memory.  A caller with nothing to adopt
+/// drops it, which costs a move.
+struct Indexed {
+    report: IndexReport,
+    /// `None` when the run changed nothing and so wrote nothing.  Present on
+    /// every path that reached `save_index`, and on no other.
+    built: Option<Built>,
+}
+
 fn cmd_index(
     vault: &Path,
     full: bool,
@@ -3579,7 +3673,7 @@ fn cmd_index(
     cfg: &Config,
     j: &mut Journal,
     resident: Option<&mut TextEmbedding>,
-) -> Result<IndexReport> {
+) -> Result<Indexed> {
     let t0 = Instant::now();
     let mut files = Vec::new();
     org_files(vault, &mut files)?;
@@ -3837,7 +3931,9 @@ fn cmd_index(
     if pending.is_empty() && stale.is_empty() && dropped == 0 && !restamped && old.is_some() {
         writeln!(j.out, "nothing changed; index left as it is")?;
         report.unchanged = true;
-        return Ok(report);
+        // Nothing was written, so there is nothing to adopt: a server keeps the
+        // version it is already serving rather than reloading an identical one.
+        return Ok(Indexed { report, built: None });
     }
 
     if pending.is_empty() {
@@ -3913,7 +4009,10 @@ fn cmd_index(
     )?;
     report.bytes = Some(written);
     report.secs = t0.elapsed().as_secs_f64();
-    Ok(report)
+    // Committed to disk and handed over in one piece.  What is returned is
+    // exactly what was written — `save_index` serialised these very vectors —
+    // which is what makes adopting it as legitimate as reading it back.
+    Ok(Indexed { report, built: Some(Built { chunks, vectors }) })
 }
 
 /// Print hits grouped by note.
@@ -4269,15 +4368,8 @@ fn cmd_search(
     json: bool,
 ) -> Result<()> {
     let m = choose_index(vault, want)?;
-    let dir = semantic_dir(vault, m);
-    let chunks: Vec<Chunk> = read_chunks(&dir, m)?;
-    let raw = fs::read(dir.join("vectors.f32"))?;
-    let n = raw.len() / (m.dim * 4);
-    if n != chunks.len() {
-        return Err(corrupt_index(chunks.len(), n));
-    }
-    let vectors: Vec<f32> =
-        raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let ix = Index::read(&semantic_dir(vault, m), m)?;
+    let n = ix.chunks.len();
 
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
@@ -4288,7 +4380,7 @@ fn cmd_search(
     if !f.langs.is_empty() {
         return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
     }
-    let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&chunks[i])).collect();
+    let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&ix.chunks[i])).collect();
     if !f.is_empty() && !json {
         println!("filter: {} → {} of {n} chunks", describe_filters(&f), candidates.len());
     }
@@ -4322,20 +4414,19 @@ fn cmd_search(
     let mut scored: Vec<(f32, usize)> = candidates
         .iter()
         .map(|&i| {
-            let s = &vectors[i * m.dim..(i + 1) * m.dim];
+            let s = &ix.vectors[i * m.dim..(i + 1) * m.dim];
             (s.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i)
         })
         .collect();
     scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let search = t2.elapsed();
 
-    let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &chunks[*i])).collect();
-    let baseline = Baseline::of(&vectors, m.dim);
+    let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &ix.chunks[*i])).collect();
     if json {
-        println!("{}", hits_json(vault, &hits, lim, merge, baseline));
+        println!("{}", hits_json(vault, &hits, lim, merge, ix.baseline));
         return Ok(());
     }
-    report(vault, &hits, lim, merge, baseline.as_ref());
+    report(vault, &hits, lim, merge, ix.baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -5536,7 +5627,8 @@ mod tests {
         fs::write(&abs, format!("{body}\n\n")).unwrap();
 
         let r = cmd_index(&v, false, false, m, &Config::default(), &mut Journal::quiet(), None)
-            .unwrap();
+            .unwrap()
+            .report;
 
         assert_eq!(r.embedded, 0, "no passage changed, so none may be embedded");
         assert!(r.carried > 0, "its passages must be carried over, not rebuilt");
@@ -5982,7 +6074,7 @@ mod tests {
         let (mut j, log) = watched();
         let m = model_named(DEFAULT_MODEL).unwrap();
         // Nothing changed since the seed, so every file takes an early exit.
-        let r = cmd_index(&v, false, false, m, &Config::default(), &mut j, None).unwrap();
+        let r = cmd_index(&v, false, false, m, &Config::default(), &mut j, None).unwrap().report;
         assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
 
         let seen = log.borrow();
@@ -6326,6 +6418,59 @@ mod tests {
             loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).is_none(),
             "positional coupling means a mismatch returns wrong answers, not errors"
         );
+    }
+
+    /// The same guard on the other side, where it had been lost.
+    ///
+    /// `Server::refresh` decoded the pair for itself and omitted the length
+    /// check, so a torn file installed a mispaired cache and every query
+    /// afterwards named the wrong note, with nothing failing.  There is one
+    /// reader now, and this is what makes that worth having.
+    #[test]
+    fn the_searching_reader_rejects_a_truncated_vector_file() {
+        let v = scratch("mismatch-search");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        assert!(Index::read(&sem(&v), m).is_ok(), "the premise: it reads before being cut");
+
+        let f = sem(&v).join("vectors.f32");
+        let mut bytes = fs::read(&f).unwrap();
+        bytes.truncate(bytes.len() - 4);
+        fs::write(&f, bytes).unwrap();
+
+        let Err(e) = Index::read(&sem(&v), m) else { panic!("a truncated pair must be refused") };
+        assert_eq!(e.downcast_ref::<Fault>().map(|f| f.kind), Some("index-corrupt"));
+    }
+
+    /// The commit rule: the manifest is what says an index exists.
+    ///
+    /// Both halves are asserted, because each fails differently. A run must
+    /// leave nothing staged behind it — litter would be read as an index next
+    /// time someone went looking by hand. And the state a crash mid-swap leaves,
+    /// which is the manifest absent, must read as *no index* rather than as the
+    /// old one: that is what makes losing the manifest cost a rebuild instead of
+    /// answering from a chunk table the vectors no longer match.
+    #[test]
+    fn a_committed_index_leaves_nothing_staged_behind_it() {
+        let v = scratch("commit");
+        let a = note(&v, "alpha");
+        seed(&v, &[a.as_str()]);
+        let m = model_named(DEFAULT_MODEL).unwrap();
+
+        let staged: Vec<String> = fs::read_dir(sem(&v))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.ends_with(".new"))
+            .collect();
+        assert!(staged.is_empty(), "a committed run stages nothing: {staged:?}");
+
+        // What a crash between the renames looks like from the next process.
+        fs::remove_file(sem(&v).join("manifest.json")).unwrap();
+        let Err(e) = Index::read(&sem(&v), m) else { panic!("no manifest means no index") };
+        assert_eq!(e.downcast_ref::<Fault>().map(|f| f.kind), Some("no-index"));
+        assert!(loaded(&sem(&v), m).is_none(), "and the indexer rebuilds rather than reuses");
+        assert!(built_models(&v).is_empty(), "nothing offers it as built");
     }
 
     #[test]

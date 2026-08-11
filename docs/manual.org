@@ -1080,6 +1080,12 @@ shared table would silently go stale for every model you did not index in that
 run, and a same-count-different-content mismatch is exactly what a length check
 cannot catch.
 
+*An index is replaced whole or not at all.* A run builds the new one beside the
+old and commits it at the end, so killing =index= halfway leaves you with the
+previous index, or with none --- never with one that answers from mismatched
+pieces. If it leaves you with none, the next command says so and rebuilds, rather
+than quietly returning the wrong notes.
+
 *The two indexes are independent.* Each carries everything its own hits need
 and its own record of which notes it is behind on, so either can be built,
 rebuilt or deleted without disturbing the other --- which is what makes

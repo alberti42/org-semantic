@@ -25,14 +25,18 @@ const SERVE_REMEDY: &str = "reindex with `full` to rebuild under the new one";
 use std::io::BufRead;
 
 /// One vault's semantic index, with the model that reads it, kept loaded.
+///
+/// The two have different lifetimes, which is why they are separate fields
+/// rather than one struct rebuilt together: the **model** is the expensive thing
+/// and the reason this process is resident, while the **index** is replaced
+/// whole every time a run writes one.  Indexing therefore swaps `index` in a
+/// single assignment and the model is never disturbed.
 struct Semantic {
     model: TextEmbedding,
     which: &'static Model,
-    chunks: Vec<Chunk>,
-    vectors: Vec<f32>,
-    /// Computed once when the index is loaded — a few milliseconds there rather
-    /// than on every keystroke.
-    baseline: Option<Baseline>,
+    /// Whatever version was committed last.  Never edited in place — see
+    /// `Index`.
+    index: Index,
 }
 
 #[derive(Default)]
@@ -54,18 +58,9 @@ impl Server {
         let m = choose_index(vault, want)?;
         let key = (vault.to_path_buf(), m.name);
         if !self.semantic.contains_key(&key) {
-            let dir = semantic_dir(vault, m);
-            let chunks: Vec<Chunk> = read_chunks(&dir, m)?;
-            let raw = fs::read(dir.join("vectors.f32"))?;
-            if raw.len() != chunks.len() * m.dim * 4 {
-                return Err(corrupt_index(chunks.len(), raw.len() / (m.dim * 4)));
-            }
-            let vectors: Vec<f32> =
-                raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            let index = Index::read(&semantic_dir(vault, m), m)?;
             let model = model_with(m.which.clone(), None, false)?;
-            let baseline = Baseline::of(&vectors, m.dim);
-            self.semantic
-                .insert(key.clone(), Semantic { model, which: m, chunks, vectors, baseline });
+            self.semantic.insert(key.clone(), Semantic { model, which: m, index });
         }
         Ok(self.semantic.get_mut(&key).expect("just inserted"))
     }
@@ -171,7 +166,7 @@ impl Server {
         let s = self.semantic(&vault, want)?;
         let dim = s.which.dim;
         let candidates: Vec<usize> =
-            (0..s.chunks.len()).filter(|&i| f.matches(&s.chunks[i])).collect();
+            (0..s.index.chunks.len()).filter(|&i| f.matches(&s.index.chunks[i])).collect();
         if candidates.is_empty() || f.text.trim().is_empty() {
             return Ok(serde_json::json!({ "hits": [] }));
         }
@@ -184,13 +179,14 @@ impl Server {
         let mut scored: Vec<(f32, usize)> = candidates
             .iter()
             .map(|&i| {
-                let v = &s.vectors[i * dim..(i + 1) * dim];
+                let v = &s.index.vectors[i * dim..(i + 1) * dim];
                 (v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i)
             })
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &s.chunks[*i])).collect();
-        Ok(hits_json(&vault, &hits, lim, merge, s.baseline))
+        let hits: Vec<(f32, &Chunk)> =
+            scored.iter().map(|(sc, i)| (*sc, &s.index.chunks[*i])).collect();
+        Ok(hits_json(&vault, &hits, lim, merge, s.index.baseline))
     }
 
     /// `index` — rebuild either index, or both, without leaving the process.
@@ -256,17 +252,26 @@ impl Server {
             // not.
             let mark = j.remarks.len();
             // Lend the resident model if this vault's index is already loaded.
-            let report = match self.semantic.get_mut(&key) {
+            let out = match self.semantic.get_mut(&key) {
                 Some(s) => cmd_index(&vault, full, rehash, want, &cfg, &mut j, Some(&mut s.model))?,
                 None => cmd_index(&vault, full, rehash, want, &cfg, &mut j, None)?,
             };
             for r in &mut j.remarks[mark..] {
                 r.target = Some("semantic");
             }
-            // The vectors on disk have moved, so what is held in memory is now
-            // wrong — including the baseline, which is derived from them.
-            self.refresh(&key)?;
-            done.insert("semantic".into(), serde_json::to_value(report)?);
+            // What is held in memory is now a version behind, so the new one
+            // takes its place — in one assignment, from what the run built,
+            // rather than by reading back the file it just wrote.  Nothing is
+            // part-updated at any point, and the model is untouched.
+            //
+            // `built` is `None` when the run wrote nothing, and the version in
+            // memory is then still the committed one.  A vault nobody has
+            // searched yet has nothing to replace; its first search reads the
+            // index from disk as it always did.
+            if let (Some(b), Some(s)) = (out.built, self.semantic.get_mut(&key)) {
+                s.index = Index::of(b, want.dim);
+            }
+            done.insert("semantic".into(), serde_json::to_value(out.report)?);
             done.insert("model".into(), want.name.into());
         }
 
@@ -308,22 +313,6 @@ impl Server {
             done.insert("remarks".into(), serde_json::to_value(remarks)?);
         }
         Ok(serde_json::Value::Object(done))
-    }
-
-    /// Re-read a vault's vectors and recompute its baseline, keeping the loaded
-    /// model.  Dropping the entry instead would be simpler and would throw away
-    /// the very thing worth keeping.
-    fn refresh(&mut self, key: &(PathBuf, &'static str)) -> Result<()> {
-        let Some(s) = self.semantic.get_mut(key) else { return Ok(()) };
-        let dir = semantic_dir(&key.0, s.which);
-        let chunks: Vec<Chunk> = read_chunks(&dir, s.which)?;
-        let raw = fs::read(dir.join("vectors.f32"))?;
-        let vectors: Vec<f32> =
-            raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-        s.baseline = Baseline::of(&vectors, s.which.dim);
-        s.chunks = chunks;
-        s.vectors = vectors;
-        Ok(())
     }
 
     /// What a vault has, so an editor can offer the right commands and say why
