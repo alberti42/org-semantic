@@ -56,10 +56,19 @@ const SERVE_REMEDY: &str = "reindex with `full` to rebuild under the new one";
 /// construction rather than by inspection.  Keep it that way.
 struct Semantic {
     which: &'static Model,
-    /// The one model.  Held for a single query, or a single batch of an index,
-    /// and never for longer — see the batch loop in `cmd_index`.
-    model: Mutex<TextEmbedding>,
+    /// The model, **shared with every other vault using the same one**.  Held for
+    /// a single query, or a single batch of an index, and never for longer — see
+    /// the batch loop in `cmd_index`.
+    ///
+    /// Shared because inference is stateless: nothing about embedding a query
+    /// depends on which vault asked, so a second copy of the weights buys
+    /// nothing. It used to be one per `(vault, model)` — measured at **+143 MB**
+    /// for the second vault on one model, which was pure waste.
+    model: Arc<Mutex<TextEmbedding>>,
     /// The version committed last.  Swapped whole; a reader clones the `Arc`.
+    ///
+    /// This is the part that really is per vault: the chunk table and the vectors
+    /// every dot product runs against, ~10 MB on the reference vault.
     index: Mutex<Arc<Index>>,
 }
 
@@ -74,6 +83,14 @@ struct Server {
     /// Caching its analyzer saved a 30-byte file read and bought a stale-state
     /// bug to invalidate.
     semantic: Mutex<HashMap<(PathBuf, &'static str), Arc<Semantic>>>,
+    /// One loaded model per model *name*, shared by every vault using it.
+    ///
+    /// **`Weak`, deliberately.** Holding `Arc`s here would keep every model that
+    /// has ever been used alive for the life of the process, and `close` could
+    /// never release one. With `Weak`, the owners are the `Semantic` entries and a
+    /// model is dropped exactly when the last vault using it goes — no reference
+    /// counting of our own, and no eviction policy to get wrong.
+    models: Mutex<HashMap<&'static str, std::sync::Weak<Mutex<TextEmbedding>>>>,
     /// The one indexing run allowed at a time, under the id it will answer with
     /// so `$/cancelRequest` can be matched against it.
     ///
@@ -104,27 +121,72 @@ struct Plan {
 }
 
 impl Server {
+    /// The loaded model for M, shared with whoever else is using it.
+    ///
+    /// The load (0.12–0.64 s) happens with this map locked, which is the one slow
+    /// thing under a lock here. Releasing it around the load would buy a race in
+    /// which two copies load for one name — the very waste this exists to remove.
+    fn model(&self, m: &'static Model) -> Result<Arc<Mutex<TextEmbedding>>> {
+        let mut models = lock(&self.models);
+        if let Some(loaded) = models.get(m.name).and_then(std::sync::Weak::upgrade) {
+            return Ok(loaded);
+        }
+        let loaded = Arc::new(Mutex::new(model_with(m.which.clone(), None, false)?));
+        // Overwrites a dead `Weak` if one is there, which is how they are reaped.
+        models.insert(m.name, Arc::downgrade(&loaded));
+        Ok(loaded)
+    }
+
     /// Load a vault's semantic index once, then keep it.
     ///
-    /// The model load (0.12–0.64 s) happens with the map locked. Double-checked
-    /// insertion would avoid that and buy a race in which two models load for
-    /// one key; the wait is a vault's first query, once.
+    /// Two critical sections rather than one, and never nested: the model comes
+    /// from `models`, then the index is read under `semantic`. The second lookup
+    /// is not redundant — the lock is released in between, so another thread may
+    /// have inserted this key meanwhile, and without the re-check both would
+    /// install an entry and one would be orphaned along with any index a run
+    /// later adopted into it.
     fn semantic(&self, vault: &Path, want: Option<&'static Model>) -> Result<Arc<Semantic>> {
         let m = choose_index(vault, want)?;
         let key = (vault.to_path_buf(), m.name);
+        if let Some(s) = lock(&self.semantic).get(&key) {
+            return Ok(Arc::clone(s));
+        }
+        let model = self.model(m)?;
         let mut cache = lock(&self.semantic);
         if let Some(s) = cache.get(&key) {
             return Ok(Arc::clone(s));
         }
         let index = Index::read(&semantic_dir(vault, m), m)?;
-        let model = model_with(m.which.clone(), None, false)?;
-        let s = Arc::new(Semantic {
-            which: m,
-            model: Mutex::new(model),
-            index: Mutex::new(Arc::new(index)),
-        });
+        let s = Arc::new(Semantic { which: m, model, index: Mutex::new(Arc::new(index)) });
         cache.insert(key, Arc::clone(&s));
         Ok(s)
+    }
+
+    /// `close` — forget a vault, so what it was holding can be reclaimed.
+    ///
+    /// The client's counterpart to sharing models: an editor that has closed the
+    /// last buffer in a vault says so, and the chunk table and vectors go. The
+    /// model goes with them **only if no other vault was using it**, which falls
+    /// out of `Weak` rather than being decided here.
+    ///
+    /// Its own method rather than an optional `vault` on `reload`: that would make
+    /// one method answer two questions, which is the mistake `status` already made
+    /// once. `reload` means "I rebuilt something behind your back"; this means "I
+    /// am done with this one".
+    ///
+    /// Expect only part of the memory back. Measured with `reload`: dropping two
+    /// vaults and their models returned ~112 MB of ~390 MB, in two steps a few
+    /// seconds apart, because freed pages go to the allocator and only some of
+    /// them onward to the OS. A process exit is still the only thing that returns
+    /// everything.
+    fn close(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
+        let vault = PathBuf::from(
+            p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
+        );
+        let mut cache = lock(&self.semantic);
+        let before = cache.len();
+        cache.retain(|(v, _), _| v != &vault);
+        Ok(serde_json::json!({ "dropped": before - cache.len() }))
     }
 
     /// The analyzer the lexical index was built with, read from beside it.
@@ -709,6 +771,7 @@ pub fn serve() -> Result<()> {
                         lock(&server.semantic).clear();
                         Ok(Some(serde_json::json!({ "ok": true })))
                     }
+                    "close" => server.close(&req.params).map(Some),
                     "index" => server.start(&req, &conn.sender).map(|()| None),
                     _ => Err(anyhow!("unknown method `{}`", req.method)),
                 };

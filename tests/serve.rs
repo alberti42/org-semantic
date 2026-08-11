@@ -374,6 +374,34 @@ fn status_answers_about_a_vault() {
     assert!(result.get("version").is_none(), "not its question to answer: {result:?}");
 }
 
+/// `close` is how a client says it is done with a vault, so the chunk table and
+/// vectors can go — and the shared model with them, if nothing else holds it.
+///
+/// Only the bookkeeping is checked here, because anything more needs an embedding
+/// model. That the weights are genuinely shared is a *measurement*, not an
+/// assertion: three vaults on one model cost 255.7 MB against 253.5 MB for one,
+/// and a second vault's first search skips the 150 ms load.
+#[test]
+fn closing_a_vault_is_asked_for_by_name() {
+    let v = vault("close", 2);
+    let msgs = talk(
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "close",
+                    "params": { "vault": v } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "close", "params": {} }),
+        ],
+        None,
+    );
+    let reply = |id: i64| msgs.iter().find(|m| m["id"] == id).expect("a reply");
+
+    // Nothing was loaded, so nothing is dropped — and that is an answer, not an
+    // error: a client closing a vault it never searched has done nothing wrong.
+    assert_eq!(reply(1)["result"]["dropped"], 0);
+    // A vault is the whole of the request, so its absence is a mistake worth
+    // reporting rather than a licence to forget everything.
+    assert!(reply(2)["error"]["message"].as_str().unwrap().contains("vault"));
+}
+
 // ------------------------------------------------- answering while it indexes
 
 /// Drive a server the tests keep talking to, rather than writing everything at
@@ -566,6 +594,55 @@ fn a_semantic_search_answers_from_the_old_version_during_a_rebuild() {
     s.send(&ask(9));
     let after = s.reply();
     assert!(found(&after), "adopted without a reload: {after:?}");
+    s.close();
+}
+
+/// Two vaults, one model, and the lifetime that makes sharing safe: closing one
+/// vault must not disturb the other, and the model must survive until the last
+/// vault using it is gone.
+///
+/// The `Weak` in `Server::models` is what gives that for free. Hold `Arc`s there
+/// instead and the model would outlive every vault; drop it eagerly on the first
+/// `close` and the second vault would be searching through a model that had been
+/// unloaded underneath it.
+#[test]
+#[ignore = "needs an embedding model in the cache"]
+fn one_model_serves_several_vaults_and_outlives_all_but_the_last() {
+    let a = vault("share-a", 8);
+    let b = vault("share-b", 8);
+    index(&a, "semantic");
+    index(&b, "semantic");
+    let ask = |id: i64, v: &Path| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": "search",
+                "params": { "vault": v, "query": "trapped atoms", "k": 3 } })
+    };
+    let loaded = |id: i64, v: &Path| json!({ "jsonrpc": "2.0", "id": id, "method": "status", "params": { "vault": v } });
+
+    let mut s = Session::open();
+    s.send(&ask(1, &a));
+    assert!(!s.reply()["result"]["hits"].as_array().unwrap().is_empty(), "a answers");
+    s.send(&ask(2, &b));
+    assert!(!s.reply()["result"]["hits"].as_array().unwrap().is_empty(), "b answers");
+    s.send(&loaded(3, &a));
+    assert_eq!(s.reply()["result"]["loaded"], 2, "two vaults, one model");
+
+    s.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "close", "params": { "vault": a } }));
+    assert_eq!(s.reply()["result"]["dropped"], 1);
+    s.send(&loaded(5, &b));
+    assert_eq!(s.reply()["result"]["loaded"], 1);
+
+    // The half that a wrong lifetime would break: b never asked to be forgotten.
+    s.send(&ask(6, &b));
+    assert!(
+        !s.reply()["result"]["hits"].as_array().unwrap().is_empty(),
+        "closing one vault must not unload the model another is using"
+    );
+
+    // And with the last owner gone, a search simply loads it again.
+    s.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "close", "params": { "vault": b } }));
+    assert_eq!(s.reply()["result"]["dropped"], 1);
+    s.send(&ask(8, &a));
+    assert!(!s.reply()["result"]["hits"].as_array().unwrap().is_empty(), "and comes back");
     s.close();
 }
 

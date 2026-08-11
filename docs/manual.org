@@ -207,6 +207,30 @@ works.* A =search= sent during a reindex is answered from the version committed
 before it, and marked =indexing: true= so you can say so in the UI. It is also
 slower --- see [[#during-a-reindex][below]].
 
+*One server can hold several vaults, and the embedding model is loaded once for
+all of them.* Nothing about embedding a query depends on which vault asked, so the
+weights are shared; what each vault adds is its own chunk table and vectors, a
+couple of megabytes for a small vault and about ten for a large one. Measured with
+the small English model: one vault costs 253 MB, three cost 256 MB.
+
+When you are finished with a vault --- the last buffer visiting it is gone, say
+--- send =close= with its path. Its table and vectors are dropped, and the model
+with them if no other vault is using it.
+
+What that buys is a ceiling rather than a refund. Opening and closing three vaults
+five times over settles at about 262 MB and stays there, so nothing accumulates;
+but the memory comes back to the system on the runtime's own schedule, which is
+unpredictable --- sometimes seconds, sometimes not at the moment you looked. Do not
+wait for the number to fall.
+
+A ceiling is the more useful thing, though, and it is why *one server for all your
+vaults is the arrangement to prefer*. One server per vault would give every byte
+back the moment it exited, but it pays for a whole model each time: two vaults open
+at once cost about 507 MB that way against 256 MB shared, three about 760 MB
+against the same 256 MB. Only if you visit vaults strictly one at a time do the two
+come out level. The protocol is identical either way, so this is the client's
+choice to make --- but memory is not the reason to split.
+
 Methods:
 
 | method            | params                                                                                   | returns                                       |
@@ -216,6 +240,7 @@ Methods:
 | =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config=, =conserveMemory= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=          | =vault=                                                                                  | which indexes this vault has, which are loaded, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
+| =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
 | =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |
 | =shutdown=        | ---                                                                                      | stop accepting work, and wait for a run in flight |
 | =exit=            | ---                                                                                      | end the process                               |
