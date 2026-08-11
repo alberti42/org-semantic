@@ -3246,6 +3246,74 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
+/// What this process is resident in, in bytes, or `None` where we cannot ask.
+///
+/// The **total**, and the only figure here that covers the runtime: `ort` rc.13
+/// exposes allocator *info* — device, type — and no usage reporting at all, so
+/// ONNX's own arenas and weights cannot be asked about from inside. The earlier
+/// figures for those (~103 MB of runtime, ~229 MB per model) came from
+/// *subtraction across separate processes*, which is not a method available here.
+/// So this is reported beside what can be counted exactly, and the difference is
+/// left for the caller to take rather than attributed to something we did not
+/// measure.
+fn rss() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let got = unsafe {
+            libc::proc_pidinfo(
+                std::process::id() as libc::c_int,
+                libc::PROC_PIDTASKINFO,
+                0,
+                (&mut info as *mut libc::proc_taskinfo).cast(),
+                size,
+            )
+        };
+        (got == size).then_some(info.pti_resident_size)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Second field of `statm` is resident pages.
+        let statm = fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * 4096)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Roughly what a chunk table costs on the heap, in bytes.
+///
+/// Summed rather than guessed at from the count, because chunks vary by an order
+/// of magnitude — a two-line heading against a heading path with six levels. Uses
+/// `capacity`, not `len`: what is *held* is the question, and `serde` leaves these
+/// with whatever it allocated.
+///
+/// `text` is empty on anything read back — it is `#[serde(skip)]` — so it
+/// contributes nothing here, and would contribute a great deal mid-run. That is
+/// the one reason this is called an estimate rather than a measurement.
+fn table_bytes(chunks: &[Chunk]) -> u64 {
+    let own = std::mem::size_of_val(chunks);
+    let heap: usize = chunks
+        .iter()
+        .map(|c| {
+            c.path.capacity()
+                + c.heading.capacity()
+                + c.lang.capacity()
+                + c.text.capacity()
+                + c.id.as_ref().map_or(0, String::capacity)
+                + c.todo.as_ref().map_or(0, String::capacity)
+                + c.embed_heading.as_ref().map_or(0, String::capacity)
+                + c.tags.capacity() * std::mem::size_of::<String>()
+                + c.tags.iter().map(String::capacity).sum::<usize>()
+        })
+        .sum();
+    (own + heap) as u64
+}
+
 /// An exclusive claim on a vault's index, for the length of a run — **across
 /// processes**, which is the part nothing else covered.
 ///
@@ -4838,6 +4906,48 @@ fn model_cache_root(m: &Model) -> Result<PathBuf> {
         .map(|i| i.model_code)
         .ok_or_else(|| anyhow!("fastembed does not know {}", m.name))?;
     Ok(cache_dir().join(format!("models--{}", code.replace('/', "--"))))
+}
+
+/// The size on disk of M's weights, or `None` if they are not cached.
+///
+/// A **proxy, not a measurement**, and the field carrying it is named
+/// `weightFile` so nothing reads it as residency: ORT loads, and may pre-pack,
+/// these bytes, and exposes no way to ask what that came to.
+///
+/// Sums every `.onnx*` file in the snapshot, because the large multilingual models
+/// keep their weights in a 2.2 GB `model.onnx_data` beside a 546 kB `model.onnx` —
+/// taking only the first would report half a megabyte for the largest model here.
+fn weight_bytes(m: &'static Model) -> Option<u64> {
+    /// Recursive, because the weights are not where a first guess puts them:
+    /// hf-hub lays them out as `snapshots/<rev>/onnx/model.onnx`, a level below
+    /// the snapshot. Looking only at the top level reported `null` for a model
+    /// that was plainly cached.
+    fn onnx_bytes(dir: &Path) -> u64 {
+        let Ok(entries) = fs::read_dir(dir) else { return 0 };
+        entries
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                // `metadata` follows the symlink hf-hub threads to `blobs/`,
+                // which is where the bytes actually are.
+                match fs::metadata(&p) {
+                    Ok(md) if md.is_dir() => onnx_bytes(&p),
+                    Ok(md)
+                        if p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.contains(".onnx")) =>
+                    {
+                        md.len()
+                    }
+                    _ => 0,
+                }
+            })
+            .sum()
+    }
+    let total = onnx_bytes(&model_cache_root(m).ok()?.join("snapshots"));
+    // Zero means "not cached", which is a different answer from "cached and
+    // empty" — and only the first can happen.
+    (total > 0).then_some(total)
 }
 
 fn find_tokenizer(m: &Model) -> Result<PathBuf> {

@@ -241,6 +241,7 @@ Methods:
 | =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
+| =memory=          | ---                                                                                      | what this process holds, in bytes             |
 | =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |
 | =shutdown=        | ---                                                                                      | stop accepting work, and wait for a run in flight |
 | =exit=            | ---                                                                                      | end the process                               |
@@ -555,6 +556,36 @@ tidy up; the next run notices the process is gone and takes it over. In the one
 case where it cannot tell --- a lock with no readable owner --- it waits a minute
 before assuming the worst, and the error names the file so you can remove it
 yourself.
+
+*** Asking what it is holding
+:PROPERTIES:
+:CUSTOM_ID: memory
+:END:
+
+=memory= reports what the process is using, in bytes:
+
+#+begin_src json
+--> { "jsonrpc": "2.0", "id": 1, "method": "memory" }
+<-- { "rss": 265617408,
+      "vaults": [ { "vault": "/home/you/notes", "model": "bge-small-en",
+                    "chunks": 1023, "vectors": 1571328, "table": 268691 } ],
+      "models": [ { "name": "bge-small-en", "weightFile": 133093490 } ] }
+#+end_src
+
+=rss= is the whole process. =vaults= and =models= are the parts that can be counted
+exactly --- the vectors, the chunk table, and which models are loaded, each named
+once however many vaults share it. =weightFile= is the size of the model on disk,
+which is what the weights /are/ rather than what they occupy once loaded.
+
+*There is no figure for the embedding runtime, and that is deliberate.* ONNX
+Runtime offers no way to ask what its own arenas cost, so anything reported under
+that name would be a guess dressed as a measurement --- and subtracting the rest
+from =rss= would not give it to you either, since the difference also holds
+memory the allocator is keeping back and the process's own working space. If you
+want that number, subtract and label it honestly.
+
+Raw byte counts, and nothing derived: totals and units are yours to compose.
+
 
 *Searches, by contrast, are all answered.* The server keeps no queue of its own
 and supersedes nothing: ten keystrokes are ten searches and ten replies, handled

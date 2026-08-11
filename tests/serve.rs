@@ -626,6 +626,22 @@ fn one_model_serves_several_vaults_and_outlives_all_but_the_last() {
     s.send(&loaded(3, &a));
     assert_eq!(s.reply()["result"]["loaded"], true, "a is resident");
 
+    // Both resident is also what `memory` is for: two vaults, and the model
+    // counted **once**, because that is how it is actually held.
+    s.send(&json!({ "jsonrpc": "2.0", "id": 90, "method": "memory" }));
+    let mem = s.reply();
+    assert_eq!(mem["result"]["vaults"].as_array().unwrap().len(), 2, "{mem}");
+    let models = mem["result"]["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1, "one model for both vaults: {mem}");
+    assert!(
+        models[0]["weightFile"].as_u64().is_some_and(|n| n > 1_000_000),
+        "the weights are cached, so their size on disk is known: {mem}"
+    );
+    let one = &mem["result"]["vaults"][0];
+    let chunks = one["chunks"].as_u64().unwrap();
+    assert_eq!(one["vectors"].as_u64().unwrap(), chunks * 384 * 4, "vectors are exact");
+    assert!(one["table"].as_u64().is_some_and(|n| n > chunks), "and the table is summed");
+
     s.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "close", "params": { "vault": a } }));
     assert_eq!(s.reply()["result"]["dropped"], 1);
     // Per vault, so this says which one went rather than merely how many did.
@@ -665,6 +681,35 @@ fn indexing_one_vault_does_not_block_another() {
     assert!(first.get("result").is_some(), "{first:?}");
     assert_eq!(s.reply()["id"], 7, "and the first still finishes");
     s.close();
+}
+
+/// `memory` answers about the **process**, in raw bytes, and only about what can
+/// actually be counted.
+///
+/// Its own method rather than a field on `status`, which answers about a vault —
+/// the distinction this codebase has got wrong twice. Nothing derived is sent: a
+/// client wanting "unaccounted for" subtracts, and one wanting "MB" formats.
+///
+/// Deliberately absent: any figure for ONNX itself. `ort` exposes no usage
+/// reporting, so `rss` minus the rest would be an invented measurement — the
+/// remainder holds the allocator's retained pages and our own working set too.
+#[test]
+fn memory_reports_what_it_can_count_and_no_more() {
+    let msgs = talk(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "memory" })], None);
+    let m = &msgs.iter().find(|m| m["id"] == 1).expect("a reply")["result"];
+
+    // A real figure even with nothing loaded — this is the one number that covers
+    // the runtime, and a server holding no index is still holding ONNX.
+    assert!(m["rss"].as_u64().is_some_and(|n| n > 1_000_000), "rss is real: {m}");
+    assert_eq!(m["vaults"], json!([]), "nothing searched, nothing loaded");
+    assert_eq!(m["models"], json!([]));
+
+    for invented in ["onnx", "runtime", "total", "accounted", "unattributed", "overhead"] {
+        assert!(
+            m.get(invented).is_none(),
+            "`{invented}` would be a number we cannot measure or one the client derives: {m}"
+        );
+    }
 }
 
 /// A vault is claimed across processes, not just within one.

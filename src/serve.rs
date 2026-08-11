@@ -586,6 +586,62 @@ impl Server {
         }
     }
 
+    /// `memory` — what this process is holding, in raw bytes.
+    ///
+    /// About the **process**, so its own method: `status` answers about a vault,
+    /// and mixing the two subjects is the mistake recorded twice in this file.
+    ///
+    /// **Honest rather than complete.** `rss` is the total. `vaults` and `models`
+    /// are what can be counted exactly — vectors are `len * 4`, chunk tables are
+    /// summed, and the loaded models are named. What is *not* here is a figure for
+    /// ONNX itself: `ort` exposes no usage reporting, so the runtime's arenas and
+    /// the resident weights cannot be asked about from inside. Reporting
+    /// `rss` minus the rest under a name like "onnx" would be inventing a
+    /// measurement — the remainder also holds the allocator's retained pages and
+    /// this process's own working set.
+    ///
+    /// `weightFile` is the model file's size on disk, and says so in its name: it
+    /// is what the weights *are*, not what they occupy once ORT has loaded them.
+    ///
+    /// Raw counts only, and nothing derived. A client that wants "unaccounted for"
+    /// subtracts; a client that wants "MB" formats. Both are display decisions,
+    /// and `Progress` already follows that rule — two renderers of one fact drift.
+    fn memory(&self) -> Result<serde_json::Value> {
+        // One lock at a time, as everywhere here: the map is cloned out and
+        // released before any `Index` is looked at.
+        let loaded: Vec<((PathBuf, &'static str), Arc<Semantic>)> =
+            lock(&self.semantic).iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+
+        let mut vaults = Vec::new();
+        for ((vault, model), s) in &loaded {
+            let ix = Arc::clone(&lock(&s.index));
+            vaults.push(serde_json::json!({
+                "vault": vault,
+                "model": model,
+                "chunks": ix.chunks.len(),
+                "vectors": (ix.vectors.len() * std::mem::size_of::<f32>()) as u64,
+                "table": table_bytes(&ix.chunks),
+            }));
+        }
+
+        // By model rather than by vault, matching how they are actually held: one
+        // model serves every vault using it.
+        let mut names: Vec<&'static str> = loaded.iter().map(|((_, m), _)| *m).collect();
+        names.sort_unstable();
+        names.dedup();
+        let models: Vec<serde_json::Value> = names
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "weightFile": model_named(name).ok().and_then(weight_bytes),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({ "rss": rss(), "vaults": vaults, "models": models }))
+    }
+
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
     fn status(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
@@ -807,6 +863,7 @@ pub fn serve() -> Result<()> {
                 let answer = match req.method.as_str() {
                     "search" => server.search(&req.params).map(Some),
                     "status" => server.status(&req.params).map(Some),
+                    "memory" => server.memory().map(Some),
                     // A resident process must be able to drop what it holds
                     // without being restarted: an index rebuilt underneath it is
                     // otherwise served stale until the editor exits.
