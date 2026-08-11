@@ -6,37 +6,53 @@
 //! and a command you press RET on, so the process stays alive and keeps both the
 //! model and the vault's vectors in memory.
 //!
-//! Framing is LSP's — `Content-Length: N\r\n\r\n<body>` — chosen because Emacs
-//! ships `jsonrpc.el` (what Eglot runs on), so the editor side needs no protocol
-//! code at all: request/response correlation and async notifications come for
-//! free over a plain `make-process` pipe.  No socket, no port, no
-//! authentication, and the server's lifetime is the editor's.  Cancellation is
-//! the one thing that does not ride the pipe — see `mod interrupt`.
+//! The transport is `lsp_server` — LSP's `Content-Length` framing, chosen
+//! because Emacs ships `jsonrpc.el` (what Eglot runs on), so the editor side
+//! needs no protocol code at all.  It was hand-rolled once, and the framing was
+//! never the reason to stop: `Connection::sender` is a **cloneable, `Send`
+//! channel**, which is what lets an indexing worker answer and report without
+//! two threads racing for the descriptor.  Everything that used to guard that
+//! race — `O_NONBLOCK`, a `PIPE_BUF` argument, a policy for dropping reports —
+//! is gone, because the run no longer writes anything itself.
 //!
-//! Requests are served one at a time.  At ~10 ms each that is not a queue worth
-//! managing, and it keeps every borrow of the cached indexes trivially sound.
+//! **An `index` runs on a worker; everything else is answered on the loop.**
+//! That is what makes search-during-reindex possible, and it is also what
+//! retired three earlier workarounds: cancellation is `$/cancelRequest` again
+//! (it now arrives while there is still something to stop, and it carries the
+//! id), and the session has an `initialize` to answer `serverInfo.version` at.
+//!
+//! Searches stay on the loop, serial with each other.  Each is ~10 ms and they
+//! would serialize on the one model regardless, so a second thread would buy
+//! nothing.
 
 use crate::*;
+use lsp_server::{Connection, Message, Notification, Request, RequestId, Response, ResponseError};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// How an editor says yes: it has no flags, so it calls `index` with `full`.
 /// Phrased as something a client can put in front of a user verbatim.
 const SERVE_REMEDY: &str = "reindex with `full` to rebuild under the new one";
-use std::io::BufRead;
 
-/// One vault's semantic index, with the model that reads it, kept loaded.
+/// One vault's index and the model that reads it, shared between the request
+/// loop and an indexing run.
 ///
-/// The two have different lifetimes, which is why they are separate fields
-/// rather than one struct rebuilt together: the **model** is the expensive thing
-/// and the reason this process is resident, while the **index** is replaced
-/// whole every time a run writes one.  Indexing therefore swaps `index` in a
-/// single assignment and the model is never disturbed.
+/// The two are separate fields because they have different lifetimes: the
+/// **model** is the expensive thing and the reason this process is resident,
+/// while the **index** is replaced whole by every run that writes one.
+///
+/// **Hold at most one of these locks at a time.**  Every path here obeys it — a
+/// search clones the `Arc<Index>` out and drops the guard before scanning, and
+/// takes the model only to embed its query.  Nothing ever holds one lock while
+/// reaching for another, so no cycle exists and deadlock is ruled out by
+/// construction rather than by inspection.  Keep it that way.
 struct Semantic {
-    model: TextEmbedding,
     which: &'static Model,
-    /// Whatever version was committed last.  Never edited in place — see
-    /// `Index`.
-    index: Index,
+    /// The one model.  Held for a single query, or a single batch of an index,
+    /// and never for longer — see the batch loop in `cmd_index`.
+    model: Mutex<TextEmbedding>,
+    /// The version committed last.  Swapped whole; a reader clones the `Arc`.
+    index: Mutex<Arc<Index>>,
 }
 
 #[derive(Default)]
@@ -49,20 +65,52 @@ struct Server {
     /// because tantivy memory-maps its segments and the pages stay resident.
     /// Caching its analyzer saved a 30-byte file read and bought a stale-state
     /// bug to invalidate.
-    semantic: HashMap<(PathBuf, &'static str), Semantic>,
+    semantic: Mutex<HashMap<(PathBuf, &'static str), Arc<Semantic>>>,
+    /// The one indexing run allowed at a time, under the id it will answer with
+    /// so `$/cancelRequest` can be matched against it.
+    ///
+    /// A thread that has finished is reaped here rather than announcing itself:
+    /// `JoinHandle::is_finished` is the whole of the bookkeeping.
+    run: Mutex<Option<(RequestId, std::thread::JoinHandle<()>)>>,
+}
+
+/// What a run needs, resolved on the loop thread before anything is spawned.
+///
+/// Everything a caller can get wrong — a missing vault, an unknown mode or
+/// model, a policy that will not parse or has drifted — is settled here, so the
+/// answer comes back at once instead of in a reply minutes away.
+struct Plan {
+    vault: PathBuf,
+    semantic: bool,
+    lexical: bool,
+    full: bool,
+    rehash: bool,
+    want: &'static Model,
+    cfg: Config,
 }
 
 impl Server {
     /// Load a vault's semantic index once, then keep it.
-    fn semantic(&mut self, vault: &Path, want: Option<&'static Model>) -> Result<&mut Semantic> {
+    ///
+    /// The model load (0.12–0.64 s) happens with the map locked. Double-checked
+    /// insertion would avoid that and buy a race in which two models load for
+    /// one key; the wait is a vault's first query, once.
+    fn semantic(&self, vault: &Path, want: Option<&'static Model>) -> Result<Arc<Semantic>> {
         let m = choose_index(vault, want)?;
         let key = (vault.to_path_buf(), m.name);
-        if !self.semantic.contains_key(&key) {
-            let index = Index::read(&semantic_dir(vault, m), m)?;
-            let model = model_with(m.which.clone(), None, false)?;
-            self.semantic.insert(key.clone(), Semantic { model, which: m, index });
+        let mut cache = lock(&self.semantic);
+        if let Some(s) = cache.get(&key) {
+            return Ok(Arc::clone(s));
         }
-        Ok(self.semantic.get_mut(&key).expect("just inserted"))
+        let index = Index::read(&semantic_dir(vault, m), m)?;
+        let model = model_with(m.which.clone(), None, false)?;
+        let s = Arc::new(Semantic {
+            which: m,
+            model: Mutex::new(model),
+            index: Mutex::new(Arc::new(index)),
+        });
+        cache.insert(key, Arc::clone(&s));
+        Ok(s)
     }
 
     /// The analyzer the lexical index was built with, read from beside it.
@@ -84,12 +132,18 @@ impl Server {
         lexical::Analyzer::from_key(&stored).ok_or_else(|| missing("unreadable"))
     }
 
+    /// Whether a run is under way, which is both what refuses a second one and
+    /// what tells a searcher its answer is a version behind.
+    fn indexing(&self) -> bool {
+        lock(&self.run).as_ref().is_some_and(|(_, h)| !h.is_finished())
+    }
+
     /// `search` — both modalities, one shape.
     ///
     /// `mode` selects the ranking; everything else is identical, so an editor
     /// can offer them as one command with a toggle and never branch on the
     /// reply.
-    fn search(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
+    fn search(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
@@ -115,10 +169,19 @@ impl Server {
             None => None,
         };
 
+        // Said on every reply, because a hit list answered mid-rebuild is a
+        // version behind and the client is the one that decides whether to say
+        // so.  It costs a boolean; asking `status` per keystroke would not.
+        let moving = self.indexing();
+        let answer = |mut v: serde_json::Value| {
+            v["indexing"] = moving.into();
+            v
+        };
+
         let f = parse_query(query);
         if f.text.trim().is_empty() && f.is_empty() {
             // An empty query is not an error while someone is still typing.
-            return Ok(serde_json::json!({ "hits": [] }));
+            return Ok(answer(serde_json::json!({ "hits": [] })));
         }
 
         // An editor that derives its policy from its own settings — Emacs
@@ -157,7 +220,7 @@ impl Server {
             let hits = lexical::search(&state_dir(&vault), &f, pool, conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
-            return Ok(hits_json(&vault, &hits, lim, merge, None));
+            return Ok(answer(hits_json(&vault, &hits, lim, merge, None)));
         }
 
         if !f.langs.is_empty() {
@@ -165,13 +228,19 @@ impl Server {
         }
         let s = self.semantic(&vault, want)?;
         let dim = s.which.dim;
+        // Cloned out from under the lock: an index committed while this query is
+        // being answered replaces the `Arc` in the cache and leaves this one
+        // alone, so a search reads one version throughout and never a seam.
+        let ix = Arc::clone(&lock(&s.index));
         let candidates: Vec<usize> =
-            (0..s.index.chunks.len()).filter(|&i| f.matches(&s.index.chunks[i])).collect();
+            (0..ix.chunks.len()).filter(|&i| f.matches(&ix.chunks[i])).collect();
         if candidates.is_empty() || f.text.trim().is_empty() {
-            return Ok(serde_json::json!({ "hits": [] }));
+            return Ok(answer(serde_json::json!({ "hits": [] })));
         }
-        let mut q = s
-            .model
+        // The one place a query waits on an indexing run: the batch in flight,
+        // 154 ms on small notes and ~1.8 s on a real vault.  It answers rather
+        // than blocking for the whole rebuild, which is the trade.
+        let mut q = lock(&s.model)
             .embed(&[format!("{}{}", s.which.query, f.text)], None)
             .map_err(|e| anyhow!("embedding query: {e}"))?
             .remove(0);
@@ -179,64 +248,55 @@ impl Server {
         let mut scored: Vec<(f32, usize)> = candidates
             .iter()
             .map(|&i| {
-                let v = &s.index.vectors[i * dim..(i + 1) * dim];
+                let v = &ix.vectors[i * dim..(i + 1) * dim];
                 (v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i)
             })
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        let hits: Vec<(f32, &Chunk)> =
-            scored.iter().map(|(sc, i)| (*sc, &s.index.chunks[*i])).collect();
-        Ok(hits_json(&vault, &hits, lim, merge, s.index.baseline))
+        let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &ix.chunks[*i])).collect();
+        Ok(answer(hits_json(&vault, &hits, lim, merge, ix.baseline)))
     }
 
-    /// `index` — rebuild either index, or both, without leaving the process.
-    ///
-    /// Spawning a CLI for this would pay the model load again, which is the one
-    /// cost this whole design exists to avoid: the resident model is lent to the
-    /// indexer, so re-embedding a note the editor just saved costs the embedding
-    /// and nothing else.
-    ///
-    /// The human-readable report goes to a sink — the caller gets the numbers,
-    /// and, while the work runs, `$/progress` notifications under TOKEN.
-    fn index(
-        &mut self,
-        p: &serde_json::Value,
-        token: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value> {
+    /// Everything an `index` request can be refused for, settled before a thread
+    /// is spawned.
+    fn plan(&self, p: &serde_json::Value, j: &mut Journal) -> Result<Plan> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
         let mode = p.get("mode").and_then(|v| v.as_str()).unwrap_or("semantic");
+        let (semantic, lexical) = match mode {
+            "semantic" => (true, false),
+            "lexical" => (false, true),
+            "both" => (true, true),
+            // Ahead of the work rather than after it: this used to be discovered
+            // once both branches had declined to run, which on a worker would
+            // mean answering a typo minutes later.
+            _ => return Err(anyhow!("unknown mode `{mode}`; use semantic, lexical or both")),
+        };
         let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
-        // Both streams sunk: stdout here *is* the JSON-RPC transport, and
-        // stderr is a pipe nobody has correlated with this request.  What the
-        // CLI would print is carried back as `remarks` instead.
-        let mut j = Journal::quiet();
-        watch(&mut j, token);
-        let mut done = serde_json::Map::new();
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
         let cfg: Config = match p.get("config") {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
-            None => resolve_config(&vault, None, &mut j)?,
+            None => resolve_config(&vault, None, j)?,
         };
         // Deserializing does not validate; `Config::read` would have, so a
         // policy arriving over the wire must be held to the same bar.
         cfg.check()?;
         let previous = Config::read(&config_path(&state_dir(&vault))).ok();
 
-        if mode == "semantic" || mode == "both" {
-            let want = match p.get("model").and_then(|v| v.as_str()) {
-                Some(name) => model_named(name)?,
-                // Not `choose_index`: the first index for a vault has to be
-                // creatable, and nothing is built yet to choose among.
-                None => {
-                    built_models(&vault).first().copied().unwrap_or(model_named(DEFAULT_MODEL)?)
-                }
-            };
-            if !full {
+        let want = match p.get("model").and_then(|v| v.as_str()) {
+            Some(name) => model_named(name)?,
+            // Not `choose_index`: the first index for a vault has to be
+            // creatable, and nothing is built yet to choose among.
+            None => built_models(&vault).first().copied().unwrap_or(model_named(DEFAULT_MODEL)?),
+        };
+        // Both indexes are checked before either is written, so a changed policy
+        // can never leave lexical describing one corpus and semantic another.
+        if !full {
+            if semantic {
                 check_config(
                     stored_hash::<Manifest>(&semantic_dir(&vault, want).join("manifest.json"))
                         .map(|m| m.config),
@@ -246,43 +306,7 @@ impl Server {
                     SERVE_REMEDY,
                 )?;
             }
-            let key = (vault.clone(), want.name);
-            // Stamped at the boundary rather than carried as state on the
-            // journal: a flag is something you can forget to clear, a mark is
-            // not.
-            let mark = j.remarks.len();
-            // Lend the resident model if this vault's index is already loaded.
-            let out = match self.semantic.get_mut(&key) {
-                Some(s) => cmd_index(&vault, full, rehash, want, &cfg, &mut j, Some(&mut s.model))?,
-                None => cmd_index(&vault, full, rehash, want, &cfg, &mut j, None)?,
-            };
-            for r in &mut j.remarks[mark..] {
-                r.target = Some("semantic");
-            }
-            // What is held in memory is now a version behind, so the new one
-            // takes its place — in one assignment, from what the run built,
-            // rather than by reading back the file it just wrote.  Nothing is
-            // part-updated at any point, and the model is untouched.
-            //
-            // `built` is `None` when the run wrote nothing, and the version in
-            // memory is then still the committed one.  A vault nobody has
-            // searched yet has nothing to replace; its first search reads the
-            // index from disk as it always did.
-            if let (Some(b), Some(s)) = (out.built, self.semantic.get_mut(&key)) {
-                s.index = Index::of(b, want.dim);
-            }
-            done.insert("semantic".into(), serde_json::to_value(out.report)?);
-            done.insert("model".into(), want.name.into());
-        }
-
-        if mode == "lexical" || mode == "both" {
-            // Languages and folding come from the policy, not from separate
-            // parameters: they are part of what the index *is*, and a second
-            // channel for them is a second thing that can disagree.
-            let lang = LangConfig { languages: cfg.languages.clone() };
-            let mark = j.remarks.len();
-            prepare_lang(&lang, &mut j)?;
-            if !full {
+            if lexical {
                 check_config(
                     stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
                         .map(|m| m.config),
@@ -292,32 +316,140 @@ impl Server {
                     SERVE_REMEDY,
                 )?;
             }
+        }
+        Ok(Plan { vault, semantic, lexical, full, rehash, want, cfg })
+    }
+
+    /// Start an `index` and return to the loop.
+    ///
+    /// Spawning a CLI for this would pay the model load again, which is the one
+    /// cost this whole design exists to avoid: the resident model is lent to the
+    /// indexer, so re-embedding a note the editor just saved costs the embedding
+    /// and nothing else.
+    ///
+    /// The worker answers for itself, through a clone of the sender.  Nothing on
+    /// this thread waits for it, which is why there is no second event source to
+    /// select over.
+    fn start(
+        self: &Arc<Self>,
+        req: &Request,
+        sender: &crossbeam_channel::Sender<Message>,
+    ) -> Result<()> {
+        let mut j = Journal::quiet();
+        let plan = self.plan(&req.params, &mut j)?;
+
+        let mut run = lock(&self.run);
+        if run.as_ref().is_some_and(|(_, h)| !h.is_finished()) {
+            return Err(fault(
+                "indexing",
+                serde_json::json!({ "remedy": "wait" }),
+                "an index is already running; wait for it to finish".into(),
+            ));
+        }
+        // Reap the previous one, whose thread has ended.
+        if let Some((_, h)) = run.take() {
+            let _ = h.join();
+        }
+        // A cancellation asked for before this run began belongs to nothing.
+        // Here rather than per request: with searches answered *during* a run,
+        // rearming on every message would clear a cancellation already asked for.
+        interrupt::rearm();
+
+        watch(&mut j, sender, &req.id);
+        let me = Arc::clone(self);
+        let sender = sender.clone();
+        let id = req.id.clone();
+        let handle = std::thread::spawn(move || {
+            let done = me.run(plan, &mut j);
+            let _ = sender.send(replied(id, done, &mut j).into());
+        });
+        *run = Some((req.id.clone(), handle));
+        Ok(())
+    }
+
+    /// The run itself, on the worker.
+    fn run(&self, plan: Plan, j: &mut Journal) -> Result<serde_json::Value> {
+        let Plan { vault, semantic, lexical, full, rehash, want, cfg } = plan;
+        let mut done = serde_json::Map::new();
+
+        if semantic {
+            let key = (vault.clone(), want.name);
+            // Stamped at the boundary rather than carried as state on the
+            // journal: a flag is something you can forget to clear, a mark is
+            // not.
+            let mark = j.remarks.len();
+            // Lend the resident model if this vault's index is already loaded.
+            // A vault nobody has searched has no entry and no model to lend, so
+            // the run loads one of its own and drops it; the first search after
+            // it reads the committed index from disk, as it always did.
+            let loaded = lock(&self.semantic).get(&key).cloned();
+            let out =
+                cmd_index(&vault, full, rehash, want, &cfg, j, loaded.as_ref().map(|s| &s.model))?;
+            for r in &mut j.remarks[mark..] {
+                r.target = Some("semantic");
+            }
+            // What is held in memory is now a version behind, so the new one
+            // takes its place — in one assignment, from what the run built,
+            // rather than by reading back the file it just wrote.  Nothing is
+            // part-updated at any point, and the model is untouched.
+            //
+            // `built` is `None` when the run wrote nothing, and the version in
+            // memory is then still the committed one.
+            //
+            // `reload` may have emptied the cache while this ran, in which case
+            // this installs into an entry nothing can reach and it is dropped
+            // with the `Arc`.  Harmless: the next search reads from disk.
+            if let (Some(b), Some(s)) = (out.built, loaded) {
+                *lock(&s.index) = Arc::new(Index::of(b, want.dim));
+            }
+            done.insert("semantic".into(), serde_json::to_value(out.report)?);
+            done.insert("model".into(), want.name.into());
+        }
+
+        if lexical {
+            // Languages and folding come from the policy, not from separate
+            // parameters: they are part of what the index *is*, and a second
+            // channel for them is a second thing that can disagree.
+            let lang = LangConfig { languages: cfg.languages.clone() };
+            let mark = j.remarks.len();
+            prepare_lang(&lang, j)?;
             let report =
-                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut j)?;
+                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, j)?;
             for r in &mut j.remarks[mark..] {
                 r.target = Some("lexical");
             }
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
-        if done.is_empty() {
-            return Err(anyhow!("unknown mode `{mode}`; use semantic, lexical or both"));
-        }
         fs::create_dir_all(state_dir(&vault))?;
         fs::write(config_path(&state_dir(&vault)), cfg.canonical())?;
-        // One list for the whole run, not a field on each report: two of the
-        // kinds belong to neither index, and an unreadable note under
-        // `mode: "both"` is one problem seen twice.
-        let remarks = j.drain();
-        if !remarks.is_empty() {
-            done.insert("remarks".into(), serde_json::to_value(remarks)?);
-        }
         Ok(serde_json::Value::Object(done))
+    }
+
+    /// `$/cancelRequest` — stop the run answering under this id.
+    ///
+    /// Matched against the id rather than taken as "whatever is running": the
+    /// protocol carries one, and honouring it is what makes a late cancellation
+    /// — arriving after its run already answered — do nothing instead of
+    /// stopping the next one.
+    fn cancel(&self, params: &serde_json::Value) {
+        let Some(asked) = params.get("id") else { return };
+        let Ok(asked) = serde_json::from_value::<RequestId>(asked.clone()) else { return };
+        if lock(&self.run).as_ref().is_some_and(|(id, h)| *id == asked && !h.is_finished()) {
+            interrupt::request();
+        }
+    }
+
+    /// Wait for the run in flight, so its reply goes out before we do.
+    fn join(&self) {
+        if let Some((_, h)) = lock(&self.run).take() {
+            let _ = h.join();
+        }
     }
 
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
-    fn status(&mut self, p: &serde_json::Value) -> Result<serde_json::Value> {
+    fn status(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
@@ -330,122 +462,20 @@ impl Server {
             "vault": vault,
             "semantic": models,
             "lexical": lexical,
-            "loaded": self.semantic.len(),
+            "loaded": lock(&self.semantic).len(),
+            "indexing": self.indexing(),
         }))
-    }
-
-    /// TOKEN is the request's id, which doubles as the progress token: a
-    /// notification has none, and nothing to correlate a report with.
-    fn dispatch(
-        &mut self,
-        method: &str,
-        params: &serde_json::Value,
-        token: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value> {
-        match method {
-            "search" => self.search(params),
-            "index" => self.index(params, token),
-            "status" => self.status(params),
-            // Its own method rather than a field on `status`, which answers
-            // about a *vault*.  This answers about the process, and the two
-            // have neither the same subject nor the same lifetime.
-            //
-            // Worth asking even though `--version` exists: a client that has
-            // just installed a new binary finds the old one still serving, and
-            // the file on disk no longer says what this process is.
-            "version" => Ok(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") })),
-            // A resident process must be able to drop what it holds without
-            // being restarted: an index rebuilt underneath it is otherwise
-            // served stale until the editor exits.
-            "reload" => {
-                self.semantic.clear();
-                Ok(serde_json::json!({ "ok": true }))
-            }
-            _ => Err(anyhow!("unknown method `{method}`")),
-        }
     }
 }
 
 /// Send at most one report per this long, for the phases whose unit is a file.
 ///
-/// Not a display decision — that is the client's. This is flow control: a scan
-/// and a chunking pass over a thousand notes are ~2,000 reports of ~200 bytes in
-/// a few seconds, against a pipe of 16 kB that only the editor can drain. At
-/// this rate the stream is under 2 kB/s and the buffer takes most of a minute to
-/// fill rather than half a second.
+/// Not a display decision — that is the client's. This is about not flooding the
+/// client's event loop: a scan and a chunking pass over a thousand notes are
+/// ~2,000 reports in a few seconds, and an editor that redraws on each is an
+/// editor doing nothing else. At this rate the stream is a report every tenth of
+/// a second, which is faster than anyone can read and slow enough to render.
 const FLOOR: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// What became of a message that the sender was not willing to wait on.
-#[derive(PartialEq, Debug)]
-enum Sent {
-    Yes,
-    /// The client has stopped reading and the buffer is full.  The report is
-    /// discarded: it is worth less than the work delivering it would hold up,
-    /// and the next one supersedes it a tenth of a second later.
-    NoRoom,
-    /// The far end is closed.  Nothing more will be read, ever.
-    Gone,
-}
-
-/// Write a framed message, or give up rather than wait for the client.
-///
-/// `O_NONBLOCK` is set for the duration of this write only.  Every other write
-/// on the descriptor — the reply above all — keeps the blocking behaviour it
-/// needs, and no caller can be surprised by an `EAGAIN` it did not ask for.
-///
-/// The flag is what makes "did it fit?" a question the write itself answers.
-///
-/// A short write is finished blocking, whatever the size — half a frame would
-/// desynchronise the client permanently, so the choice is only whether to begin
-/// a write, never how to stop one.  Reaching that path costs a wait, though, so
-/// it is also worth not reaching it: a pipe write of at most `PIPE_BUF` is
-/// all-or-nothing, and a report is ~202 bytes against a floor of 512.  A stdout
-/// that is *not* a pipe — a socket — can go short at any size.
-#[cfg(unix)]
-fn write_without_waiting(fd: std::os::fd::RawFd, v: &serde_json::Value) -> Sent {
-    let Ok(body) = serde_json::to_vec(v) else { return Sent::Gone };
-    let mut buf = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    buf.extend_from_slice(&body);
-
-    // Rust's stdout is line-buffered and every other writer here flushes, but
-    // raw bytes must not overtake anything still held back.
-    let _ = io::stdout().flush();
-
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Sent::Gone;
-    }
-    unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
-    let err = std::io::Error::last_os_error();
-    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-
-    if n < 0 {
-        return match err.raw_os_error() {
-            // EWOULDBLOCK is the same number here; naming both is a pattern
-            // the compiler rejects as unreachable.
-            Some(libc::EAGAIN) => Sent::NoRoom,
-            _ => Sent::Gone,
-        };
-    }
-    let n = n as usize;
-    if n < buf.len() {
-        let mut out = io::stdout().lock();
-        if out.write_all(&buf[n..]).is_err() || out.flush().is_err() {
-            return Sent::Gone;
-        }
-    }
-    Sent::Yes
-}
-
-#[cfg(not(unix))]
-fn write_without_waiting(_fd: i32, v: &serde_json::Value) -> Sent {
-    if write_message(v).is_ok() {
-        Sent::Yes
-    } else {
-        Sent::Gone
-    }
-}
 
 /// Whether a report is worth sending at all.
 ///
@@ -454,148 +484,151 @@ fn write_without_waiting(_fd: i32, v: &serde_json::Value) -> Sent {
 /// is what lets a client stop rendering 6,400 of 6,522. Neither can be rebuilt
 /// from its neighbours, so neither is ever held back. Everything between them is
 /// superseded a tenth of a second later.
-///
-/// Whether it then *fits* is a separate question, and one the write answers.
 fn deliver(opening: bool, last: bool, since: std::time::Duration) -> bool {
     opening || last || since >= FLOOR
 }
 
 /// Report the work as it happens, under the id the caller is already waiting on.
 ///
-/// The token is that id rather than one negotiated first: LSP's
-/// `window/workDoneProgress/create` is a server→**client** request, and
-/// answering it would mean re-entering `read_message` from inside `index`, which
-/// this one-request-at-a-time loop forbids. There is nothing to negotiate — the
-/// client holds the id already.
+/// The token is that id rather than one negotiated through
+/// `window/workDoneProgress/create`: the client holds it already, so there is
+/// nothing to negotiate. (That request is *possible* now the loop is free to
+/// receive its response — it is simply not needed.)
 ///
-/// There is no `begin` or `end` either. An `index` that fails answers with an
-/// error and would skip its `end`, leaving a client holding a token for ever.
-/// The contract has no such hole: one report per completed unit, a change of
-/// `target` or `phase` ends the previous run of them, and the response — result
-/// or error — ends the last.
-fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
-    // A notification has no id, and an explicit `"id": null` is not one either.
-    // Whether *that* deserves a reply is a separate question this must not
-    // silently answer, which is why the test is here and not in the loop.
-    let Some(tok) = token.filter(|t| !t.is_null()).cloned() else { return };
-    let mut gone = false;
+/// There is no `begin` or `end`. An `index` that fails answers with an error and
+/// would skip its `end`, leaving a client holding a token for ever. The contract
+/// has no such hole: one report per completed unit, a change of `target` or
+/// `phase` ends the previous run of them, and the response — result or error —
+/// ends the last.
+fn watch(j: &mut Journal, sender: &crossbeam_channel::Sender<Message>, token: &RequestId) {
+    let sender = sender.clone();
+    let token = serde_json::to_value(token).unwrap_or(serde_json::Value::Null);
     let mut sent = Instant::now() - FLOOR;
     let mut running: Option<(&'static str, &'static str)> = None;
-    let fd = {
-        use std::os::fd::AsRawFd;
-        io::stdout().as_raw_fd()
-    };
     j.watch = Some(Box::new(move |p: &Progress| {
         let opening = running != Some((p.target, p.phase));
         running = Some((p.target, p.phase));
-        if gone || !deliver(opening, p.last, sent.elapsed()) {
+        if !deliver(opening, p.last, sent.elapsed()) {
             return;
         }
         sent = Instant::now();
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0", "method": "$/progress",
-            "params": { "token": tok, "value": p },
-        });
-        // Nothing here is worth waiting on.  A client that has stopped reading
-        // loses reports; it does not stop the work, and it learns where the run
-        // got to from the reply, which *is* waited on.
-        match write_without_waiting(fd, &msg) {
-            Sent::Yes | Sent::NoRoom => {}
-            // Rust leaves SIGPIPE ignored, so a client that has gone away would
-            // otherwise mean minutes of write errors nobody will ever read.
-            Sent::Gone => gone = true,
-        }
+        // A send that fails means the writer is gone, which means the session
+        // is over.  Nothing to do about it here, and nothing owed.
+        let _ = sender.send(
+            Notification::new(
+                "$/progress".into(),
+                serde_json::json!({ "token": token, "value": p }),
+            )
+            .into(),
+        );
     }));
 }
 
-/// Read one LSP-framed message: headers, blank line, then exactly
-/// `Content-Length` bytes.
-fn read_message(r: &mut impl BufRead) -> Result<Option<String>> {
-    let mut len = None;
-    loop {
-        let mut line = String::new();
-        if r.read_line(&mut line)? == 0 {
-            return Ok(None); // the editor closed the pipe
+/// A run's answer, with whatever it found worth saying attached.
+///
+/// Warnings ride the reply because stderr does not reach the client: a bare
+/// `eprintln!` in the indexer goes to a pipe nobody has correlated with a
+/// request. One list for the whole run, not a field on each report — two of the
+/// kinds belong to neither index, and an unreadable note under `mode: "both"` is
+/// one problem seen twice.
+fn replied(id: RequestId, done: Result<serde_json::Value>, j: &mut Journal) -> Response {
+    match done {
+        Ok(mut v) => {
+            let remarks = j.drain();
+            if !remarks.is_empty() {
+                if let Ok(rs) = serde_json::to_value(remarks) {
+                    v["remarks"] = rs;
+                }
+            }
+            Response::new_ok(id, v)
         }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some(v) = strip_prefix_ci(line, "content-length:") {
-            len = v.trim().parse::<usize>().ok();
-        }
+        Err(e) => failed(id, &e),
     }
-    let len = len.ok_or_else(|| anyhow!("message without Content-Length"))?;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    Ok(Some(String::from_utf8(buf)?))
 }
 
-fn write_message(v: &serde_json::Value) -> Result<()> {
-    let body = serde_json::to_string(v)?;
-    let mut out = io::stdout().lock();
-    write!(out, "Content-Length: {}\r\n\r\n{body}", body.len())?;
-    out.flush()?;
-    Ok(())
+/// An application error as a JSON-RPC one, never a process exit: a mistyped
+/// vault must not end the session.
+///
+/// A `Fault` adds LSP's third member, `data`, carrying the label and whatever
+/// that label promises. Its absence is meaningful: an error with no `data` is
+/// one to show, not one to act on.
+fn failed(id: RequestId, e: &anyhow::Error) -> Response {
+    let labelled = e.downcast_ref::<Fault>();
+    Response {
+        id,
+        response_result: Err(ResponseError {
+            code: labelled.map_or(-32000, Fault::code),
+            message: e.to_string(),
+            data: labelled.and_then(|f| serde_json::to_value(f).ok()),
+        }),
+    }
 }
 
 pub fn serve() -> Result<()> {
-    // Only here.  On the CLI, Ctrl-C must keep ending the program rather than
-    // politely finishing the phase it is in.
-    interrupt::listen();
-    let mut server = Server::default();
-    let stdin = io::stdin();
-    let mut r = stdin.lock();
+    let (conn, io) = Connection::stdio();
+    // The handshake is where a client learns which binary it actually reached —
+    // a different answer from `--version` the moment a new one has been
+    // installed under a server that is still running.
+    let (id, _params) = conn.initialize_start()?;
+    conn.initialize_finish(
+        id,
+        serde_json::json!({
+            "capabilities": {},
+            "serverInfo": { "name": "org-semantic", "version": env!("CARGO_PKG_VERSION") },
+        }),
+    )?;
 
-    while let Some(body) = read_message(&mut r)? {
-        let msg: serde_json::Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                write_message(&serde_json::json!({
-                    "jsonrpc": "2.0", "id": serde_json::Value::Null,
-                    "error": { "code": -32700, "message": format!("parse error: {e}") }
-                }))?;
-                continue;
-            }
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or_default();
-        if method == "exit" || method == "shutdown" {
-            if let Some(id) = id {
-                write_message(&serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null }))?;
-            }
-            return Ok(());
-        }
-        let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
-        // A signal that landed while nothing was running belongs to nothing, and
-        // must not cancel whatever is asked for next.
-        interrupt::rearm();
-        // Borrowed, not cloned: the borrow ends when `dispatch` returns, so
-        // `id` is still movable into the reply below.  An `index` sent as a
-        // notification therefore reports nothing, with no branch to write —
-        // correct, since there is no token to report under.
-        let result = server.dispatch(method, &params, id.as_ref());
-        // A notification (no id) expects no reply, not even for an error.
-        let Some(id) = id else { continue };
-        write_message(&match result {
-            Ok(v) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": v }),
-            // Application errors go back as JSON-RPC errors rather than killing
-            // the process: a mistyped vault must not end the session.
-            //
-            // A `Fault` adds LSP's third member, `data`, carrying the label and
-            // whatever that label promises.  Its absence is meaningful: an error
-            // with no `data` is one to show, not one to act on.
-            Err(e) => {
-                let labelled = e.downcast_ref::<Fault>();
-                let code = labelled.map_or(-32000, Fault::code);
-                let mut err = serde_json::json!({ "code": code, "message": e.to_string() });
-                if let Some(f) = labelled {
-                    err["data"] = serde_json::to_value(f).unwrap_or(serde_json::Value::Null);
+    let server = Arc::new(Server::default());
+    for msg in &conn.receiver {
+        match msg {
+            Message::Request(req) => {
+                if req.method == "shutdown" {
+                    // Waited on, so a run in flight still answers.  `exit` is
+                    // the one that does not wait.
+                    server.join();
+                    let _ = conn.sender.send(Response::new_ok(req.id, ()).into());
+                    break;
                 }
-                serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": err })
+                // `index` answers from its own thread; everything else here.
+                let answer = match req.method.as_str() {
+                    "search" => server.search(&req.params).map(Some),
+                    "status" => server.status(&req.params).map(Some),
+                    // A resident process must be able to drop what it holds
+                    // without being restarted: an index rebuilt underneath it is
+                    // otherwise served stale until the editor exits.
+                    "reload" => {
+                        lock(&server.semantic).clear();
+                        Ok(Some(serde_json::json!({ "ok": true })))
+                    }
+                    "index" => server.start(&req, &conn.sender).map(|()| None),
+                    _ => Err(anyhow!("unknown method `{}`", req.method)),
+                };
+                match answer {
+                    Ok(Some(v)) => {
+                        let _ = conn.sender.send(Response::new_ok(req.id, v).into());
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = conn.sender.send(failed(req.id, &e).into());
+                    }
+                }
             }
-        })?;
+            Message::Notification(n) => match n.method.as_str() {
+                // Abandons the run rather than waiting for it.  Safe: the index
+                // is committed by a single rename, so an abandoned run leaves
+                // the previous one exactly as it was.
+                "exit" => break,
+                "$/cancelRequest" => server.cancel(&n.params),
+                // A notification is owed nothing at all, including on failure —
+                // and an `index` sent as one could report nothing and be
+                // cancelled by nothing, so it is not run either.
+                _ => {}
+            },
+            Message::Response(_) => {}
+        }
     }
+    drop(conn);
+    io.join()?;
     Ok(())
 }
 
@@ -613,79 +646,13 @@ mod tests {
         assert!(!deliver(false, false, Duration::ZERO), "and not before");
     }
 
-    /// The size below which a report is written without waiting.
-    ///
-    /// Not about truncation — a short write is always finished, at any size.
-    /// This is what keeps that from being *needed*: a pipe write of at most
-    /// `PIPE_BUF` goes entirely or not at all, so the report is delivered or
-    /// dropped and never half-sent-then-waited-on.
-    ///
-    /// Nothing in `Progress` is user text, which is what keeps it small. This
-    /// measures a constructed worst case — every optional field, every number at
-    /// its widest — so it catches a field the builder fills and would miss one
-    /// only a call site does. Keeping user text out is the rule; this is the
-    /// reminder.
+    /// The shape the whole design rests on: the loop hands `Server` to a worker
+    /// and both touch it. If this stops holding, it stops compiling here rather
+    /// than somewhere less obvious.
     #[test]
-    fn a_report_fits_in_one_atomic_write() {
-        // Every optional field present, every number at its widest.
-        let p = Progress::new("semantic", "download", "chunks", usize::MAX, 99999.999999)
-            .of(usize::MAX)
-            .tokens(usize::MAX, usize::MAX)
-            .maybe_sized(Some(u64::MAX))
-            .last();
-        let body = serde_json::to_vec(&serde_json::json!({
-            "jsonrpc": "2.0", "method": "$/progress",
-            "params": { "token": u64::MAX, "value": p },
-        }))
-        .unwrap();
-        let framed = format!("Content-Length: {}\r\n\r\n", body.len()).len() + body.len();
-        // 512 is the POSIX floor for `PIPE_BUF`; macOS is exactly that, Linux
-        // more. Hold to the floor so this is not a claim about one platform.
-        assert!(framed < 512, "a report of {framed} bytes can be written in halves");
-    }
-
-    /// A pipe nobody is reading, which is what a wedged editor looks like from
-    /// this side. The write must come back rather than wait, and must say which
-    /// of the two things happened — no room, or nobody there.
-    #[test]
-    #[cfg(unix)]
-    fn a_full_pipe_costs_a_report_and_not_the_run() {
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        let (read, write) = (fds[0], fds[1]);
-        let msg = serde_json::json!({ "jsonrpc": "2.0", "method": "$/progress" });
-
-        // Room to begin with.
-        assert_eq!(write_without_waiting(write, &msg), Sent::Yes);
-
-        // Fill it. The descriptor is left blocking between calls, so this also
-        // shows the flag is not leaking out of `write_without_waiting`.
-        let flags = unsafe { libc::fcntl(write, libc::F_GETFL) };
-        unsafe { libc::fcntl(write, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        let junk = [b'x'; 4096];
-        while unsafe { libc::write(write, junk.as_ptr() as *const libc::c_void, junk.len()) } > 0 {}
-        unsafe { libc::fcntl(write, libc::F_SETFL, flags) };
-
-        // The call that would otherwise wait for the editor to breathe. On
-        // another thread, so a write that *does* block fails this test in half a
-        // second instead of hanging it — a guard that wedges the run reports
-        // nothing and costs whatever patience is watching.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sent = msg.clone();
-        std::thread::spawn(move || tx.send(write_without_waiting(write, &sent)));
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(s) => assert_eq!(s, Sent::NoRoom, "a full pipe costs the report"),
-            Err(_) => panic!("the write blocked on a full pipe instead of giving up"),
-        }
-
-        // Drained, and it goes again — the report was dropped, not the channel.
-        let mut sink = [0u8; 65536];
-        unsafe { libc::read(read, sink.as_mut_ptr() as *mut libc::c_void, sink.len()) };
-        assert_eq!(write_without_waiting(write, &msg), Sent::Yes);
-
-        // A reader that has gone is not the same as one that is busy.
-        unsafe { libc::close(read) };
-        assert_eq!(write_without_waiting(write, &msg), Sent::Gone);
-        unsafe { libc::close(write) };
+    fn the_server_can_be_shared_with_the_thread_that_indexes() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<Server>();
+        shareable::<Semantic>();
     }
 }

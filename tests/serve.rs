@@ -64,9 +64,24 @@ fn read_one(r: &mut impl std::io::Read) -> Option<Value> {
     serde_json::from_slice(&body).ok()
 }
 
+/// The handshake every session opens with, id 0 so it collides with nothing a
+/// test asks. Its reply is left in what `talk` returns, since it is where the
+/// release now comes from.
+fn handshake() -> Vec<u8> {
+    let mut b = frame(&json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                               "params": { "capabilities": {} } }));
+    b.extend(frame(&json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} })));
+    b
+}
+
 /// Send REQUESTS to a fresh server and return everything it said, notifications
 /// included. CACHE, when given, becomes its `XDG_CACHE_HOME` — which is how a
 /// first run on a bare machine is staged.
+///
+/// Everything is written in one go and read after the process exits, which is
+/// what makes these deterministic. It also means `shutdown` arrives while an
+/// index is still running — and must wait for it, or every assertion about what
+/// a run reported would be racing it.
 fn talk(requests: &[Value], cache: Option<&Path>) -> Vec<Value> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_org-semantic"));
     cmd.arg("serve").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -74,7 +89,8 @@ fn talk(requests: &[Value], cache: Option<&Path>) -> Vec<Value> {
         cmd.env("XDG_CACHE_HOME", c);
     }
     let mut child = cmd.spawn().expect("spawning the binary Cargo just built");
-    let mut input: Vec<u8> = requests.iter().flat_map(frame).collect();
+    let mut input = handshake();
+    input.extend(requests.iter().flat_map(frame));
     input.extend(frame(&json!({ "jsonrpc": "2.0", "id": 999, "method": "shutdown" })));
     child.stdin.take().unwrap().write_all(&input).unwrap();
     messages(&child.wait_with_output().expect("the server exited").stdout)
@@ -258,10 +274,14 @@ fn a_failing_index_leaves_no_progress_owed() {
 #[test]
 fn a_condition_worth_acting_on_arrives_labelled() {
     let v = vault("drift", 2);
+    // Built in a session of its own, and deliberately not by sending `index`
+    // ahead of the searches in this one: an index runs on a worker now, so a
+    // request behind it is answered *while* it runs rather than after. The
+    // search would find no lexical index yet and say so — correctly, and not
+    // what this test is about.
+    index(&v, "lexical");
     let msgs = talk(
         &[
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "index",
-                    "params": { "vault": v, "mode": "lexical", "full": true } }),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "search",
                     "params": { "vault": v, "query": "atoms", "mode": "lexical",
                                 "config": { "languages": ["en-US"],
@@ -305,20 +325,20 @@ fn warnings_ride_the_reply() {
 /// package checks the binary is its own, and fetches the right one if not.
 ///
 /// Asked two ways because a client needs it at two moments. `--version` reads
-/// the file on disk, which is what to check before spawning anything. The
-/// `version` method asks the *process*, which is a different thing the moment a
-/// new binary has been installed under a server that is still running.
+/// the file on disk, which is what to check before spawning anything.
+/// `initialize` answers for the *process*, which is a different thing the moment
+/// a new binary has been installed under a server that is still running — and it
+/// answers at the one moment a client is guaranteed to be listening.
 #[test]
 fn the_binary_says_which_release_it_is() {
     let flag = Command::new(env!("CARGO_BIN_EXE_org-semantic")).arg("--version").output().unwrap();
     let printed = String::from_utf8(flag.stdout).unwrap().trim().to_string();
     assert_eq!(printed, env!("CARGO_PKG_VERSION"), "`--version` is the crate's own");
 
-    // No vault: this is about the process, and nothing else.
-    let msgs =
-        talk(&[json!({ "jsonrpc": "2.0", "id": 7, "method": "version", "params": {} })], None);
-    let result = &msgs.iter().find(|m| m["id"] == 7).expect("a reply")["result"];
-    assert_eq!(result["version"], printed, "the same release the flag prints");
+    // No vault, and no request: this is about the process, and nothing else.
+    let msgs = talk(&[], None);
+    let hello = &msgs.iter().find(|m| m["id"] == 0).expect("the handshake is answered")["result"];
+    assert_eq!(hello["serverInfo"]["version"], printed, "the same release the flag prints");
 }
 
 /// `status` answers about a vault and nothing else: which indexes it has, so a
@@ -337,22 +357,227 @@ fn status_answers_about_a_vault() {
     assert!(result.get("version").is_none(), "not its question to answer: {result:?}");
 }
 
+// ------------------------------------------------- answering while it indexes
+
+/// Drive a server the tests keep talking to, rather than writing everything at
+/// once — which is the only way to observe what it does *while* it is busy.
+struct Session {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+}
+
+impl Session {
+    fn open() -> Session {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+            .arg("serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        stdin.write_all(&handshake()).unwrap();
+        stdin.flush().unwrap();
+        read_one(&mut stdout).expect("the handshake is answered");
+        Session { child, stdin, stdout }
+    }
+
+    fn send(&mut self, v: &Value) {
+        self.stdin.write_all(&frame(v)).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    /// The next message that is a reply, skipping the reports in between.
+    fn reply(&mut self) -> Value {
+        loop {
+            let m = read_one(&mut self.stdout).expect("a reply");
+            if m["method"] != "$/progress" {
+                return m;
+            }
+        }
+    }
+
+    /// Start a full lexical index on a vault large enough to still be running
+    /// when the next request lands, and wait until it says it has begun.
+    fn indexing(v: &Path, id: i64) -> Session {
+        let mut s = Session::open();
+        s.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "index",
+                        "params": { "vault": v, "mode": "lexical", "full": true } }));
+        let first = read_one(&mut s.stdout).expect("it reports before it finishes");
+        assert_eq!(first["method"], "$/progress", "the run has begun: {first:?}");
+        s
+    }
+
+    fn close(mut self) {
+        self.send(&json!({ "jsonrpc": "2.0", "id": 999, "method": "shutdown" }));
+        drop(self.stdin);
+        while read_one(&mut self.stdout).is_some() {}
+        self.child.wait().unwrap();
+    }
+}
+
+/// A vault whose lexical index is already built, which is the situation a
+/// rebuild actually happens in — and the only one where a search during it has a
+/// committed version to answer from.
+fn built(name: &str, notes: usize) -> PathBuf {
+    let v = vault(name, notes);
+    index(&v, "lexical");
+    v
+}
+
+/// The whole feature, in one assertion: a search sent during a reindex is
+/// answered **before** the reindex is, and answered from the version already
+/// committed rather than refused.
+///
+/// Lexical on both sides, so this needs no embedding model and runs offline.
+/// What it proves is the loop, not the model lock: that `index` returns to the
+/// loop instead of holding it for the length of the run.
+#[test]
+fn a_search_is_answered_while_an_index_runs() {
+    let v = built("concurrent", 3000);
+    let mut s = Session::indexing(&v, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "search",
+                    "params": { "vault": v, "query": "atoms", "mode": "lexical" } }));
+
+    let first = s.reply();
+    assert_eq!(first["id"], 8, "the search answers first — the index is still running: {first:?}");
+    assert!(
+        !first["result"]["hits"].as_array().expect("hits, not an error").is_empty(),
+        "and answers from the committed version: {first:?}"
+    );
+    let second = s.reply();
+    assert_eq!(second["id"], 7, "and the index answers when it is done");
+    s.close();
+}
+
+/// A search answered mid-run is a version behind, and says so, because the
+/// alternative is an editor polling `status` per keystroke to find out.
+#[test]
+fn a_search_says_when_the_index_is_moving() {
+    let v = built("moving", 3000);
+    let mut s = Session::indexing(&v, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "search",
+                    "params": { "vault": v, "query": "atoms", "mode": "lexical" } }));
+    let during = s.reply();
+    assert_eq!(during["id"], 8);
+    assert_eq!(during["result"]["indexing"], true, "answered from a version behind");
+
+    // Wait the run out, then ask again.
+    assert_eq!(s.reply()["id"], 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 9, "method": "search",
+                    "params": { "vault": v, "query": "atoms", "mode": "lexical" } }));
+    let after = s.reply();
+    assert_eq!(after["result"]["indexing"], false, "and current once nothing is running");
+    s.close();
+}
+
+/// The model lock, which the lexical tests above cannot reach: a *semantic*
+/// search answered during a *semantic* rebuild shares one `TextEmbedding` with
+/// the indexer, and gets it between two batches.
+///
+/// Both halves matter. Mid-run the answer is the version already committed —
+/// which must not include the note added since. After the run answers, the same
+/// query finds it, from the version the run handed over rather than one read
+/// back off disk.
+#[test]
+#[ignore = "needs an embedding model in the cache"]
+fn a_semantic_search_answers_from_the_old_version_during_a_rebuild() {
+    let v = vault("contend", 400);
+    index(&v, "semantic");
+    let ask = |id: i64| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": "search",
+                "params": { "vault": v, "query": "a hare on a bicycle", "k": 5 } })
+    };
+    let found = |m: &Value| {
+        m["result"]["hits"]
+            .as_array()
+            .expect("hits")
+            .iter()
+            .any(|h| h["heading"].as_str().is_some_and(|s| s.contains("Hare")))
+    };
+
+    let mut s = Session::open();
+    s.send(&ask(1));
+    assert!(!found(&s.reply()), "the premise: nothing about hares yet");
+
+    // A note the rebuild will pick up and the committed version cannot know.
+    std::fs::write(v.join("hare.org"), "#+title: Hare\n* Hare on a bicycle\nIt pedals.\n").unwrap();
+    s.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
+                    "params": { "vault": v, "full": true } }));
+    let first = read_one(&mut s.stdout).expect("it reports before it finishes");
+    assert_eq!(first["method"], "$/progress");
+
+    s.send(&ask(8));
+    let during = s.reply();
+    assert_eq!(during["id"], 8, "answered while the rebuild runs: {during:?}");
+    assert_eq!(during["result"]["indexing"], true);
+    assert!(!found(&during), "and from the version committed before it: {during:?}");
+
+    assert_eq!(s.reply()["id"], 7, "the rebuild answers");
+    s.send(&ask(9));
+    let after = s.reply();
+    assert!(found(&after), "adopted without a reload: {after:?}");
+    s.close();
+}
+
+/// One run at a time, refused rather than queued: a second is nearly always the
+/// same work again, and a client firing on every save must coalesce anyway.
+/// Labelled, so it can tell this from a failure and simply wait.
+#[test]
+fn a_second_index_is_refused_while_one_runs() {
+    let v = vault("busy", 3000);
+    let mut s = Session::indexing(&v, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "index",
+                    "params": { "vault": v, "mode": "lexical", "full": true } }));
+
+    let refused = s.reply();
+    assert_eq!(refused["id"], 8);
+    assert_eq!(refused["error"]["data"]["kind"], "indexing", "{refused:?}");
+    assert_eq!(s.reply()["id"], 7, "and the first one still finishes");
+    s.close();
+}
+
+/// `shutdown` waits for the run in flight so its reply still goes out; `exit`
+/// does not. Without the wait, every test that sends `index` and `shutdown` in
+/// one write would be asserting on a run that had been killed.
+#[test]
+fn shutdown_waits_for_the_run_in_flight() {
+    let v = vault("graceful", 3000);
+    let mut s = Session::indexing(&v, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "shutdown" }));
+    drop(s.stdin);
+
+    let mut ids = Vec::new();
+    while let Some(m) = read_one(&mut s.stdout) {
+        if m["method"] != "$/progress" {
+            ids.push(m["id"].clone());
+        }
+    }
+    s.child.wait().unwrap();
+    assert_eq!(ids, [json!(7), json!(8)], "the run answered, and then we went");
+    assert!(
+        v.join(".org-semantic").join("lexical.json").exists(),
+        "having actually finished rather than been abandoned"
+    );
+}
+
 // --------------------------------------------------------------- cancellation
 
-/// Stopping a run that is already under way.
+/// Stopping a run that is already under way, by the id it will answer under.
 ///
-/// A signal rather than `$/cancelRequest`, because the server is inside the
-/// index for the whole of it and does not read its next message until the
-/// current one is answered — a cancellation over the pipe would arrive after
-/// the thing it cancels.
+/// `$/cancelRequest`, which is possible again now the index runs on a worker:
+/// the loop reads throughout, so the message arrives while there is still
+/// something to stop. It was a `SIGINT` for as long as the loop sat inside the
+/// index and read nothing until it answered.
 ///
 /// Timed off the server's own first report rather than off a sleep: it says
-/// when it has started, so nothing here guesses about whether the signal landed
-/// mid-run. A sleep did guess, and guessed wrong — 3,000 notes index in under
-/// half a second, which was less than the 400 ms it waited.
+/// when it has started, so nothing here guesses about whether the cancellation
+/// landed mid-run. A sleep did guess, and guessed wrong — 3,000 notes index in
+/// under half a second, which was less than the 400 ms it waited.
 #[test]
-#[cfg(unix)]
-fn a_signal_stops_a_run_that_is_under_way() {
+fn a_run_is_cancelled_by_the_id_it_answers_under() {
     let v = vault("cancel", 3000);
     let mut child = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
         .arg("serve")
@@ -363,18 +588,23 @@ fn a_signal_stops_a_run_that_is_under_way() {
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
+    stdin.write_all(&handshake()).unwrap();
     stdin
         .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
                                    "params": { "vault": v, "mode": "lexical", "full": true } })))
         .unwrap();
     stdin.flush().unwrap();
 
+    let hello = read_one(&mut stdout).expect("the handshake is answered first");
+    assert_eq!(hello["id"], 0);
     let first = read_one(&mut stdout).expect("it reports before it finishes");
     assert_eq!(first["method"], "$/progress", "and that is the first thing it says: {first:?}");
-    assert!(
-        Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap().success(),
-        "the server was there to be signalled"
-    );
+    stdin
+        .write_all(&frame(
+            &json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 7 } }),
+        ))
+        .unwrap();
+    stdin.flush().unwrap();
 
     // It answers rather than dies: one request ended, not the session.
     stdin.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 8, "method": "shutdown" }))).unwrap();
@@ -398,11 +628,11 @@ fn a_signal_stops_a_run_that_is_under_way() {
     );
 }
 
-/// A signal that arrives while nothing is running belongs to nothing. Without
-/// rearming, it would cancel whatever was asked for next.
+/// A cancellation for an id that is not running belongs to nothing. Without
+/// rearming — and without matching on the id — it would stop whatever was asked
+/// for next.
 #[test]
-#[cfg(unix)]
-fn a_signal_between_requests_does_not_poison_the_next_one() {
+fn a_cancellation_for_nothing_does_not_poison_the_next_run() {
     let v = vault("rearm", 4);
     let mut child = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
         .arg("serve")
@@ -412,12 +642,14 @@ fn a_signal_between_requests_does_not_poison_the_next_one() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&handshake()).unwrap();
 
-    // Idle: nothing is in flight to cancel.
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(150));
-
+    // Idle: nothing is in flight to cancel, and id 7 is not running *yet*.
+    stdin
+        .write_all(&frame(
+            &json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 7 } }),
+        ))
+        .unwrap();
     stdin
         .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
                                    "params": { "vault": v, "mode": "lexical", "full": true } })))

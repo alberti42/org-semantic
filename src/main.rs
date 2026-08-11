@@ -24,8 +24,20 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
+
+/// Take a lock, recovering rather than propagating a panic.
+///
+/// A poisoned mutex means some other thread panicked while holding it. On a
+/// one-shot command that is academic; in a resident server it is the difference
+/// between one failed request and a process that answers nothing ever again —
+/// every later `search` would fail on the poison rather than on anything wrong
+/// with it. Recovering is the lesser of the two, and it is a deliberate choice
+/// rather than an `unwrap` nobody thought about.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A failure a caller is expected to *act* on rather than merely display.
 ///
@@ -295,7 +307,8 @@ impl Progress {
 /// Somebody watching the work happen.  `FnMut` rather than `Fn` so a transport
 /// can keep its own state — when it last wrote, whether the far end is still
 /// there — as plain captured locals instead of cells.
-type Watcher = Box<dyn FnMut(&Progress)>;
+/// `Send`, because an index runs on a worker thread and reports from there.
+type Watcher = Box<dyn FnMut(&Progress) + Send>;
 
 /// Where a run's prose goes, and what it hands back as data.
 ///
@@ -307,8 +320,12 @@ type Watcher = Box<dyn FnMut(&Progress)>;
 struct Journal {
     /// The running report.  Written through directly by the indexers, which is
     /// why it stays public rather than hiding behind a method.
-    out: Box<dyn Write>,
-    warn: Box<dyn Write>,
+    ///
+    /// `Send`, like `Watcher`: `serve` runs an index on a worker thread and the
+    /// journal goes with it.  Every writer used here — `sink`, `stdout`,
+    /// `stderr` — already is.
+    out: Box<dyn Write + Send>,
+    warn: Box<dyn Write + Send>,
     /// Whether `warn` is a terminal, which decides whether anything may be
     /// drawn *in place*.  A bar redrawn with `\r` is a live report on a tty and
     /// a hundred near-identical lines in a redirected log.
@@ -327,60 +344,37 @@ struct Journal {
 
 /// Stopping a run that is already under way.
 ///
-/// Not `$/cancelRequest`: `serve()` is inside `index` for the whole of it and
-/// does not read its next message until the current one is answered, so a
-/// cancellation sent over the pipe would arrive after the thing it cancels.
-/// A signal does not queue behind the work.
+/// A flag, set by `$/cancelRequest` and read between units of work.  It was a
+/// `SIGINT` handler, for a reason that has since expired: `serve()` used to sit
+/// inside `index` for the whole of it and read nothing until it answered, so a
+/// cancellation sent over the pipe arrived after the thing it cancelled, and
+/// only a signal could jump the queue.  The index runs on a worker now and the
+/// loop reads throughout, so the protocol's own message arrives while there is
+/// still something to stop — and it carries the **id**, where a signal carried
+/// nothing and was unambiguous only by accident.
 ///
-/// It carries no id, which is only unambiguous because requests are served one
-/// at a time — it stops **the run in flight**. Say so in the manual, or a
-/// client author will look for the protocol message and find nothing.
-///
-/// The handler does two things and both are async-signal-safe: a store, and on a
-/// second signal a `signal`/`raise` pair. Nothing is allocated and no lock is
-/// taken, because a handler may interrupt code holding either.
-#[cfg(unix)]
+/// Ctrl-C therefore means what it means everywhere else: end the process. That
+/// is also the honest answer for a model download, which has no unit boundaries
+/// to check a flag between and so was never really interruptible anyway.
 mod interrupt {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static STOP: AtomicBool = AtomicBool::new(false);
 
-    extern "C" fn asked_to_stop(sig: libc::c_int) {
-        if STOP.swap(true, Ordering::SeqCst) {
-            // Asked twice.  The first request is only honoured between units of
-            // work, so a wait with no units — a model download, mid-flight — is
-            // deaf to it.  Restore the default and re-raise: the second Ctrl-C
-            // means what it has always meant.
-            unsafe {
-                libc::signal(sig, libc::SIG_DFL);
-                libc::raise(sig);
-            }
-        }
+    /// Ask the run in flight to stop at its next unit boundary.
+    pub fn request() {
+        STOP.store(true, Ordering::SeqCst);
     }
 
-    /// Installed by `serve` and nowhere else.  On the CLI, Ctrl-C must keep
-    /// ending the program rather than politely finishing the phase it is in.
-    pub fn listen() {
-        unsafe { libc::signal(libc::SIGINT, asked_to_stop as libc::sighandler_t) };
-    }
-
-    /// Called as each request begins.  Without it a signal landing just after
-    /// one run ends would cancel the next one before it started.
+    /// Called as a run *starts*, and deliberately not per request: with searches
+    /// answered during an index, rearming on every message would clear a
+    /// cancellation that had already been asked for.
     pub fn rearm() {
         STOP.store(false, Ordering::SeqCst);
     }
 
     pub fn asked() -> bool {
         STOP.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(not(unix))]
-mod interrupt {
-    pub fn listen() {}
-    pub fn rearm() {}
-    pub fn asked() -> bool {
-        false
     }
 }
 
@@ -445,7 +439,7 @@ impl Journal {
         Journal::with(Box::new(io::sink()), Box::new(io::sink()))
     }
 
-    fn with(out: Box<dyn Write>, warn: Box<dyn Write>) -> Self {
+    fn with(out: Box<dyn Write + Send>, warn: Box<dyn Write + Send>) -> Self {
         Journal {
             out,
             warn,
@@ -3672,7 +3666,7 @@ fn cmd_index(
     m: &Model,
     cfg: &Config,
     j: &mut Journal,
-    resident: Option<&mut TextEmbedding>,
+    resident: Option<&Mutex<TextEmbedding>>,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
     let mut files = Vec::new();
@@ -3941,14 +3935,18 @@ fn cmd_index(
     } else {
         // A resident process already holds the model; loading a second copy
         // would cost the 0.12–0.64 s this whole design exists to avoid.
+        //
+        // Behind a `Mutex` even when we own it outright, so there is one path
+        // rather than two.  Uncontended, that costs ~20 ns against a batch of
+        // 150 ms–1.8 s; contended, it is the whole point — see the loop below.
         let t1 = Instant::now();
-        let mut owned;
-        let model: &mut TextEmbedding = match resident {
+        let owned;
+        let model: &Mutex<TextEmbedding> = match resident {
             Some(m) => m,
             None => {
-                owned = Some(model_with(m.which.clone(), None, false)?);
+                owned = Mutex::new(model_with(m.which.clone(), None, false)?);
                 writeln!(j.out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
-                owned.as_mut().expect("just set")
+                &owned
             }
         };
 
@@ -3970,7 +3968,20 @@ fn cmd_index(
         for group in order.chunks(BATCH) {
             stop_requested()?;
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
-            let vs = model.embed(&batch, Some(BATCH)).map_err(|e| anyhow!("embedding: {e}"))?;
+            // Locked for one batch and released between them, which is what
+            // lets a query embed itself while a rebuild is running.  Held over
+            // the embed alone: the copying and reporting below need the results,
+            // not the model.
+            let vs = {
+                let mut model = lock(model);
+                model.embed(&batch, Some(BATCH)).map_err(|e| anyhow!("embedding: {e}"))?
+            };
+            // `std::sync::Mutex` promises no fairness, and a thread that unlocks
+            // and immediately relocks tends to beat one that has been waiting —
+            // so a query could sit through several batches.  The bookkeeping
+            // below is the window; this makes the hand-off likely rather than
+            // lucky.
+            std::thread::yield_now();
             for (&i, mut v) in group.iter().zip(vs) {
                 normalize(&mut v);
                 let slot = pending[i] * m.dim;
@@ -5943,16 +5954,16 @@ mod tests {
     /// hears exactly what the terminal is shown — no more, no fewer.
     #[test]
     fn what_the_terminal_draws_is_what_a_watcher_hears() {
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut j = Journal::quiet();
         let sink = seen.clone();
-        j.watch = Some(Box::new(move |p| sink.borrow_mut().push((p.phase, p.done, p.last))));
+        j.watch = Some(Box::new(move |p| sink.lock().unwrap().push((p.phase, p.done, p.last))));
         for i in 0..3 {
             j.progress(&Progress::new("semantic", "embed", "chunks", i, 0.1).of(3));
         }
         j.progress(&Progress::new("semantic", "embed", "chunks", 3, 0.1).of(3).last());
         assert_eq!(
-            *seen.borrow(),
+            *seen.lock().unwrap(),
             [("embed", 0, false), ("embed", 1, false), ("embed", 2, false), ("embed", 3, true)]
         );
     }
@@ -6003,12 +6014,12 @@ mod tests {
 
     /// A journal that keeps every report a run made, for asserting on what it
     /// announced rather than on what it returned.
-    fn watched() -> (Journal, std::rc::Rc<std::cell::RefCell<Vec<Seen>>>) {
-        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    fn watched() -> (Journal, std::sync::Arc<std::sync::Mutex<Vec<Seen>>>) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut j = Journal::quiet();
         let sink = log.clone();
         j.watch = Some(Box::new(move |p| {
-            sink.borrow_mut().push(Seen {
+            sink.lock().unwrap().push(Seen {
                 target: p.target,
                 phase: p.phase,
                 done: p.done,
@@ -6039,7 +6050,7 @@ mod tests {
         )
         .unwrap();
 
-        let seen = log.borrow();
+        let seen = lock(&log);
         let order: Vec<&str> = seen.iter().map(|s| s.phase).fold(Vec::new(), |mut a, p| {
             if a.last() != Some(&p) {
                 a.push(p);
@@ -6077,7 +6088,7 @@ mod tests {
         let r = cmd_index(&v, false, false, m, &Config::default(), &mut j, None).unwrap().report;
         assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
 
-        let seen = log.borrow();
+        let seen = lock(&log);
         for phase in ["scan", "chunk"] {
             let run: Vec<&Seen> = seen.iter().filter(|s| s.phase == phase).collect();
             // Asserting only on the closing report would prove nothing: it is
@@ -6118,7 +6129,7 @@ mod tests {
         let (mut j, log) = watched();
         cmd_index_lexical(&v, false, false, &lang, false, &cfg, &mut j).unwrap();
 
-        let seen = log.borrow();
+        let seen = lock(&log);
         let chunk_ends = seen.iter().filter(|s| s.phase == "chunk" && s.last).count();
         assert!(chunk_ends <= 1, "at most one chunking pass may report: {seen:?}");
     }

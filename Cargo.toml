@@ -36,11 +36,16 @@ ureq = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-
-# For `serve`'s interrupt handler only.  Already in the tree by way of half the
-# dependencies above, so naming it here compiles nothing new.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# JSON-RPC over stdio with LSP's `Content-Length` framing, which is what
+# `jsonrpc.el` reads.  The framing was hand-rolled once and was never the reason
+# to stop: `Connection::sender` is a cloneable channel, so an indexing worker can
+# answer and report without racing the request loop for the descriptor.
+# `lsp-types` is deliberately *not* taken — this speaks its own methods, and
+# `initialize` is the only LSP shape it needs.
+lsp-server = "0.10.0"
+# The channel `lsp-server` hands out.  Already in the tree via tantivy; naming it
+# here is what makes its types usable in a signature.
+crossbeam-channel = "0.5.16"
 
 [profile.release]
 opt-level = 3
