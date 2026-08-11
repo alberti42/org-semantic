@@ -7,7 +7,10 @@
 .PHONY: all build test test-rust test-elisp lint lint-rust lint-elisp html clean
 
 EMACS ?= emacs
-ELISP := lisp/org-semantic.el test/org-semantic-tests.el
+# In dependency order: one Emacs compiles the whole list, so a file that
+# requires an earlier one picks up the .elc just produced.
+ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
+	test/org-semantic-tests.el
 
 all: build
 

@@ -676,6 +676,35 @@ is an extra for vaults that carry ids, and in a file of many
 notes every hit may carry the same one."
   (or (plist-get hit :headingLine) 1))
 
+(defun org-semantic-hit-path (hit)
+  "The path HIT is in, relative to the vault.
+What to show; `org-semantic-hit-file' is what to open."
+  (plist-get hit :path))
+
+(defun org-semantic-hit-start-line (hit)
+  "The first line of the passage HIT matched on."
+  (plist-get hit :startLine))
+
+(defun org-semantic-hit-end-line (hit)
+  "The last line of the passage HIT matched on."
+  (plist-get hit :endLine))
+
+(defun org-semantic-hit-text (hit)
+  "The passage HIT matched on, as the note's own lines.
+
+Read back from the note when the search was answered rather than
+stored in the index, so it is the text as it is now, code blocks
+and all.  It is exactly the lines `org-semantic-hit-start-line' to
+`org-semantic-hit-end-line' joined with newlines -- so its nth
+line is line START-LINE + n of the note, which is what lets a
+client number them, jump to one, or write one back.
+
+Empty when the note has since been cut shorter than the span.
+That is the one case where the correspondence fails, and the
+caller has to notice it: an empty string against a span of several
+lines is not a passage of one blank line."
+  (plist-get hit :text))
+
 ;;;###autoload
 (defun org-semantic-visit-hit (hit &optional other-window)
   "Open HIT: its file, at its heading.  In OTHER-WINDOW if non-nil.
