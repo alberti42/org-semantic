@@ -542,6 +542,20 @@ written --- so cancelling a rebuild to start a newer one throws away every minut
 of work it had done, and a vault saved often enough might never finish indexing at
 all.
 
+*And only one thing may index a vault at a time, whichever process it is.* If your
+editor's server is rebuilding a vault and you run =org-semantic index= on the same
+one, the second is refused and says which process holds it. It is a lock file,
+=.org-semantic/index.lock=, taken for the length of a run and removed at the end
+--- including when the run fails. Two writers at once could otherwise pair the
+chunk table from one with the vectors from the other, which no length check can
+notice and which would answer every query from the wrong place.
+
+Killing a run with Ctrl-C leaves the file behind, since nothing gets a chance to
+tidy up; the next run notices the process is gone and takes it over. In the one
+case where it cannot tell --- a lock with no readable owner --- it waits a minute
+before assuming the worst, and the error names the file so you can remove it
+yourself.
+
 *Searches, by contrast, are all answered.* The server keeps no queue of its own
 and supersedes nothing: ten keystrokes are ten searches and ten replies, handled
 one at a time in the order they arrived. That is cheap when nothing is running ---
@@ -1191,6 +1205,7 @@ modified* --- org-semantic only reads them.
 | =.org-semantic/semantic/<model>/manifest.json= | 0.2 MB         | what that model's index has seen: per-note hash and =(mtime, size)= |
 | =.org-semantic/tantivy/=                       | 2.9 MB         | the lexical index                                                   |
 | =.org-semantic/lexical.json=                   | 0.2 MB         | the same, for the lexical index                                     |
+| =.org-semantic/index.lock=                     | ---            | present only while something is indexing this vault                 |
 |                                                | *15 MB*        |                                                                     |
 
 *Your prose is not copied into the index.* A chunk records *where* it came from

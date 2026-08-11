@@ -47,5 +47,12 @@ lsp-server = "0.10.0"
 # here is what makes its types usable in a signature.
 crossbeam-channel = "0.5.16"
 
+# One call: `kill(pid, 0)`, to ask whether the process holding a vault's index
+# lock is still there.  It was dropped when `serve`'s SIGINT handler went and is
+# back for this; free either way, being in the tree via half the dependencies
+# above.
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"
+
 [profile.release]
 opt-level = 3

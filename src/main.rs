@@ -3246,6 +3246,142 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
+/// An exclusive claim on a vault's index, for the length of a run — **across
+/// processes**, which is the part nothing else covered.
+///
+/// `Server::run` already allows one run per vault, but only inside one process.
+/// Nothing stopped `org-semantic index` on a command line from writing the same
+/// index as an editor's resident server, and `save_index` stages both data files
+/// at *fixed* paths, so two writers can interleave. Most interleavings are loud —
+/// unequal counts trip `load_index`'s length check, a torn `chunks.json` will not
+/// parse, and either way the answer is "no index" and a rebuild. One is not:
+/// `chunks.json` from one run paired with `vectors.f32` from the other at **equal
+/// chunk counts** answers every query from the wrong vectors and says nothing.
+/// Editing a word in a note is enough to produce two runs of equal count.
+///
+/// The window is small — `save_index` is a few writes and renames over a few MB —
+/// and eight deliberate collisions failed to hit it. This exists because the
+/// consequence is silent, not because the odds are high.
+///
+/// The lexical side was already safe: tantivy takes its own lockfile, and says so
+/// when it refuses. That is the precedent for doing it this way rather than the
+/// invention of a new mechanism.
+#[derive(Debug)]
+struct Claim {
+    path: PathBuf,
+}
+
+/// How old a lock with **no readable pid** must be before it is treated as
+/// abandoned.
+///
+/// It covers a window of microseconds — a process killed between creating the file
+/// and writing its pid into it — so it can afford to be generous, and being
+/// generous is the point: stealing a lock from a live owner would produce exactly
+/// the two-writer corruption this prevents, whereas waiting too long only costs
+/// patience. Never consulted when the pid *is* readable.
+const FORSAKEN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Claim {
+    /// Take the claim, or say who holds it.
+    ///
+    /// `create_new` is `O_EXCL`, so the test and the take are one atomic step;
+    /// checking existence first and then creating would race exactly the way this
+    /// is meant to prevent.
+    fn on(vault: &Path) -> Result<Claim> {
+        let dir = state_dir(vault);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("index.lock");
+        for attempt in 0..2 {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    // Whose it is, so a later run can tell a live owner from a
+                    // corpse.  Best effort: an unwritable pid only costs the next
+                    // run the benefit of the doubt.
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(Claim { path });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let owner = fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .filter(|&pid| pid != std::process::id());
+                    // **Stale locks are routine, not exceptional**: Ctrl-C is the
+                    // documented way to stop a run, and it leaves no chance to
+                    // release anything.  So an owner that is gone must not wedge a
+                    // vault.
+                    let forsaken = match owner {
+                        Some(pid) => !alive(pid),
+                        // No pid to ask about.  Either the owner died between
+                        // creating this file and writing to it — microseconds, but
+                        // reachable — or something wrote nonsense here.  Age tells
+                        // those from a lock taken a moment ago, and it is consulted
+                        // *only* when the pid is unreadable, so a long run whose
+                        // owner is plainly alive is never second-guessed.
+                        None => fs::metadata(&path)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.elapsed().ok())
+                            .is_some_and(|age| age > FORSAKEN_AFTER),
+                    };
+                    // One retry, and only having found this very file stale.
+                    if attempt == 0 && forsaken {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    return Err(fault(
+                        "indexing",
+                        serde_json::json!({ "remedy": "wait" }),
+                        match owner {
+                            Some(pid) => format!(
+                                "another process (pid {pid}) is indexing this vault; \
+                                 wait for it to finish"
+                            ),
+                            // Says where it is, so the one case that could wedge a
+                            // vault is a file the user can delete rather than a
+                            // mystery.
+                            None => format!(
+                                "this vault is already being indexed; wait for it to \
+                                 finish, or remove {} if nothing is",
+                                path.display()
+                            ),
+                        },
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        unreachable!("the loop returns on both outcomes of its second attempt")
+    }
+}
+
+impl Drop for Claim {
+    /// Released on every exit from a run, including a panic while unwinding —
+    /// which is why this is a guard and not a pair of calls someone must remember
+    /// to balance.
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Whether a process is still there to be waited for.
+///
+/// `kill(pid, 0)` sends nothing and reports whether it could have. `libc` is back
+/// for this one call — it was dropped when the `SIGINT` handler went, and it is
+/// still free, being in the tree by way of half the dependencies already.
+///
+/// Pid reuse could in principle make a dead owner look alive, which costs a
+/// needless refusal and never a corrupt index. Erring that way round is the point.
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// Elsewhere, assume an existing lock is live: a needless wait, never a mix.
+#[cfg(not(unix))]
+fn alive(_pid: u32) -> bool {
+    true
+}
+
 /// One note as a scan found it: new or changed, with its text already read.
 struct Stale {
     path: String,
@@ -4972,6 +5108,12 @@ fn main() -> Result<()> {
                     )?;
                 }
             }
+            // Held across both indexes, and dropped when this scope ends: an
+            // editor's resident server may be writing the same vault, and
+            // `save_index` stages at fixed paths.  Taken after `check_config` so
+            // a refused policy is still refused instantly rather than queueing
+            // behind someone else's run.
+            let _claim = Claim::on(vault)?;
             if both || !lexical {
                 cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own, &Cancel::default())?;
             }
@@ -6377,6 +6519,69 @@ mod tests {
         assert_eq!(f.data["changed"], serde_json::json!(["exclude_tagged"]));
         assert_eq!(f.data["target"], "semantic");
         assert_eq!(f.data["remedy"], "reindex-full");
+    }
+
+    /// One writer at a time, and the claim outlives neither its owner nor its
+    /// scope.
+    #[test]
+    fn a_vault_is_claimed_by_one_writer_at_a_time() {
+        let v = scratch("claim");
+        let held = Claim::on(&v).expect("nothing holds it yet");
+        let refused = Claim::on(&v).expect_err("a second writer must not proceed");
+        assert_eq!(
+            refused.downcast_ref::<Fault>().map(|f| f.kind),
+            Some("indexing"),
+            "labelled, so a client waits rather than showing a failure"
+        );
+        drop(held);
+        Claim::on(&v).expect("and released, the vault is free again");
+    }
+
+    /// **Ctrl-C is the documented way to stop a run**, and it leaves no chance to
+    /// release anything — so a lock whose owner is gone must never wedge a vault.
+    /// This is the routine case, not the exotic one.
+    #[test]
+    fn a_claim_whose_owner_has_died_is_taken_over() {
+        let v = scratch("claim-corpse");
+        // A pid that certainly no longer exists, rather than a large number that
+        // might: recently-exited pids are not reused until the range wraps.
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        fs::create_dir_all(state_dir(&v)).unwrap();
+        fs::write(state_dir(&v).join("index.lock"), gone.id().to_string()).unwrap();
+
+        Claim::on(&v).expect("a corpse does not hold a vault");
+    }
+
+    /// The one lock that cannot be asked about: a process killed between
+    /// `create_new` and writing its pid leaves no owner to test for liveness.
+    ///
+    /// Age settles it, and deliberately in one direction only — a fresh one is
+    /// assumed live, because stealing from a live owner is the two-writer
+    /// corruption the whole mechanism exists to prevent. Waiting too long merely
+    /// costs patience, and the message says which file to remove.
+    #[test]
+    fn a_claim_with_no_owner_is_waited_out_before_it_is_taken() {
+        let v = scratch("claim-nameless");
+        let lock = state_dir(&v).join("index.lock");
+        fs::create_dir_all(state_dir(&v)).unwrap();
+        fs::write(&lock, "").unwrap();
+
+        let refused = Claim::on(&v).expect_err("fresh, so assumed to be held");
+        assert!(
+            refused.to_string().contains("index.lock"),
+            "and names the file, so a wedge is a deletion rather than a mystery: {refused}"
+        );
+
+        // Backdated past the grace period, which is the only way to reach that
+        // branch without waiting a minute in a test.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - FORSAKEN_AFTER * 2)
+            .unwrap();
+        Claim::on(&v).expect("old enough that nothing is coming back for it");
     }
 
     /// An index too old to read is a different problem from one that was never

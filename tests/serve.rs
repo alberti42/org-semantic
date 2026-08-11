@@ -667,6 +667,38 @@ fn indexing_one_vault_does_not_block_another() {
     s.close();
 }
 
+/// A vault is claimed across processes, not just within one.
+///
+/// `Server::run` gives one run per vault inside a process; nothing stopped a plain
+/// `org-semantic index` from writing the same index at the same time, and
+/// `save_index` stages both data files at fixed paths. Most interleavings would be
+/// caught by the length check, but chunks from one run paired with vectors from the
+/// other at equal counts is silent — so the guard is a lock file, as tantivy
+/// already does for the lexical index.
+#[test]
+fn a_command_line_run_is_refused_while_the_server_indexes_the_same_vault() {
+    let v = vault("claimed", 3000);
+    let mut s = Session::indexing(&v, 7);
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+        .args(["index", v.to_str().unwrap(), "--lexical", "--full"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&cli.stderr).trim().to_string();
+    assert!(!cli.status.success(), "the second writer must not proceed: {said}");
+    assert!(said.contains("indexing this vault"), "and must say why: {said}");
+
+    // The run that held the claim is unaffected, and releases it.
+    let reply = s.reply();
+    assert_eq!(reply["id"], 7);
+    assert!(reply.get("result").is_some(), "{reply:?}");
+    assert!(
+        !v.join(".org-semantic").join("index.lock").exists(),
+        "the claim is released when the run ends"
+    );
+    s.close();
+}
+
 /// Cancelling one vault's run must leave the other's alone.
 ///
 /// This is the half a **global** stop flag would get wrong, and silently: with

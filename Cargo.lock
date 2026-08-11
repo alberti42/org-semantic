@@ -1453,6 +1453,7 @@ dependencies = [
  "crossbeam-channel",
  "fastembed",
  "fasttext",
+ "libc",
  "lsp-server",
  "ort",
  "serde",

@@ -455,6 +455,11 @@ impl Server {
                 "an index of this vault is already running; wait for it to finish".into(),
             ));
         }
+        // And the same claim across processes, since the in-process slot above
+        // says nothing about a CLI run writing this vault.  Taken here rather than
+        // on the worker so the refusal is synchronous, like every other reason a
+        // request is turned down.  Moved into the thread, and released when it ends.
+        let claim = Claim::on(&plan.vault)?;
         // Fresh, so there is no stale cancellation to clear — which is what the
         // old global flag needed a `rearm` step for.
         let stop = Arc::new(Cancel::default());
@@ -467,6 +472,9 @@ impl Server {
         let mine = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             let done = me.run(plan, &mut j, &mine);
+            // Explicit, so that moving this line is a visible decision: the vault
+            // stays claimed until the run is finished with it.
+            drop(claim);
             // The queue is closed and drained *before* the reply, in that order.
             // Reports go out on their own thread, so a reply sent straight to the
             // transport could otherwise overtake ones still queued — and "the
