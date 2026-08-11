@@ -240,7 +240,14 @@ is here, since the notes may have moved on.
 
 \\{org-semantic-results-mode-map}"
   (setq-local revert-buffer-function #'org-semantic-results--revert)
-  (setq-local truncate-lines t)
+  ;; Wrapped rather than truncated, with `wrap-prefix' carrying the
+  ;; continuation under the gutter: a note's paragraph may be one very
+  ;; long line, and truncating it would hide the words that matched.  A
+  ;; file line is still one *logical* line, which is what the numbers and
+  ;; the properties are attached to -- the same arrangement
+  ;; `display-line-numbers' makes in an ordinary buffer.
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
   (setq next-error-function #'org-semantic-results--next-error)
   (setq next-error-last-buffer (current-buffer))
   (add-to-invisibility-spec '(org-semantic-results . t))
@@ -379,6 +386,21 @@ ranking: the best note first, and within it the best section."
             (setq section (list line))
             (setcdr entry (append (cdr entry) (list section))))
           (setcdr section (append (cdr section) (list hit))))))
+    ;; Within a section, in the order the note has them.  They arrive
+    ;; ranked, which is right for choosing *which* sections to show and
+    ;; wrong for reading one: the passages of a section are pieces of one
+    ;; continuous text, and a tie in the scores would otherwise decide
+    ;; which piece came first.  It also settles the overlap: consecutive
+    ;; passages share a paragraph, and in document order the earlier one
+    ;; owns it, so what is dimmed is the repeat rather than whichever
+    ;; copy happened to score higher.
+    (dolist (file files)
+      (dolist (section (cdr file))
+        (setcdr section
+                (sort (cdr section)
+                      (lambda (a b)
+                        (< (or (org-semantic-hit-start-line a) 0)
+                           (or (org-semantic-hit-start-line b) 0)))))))
     files))
 
 (defun org-semantic-results--claim (file start end claimed)
@@ -419,7 +441,7 @@ reconciled later."
     (setq org-semantic-results--indexing
           (org-semantic-true-p (plist-get reply :indexing)))
     (erase-buffer)
-    (org-semantic-results--insert-header hits elapsed)
+    (org-semantic-results--insert-header hits elapsed t)
     (dolist (file (org-semantic-results--group hits))
       (let ((blocks nil))
         ;; Drawn into a string first, because how many passages a note
@@ -450,8 +472,13 @@ reconciled later."
     (goto-char (point-min))
     (org-semantic-results--first-item)))
 
-(defun org-semantic-results--insert-header (hits elapsed)
-  "Insert the lines at the top of the buffer, describing HITS and ELAPSED."
+(defun org-semantic-results--insert-header (hits elapsed &optional counts)
+  "Insert the lines at the top of the buffer, describing HITS and ELAPSED.
+
+COUNTS asks for the third line, the one saying how much came back.
+It is left off when nothing did and the reason is about to be
+given instead: \"0 notes, 0 passages\" above an explanation of why
+there is no index reads as an answer, and it is not one."
   (let* ((notes (length (org-semantic-results--group hits)))
          (facts (delq nil
                       (list (format "k=%s notes" (or org-semantic-results--k 8))
@@ -476,16 +503,18 @@ reconciled later."
                      (mapconcat #'identity facts "  ·  "))
              'face 'org-semantic-results-location
              'org-semantic-header t 'read-only t))
-    (insert (propertize
-             (format "%d note%s, %d passage%s%s%s\n\n"
-                     notes (if (= notes 1) "" "s")
-                     (length hits) (if (= (length hits) 1) "" "s")
-                     (if elapsed (format " in %.2f s" elapsed) "")
-                     (if org-semantic-results--indexing
-                         "  ·  indexing: this list is one version behind"
-                       ""))
-             'face 'org-semantic-results-location
-             'org-semantic-header t 'read-only t))))
+    (if counts
+        (insert (propertize
+                 (format "%d note%s, %d passage%s%s%s\n\n"
+                         notes (if (= notes 1) "" "s")
+                         (length hits) (if (= (length hits) 1) "" "s")
+                         (if elapsed (format " in %.2f s" elapsed) "")
+                         (if org-semantic-results--indexing
+                             "  ·  indexing: this list is one version behind"
+                           ""))
+                 'face 'org-semantic-results-location
+                 'org-semantic-header t 'read-only t))
+      (insert (propertize "\n" 'org-semantic-header t 'read-only t)))))
 
 (defun org-semantic-results--insert-file (file passages)
   "Insert the line naming FILE, which contributed PASSAGES of them."
@@ -602,6 +631,11 @@ line and not a rendering of one."
                           'org-semantic-file (org-semantic-results--item-file item)
                           'org-semantic-line number
                           'org-semantic-primary (and mine t)
+                          ;; Decoration, so it goes here and not into the
+                          ;; text: a wrapped line continues under the
+                          ;; gutter rather than under the note's own
+                          ;; first column.
+                          'wrap-prefix (make-string (length gutter) ?\s)
                           'mouse-face 'highlight
                           'keymap org-semantic-results-passage-map
                           'follow-link t
