@@ -815,19 +815,53 @@ phases exist."
          (format " (%s/%s tokens)" tokens of-tokens)
        ""))))
 
+(defun org-semantic--reindex-flags (arg)
+  "Return (REHASH . FULL) for the raw prefix argument ARG.
+
+Ordered by what each one costs, since that is what a second `C-u'
+should mean:
+
+  plain      trust every note's timestamp and size; 0.03 s when
+             nothing changed.
+  \\[universal-argument]        rehash -- read and hash every note, and re-embed the
+             ones whose *content* moved without their stamp
+             moving.  0.09 s of reading on a thousand notes, and
+             the backstop for a timestamp-preserving restore,
+             `rsync --times' or `touch -r'.
+  \\[universal-argument] \\[universal-argument]    full -- rebuild from scratch, which is minutes, and
+             the only thing that re-embeds a corpus.
+
+Rehash is not a small full rebuild: it re-reads everything and
+then still re-embeds only what really differs, so it cannot pick
+up a changed policy or a changed language set.  Those are `full',
+and nothing else will do.
+
+FULL implies rehashing, so the two are never both sent."
+  (let ((level (prefix-numeric-value arg)))
+    (cond ((null arg) (cons nil nil))
+          ((>= level 16) (cons nil t))
+          (t (cons t nil)))))
+
 ;;;###autoload
-(defun org-semantic-reindex (&optional full)
+(defun org-semantic-reindex (&optional arg)
   "Index the current buffer's vault, reporting progress in the echo area.
 
-With FULL, or a prefix argument, rebuild from scratch -- which is
-what a changed policy has to be agreed to with, and what a
-changed language set or classifier needs to take effect."
+Plain, this is incremental: a note whose timestamp and size are
+unchanged is not even read.  ARG escalates that, and the prefixes
+are ordered by cost -- one `C-u' rehashes, two rebuild from
+scratch.  See `org-semantic--reindex-flags' for what each means
+and what only a full rebuild can do."
   (interactive "P")
   ;; `os-' again: read by the callbacks below, after this has returned.
-  (let ((os-vault (org-semantic-vault-or-error)))
+  (let* ((os-vault (org-semantic-vault-or-error))
+         (flags (org-semantic--reindex-flags arg))
+         (os-how (cond ((cdr flags) "full rebuild of")
+                       ((car flags) "rehashing")
+                       (t "indexing"))))
     (org-semantic-index
      :vault os-vault
-     :full full
+     :rehash (car flags)
+     :full (cdr flags)
      :progress #'org-semantic-report-message
      :success
      (lambda (result)
@@ -838,7 +872,7 @@ changed language set or classifier needs to take effect."
      (lambda (error-object)
        (message "org-semantic: %s"
                 (or (plist-get error-object :message) "the index failed"))))
-    (message "org-semantic: indexing %s..." (abbreviate-file-name os-vault))))
+    (message "org-semantic: %s %s..." os-how (abbreviate-file-name os-vault))))
 
 (defun org-semantic--summarise (result)
   "A short account of RESULT, what an index reported it did."

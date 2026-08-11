@@ -83,6 +83,22 @@ where an absent one means \"whatever the index was built under\"."
   (should (org-semantic-true-p t)))
 
 
+;;;; What a prefix argument asks for
+
+(ert-deftest the-prefixes-are-ordered-by-what-they-cost ()
+  "One `C-u' rehashes, two rebuild, and the two flags never travel together.
+
+The order is the point: rehashing is 0.09 s of reading, a rebuild
+is minutes, so a second `C-u' has to be the expensive one."
+  (should (equal (org-semantic--reindex-flags nil) '(nil . nil)))
+  (should (equal (org-semantic--reindex-flags '(4)) '(t . nil)))
+  (should (equal (org-semantic--reindex-flags '(16)) '(nil . t)))
+  ;; Any deeper, and any plain number, still resolve to one of the two.
+  (should (equal (org-semantic--reindex-flags '(64)) '(nil . t)))
+  (should (equal (org-semantic--reindex-flags 3) '(t . nil)))
+  (should (equal (org-semantic--reindex-flags '-) '(t . nil))))
+
+
 ;;;; Which vault a buffer belongs to
 
 (ert-deftest an-index-is-enough-to-find-a-vault ()
