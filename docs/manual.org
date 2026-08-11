@@ -161,12 +161,105 @@ Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
 #+end_example
 
+** Searching from Emacs
+:PROPERTIES:
+:CUSTOM_ID: searching-from-emacs
+:END:
+The package lives in =lisp/=. Put it on your ~load-path~ and tell it where the
+binary is, if it is not already on your =PATH=:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/org-semantic/lisp")
+(require 'org-semantic-results)
+(setq org-semantic-executable "/path/to/org-semantic")
+#+end_src
+
+A vault says which directory it is, in its own =.dir-locals.el=, so that it can
+be found before anything has been indexed:
+
+#+begin_src emacs-lisp
+((nil . ((org-semantic-vault-root . t))))
+#+end_src
+
+Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
+searches the vault that note belongs to and shows what came back:
+
+#+begin_example
+org-semantic  semantic  "vacuum bakeout procedure"
+~/notes  ·  k=8 notes  ·  per-file=3 passages
+6 notes, 11 passages in 0.31 s
+
+lab/vacuum.org  ·  2 passages
+  0.780 (+2.4σ)  Vacuum > Bakeout > Turbo pump
+  lab/vacuum.org:142  ·  :lab:vac:
+    The turbo pump was baked out at 120 °C for 48 h before the
+    chamber was vented.  Pressure after the bake settled at
+    2e-10 mbar, which is the best we have seen on this chamber.
+    ⋯ 9 lines
+
+  0.712 (+1.9σ)  lines 181–194
+    A second bake was needed after the viewport swap: the copper
+    gasket had been reused once too often.
+#+end_example
+
+A passage is shown as the note's own lines, in order and unaltered, so =RET= goes
+to *the line under point* rather than to the top of the section --- which
+matters, since a section can run to hundreds of lines. It is wired into
+~next-error~, so =M-g M-n= walks the hits from anywhere.
+
+| key       | does                                                       |
+|-----------+------------------------------------------------------------|
+| =RET=     | go to the line under point                                 |
+| =o=       | the same, in another window                                |
+| =C-o=     | show it without leaving the list                           |
+| =n= / =p= | next or previous passage, showing each                     |
+| =M-n= =M-p= | next or previous *note*                                  |
+| =TAB=     | unfold the rest of a long passage                          |
+| =g=       | search again --- the notes may have moved on               |
+| =s=       | search for something else                                  |
+| =m=       | swap between ranking by meaning and by word                |
+| =M=       | fold a divided section into one hit                        |
+| =a=       | match any of the words rather than all of them             |
+| =+= / =-= | let more or fewer notes appear                             |
+| =P=       | how many passages one note may contribute                  |
+| ~=~       | say everything known about this passage                     |
+| =R=       | index this vault, then search again                        |
+| =C-c C-f= | follow mode: show each hit as you move                      |
+| =q=       | bury the list                                              |
+
+=+= and =-= change how many *notes* may appear, not how many hits. A vault kept
+in a few large files answers a large =k= with very few hits until =P= is raised
+too --- see [[#vaults-kept-in-a-few-large-files][Vaults kept in a few large files]].
+
+A search sent while an index is running is answered from the version committed
+before it, and the header says so. Nothing is lost; the list is a moment behind.
+
+If the index a search needs does not exist, the buffer says so and offers to
+build it --- as something to press, rather than as a question asked while you
+were typing somewhere else. The same goes for an index whose layout is too old
+to read, and for a policy that has drifted since the index was built.
+
+What to set:
+
+| variable                              | default      | what it decides                                     |
+|---------------------------------------+--------------+-----------------------------------------------------|
+| ~org-semantic-executable~             | =org-semantic= | the binary, by name or path                       |
+| ~org-semantic-results-ranking~        | ="semantic"= | which ranking =M-x org-semantic-find= asks for      |
+| ~org-semantic-results-passage-lines~  | =12=         | how much of a passage to show before folding        |
+| ~org-semantic-results-line-numbers~   | =nil=        | number a passage's lines as the note numbers them   |
+| ~org-semantic-model~                  | =nil=        | which model, when a vault has several built         |
+| ~org-semantic-conserve-memory~        | =nil=        | see [[#during-a-reindex][Searching while it reindexes]] |
+
+A prefix argument to =M-x org-semantic-find= asks for the ranking and the two
+limits instead of taking them from the settings. =M-x org-semantic-reindex=
+indexes the current vault from anywhere: plain trusts each note's timestamp,
+=C-u= re-reads and re-hashes every note, and =C-u C-u= rebuilds from scratch.
+
 ** Driving it from Emacs, or anything else
 :PROPERTIES:
 :CUSTOM_ID: driving-it-from-an-editor
 :END:
-org-semantic was designed to sit behind Emacs, and that is what the Emacs package
-will use. Nothing in it is Emacs-specific, though: =search --json= returns the
+Nothing about org-semantic is Emacs-specific: =search --json= returns the
 hits as data rather than prose, and =serve= speaks JSON-RPC over a pipe, so any
 program that can start a process and write to its standard input can drive it ---
 another editor, a script, or an agent doing retrieval before it answers.
