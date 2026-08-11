@@ -386,51 +386,87 @@ impl Server {
 /// fill rather than half a second.
 const FLOOR: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Whether stdout can take a message without waiting for the client to read.
+/// What became of a message that the sender was not willing to wait on.
+#[derive(PartialEq, Debug)]
+enum Sent {
+    Yes,
+    /// The client has stopped reading and the buffer is full.  The report is
+    /// discarded: it is worth less than the work delivering it would hold up,
+    /// and the next one supersedes it a tenth of a second later.
+    NoRoom,
+    /// The far end is closed.  Nothing more will be read, ever.
+    Gone,
+}
+
+/// Write a framed message, or give up rather than wait for the client.
 ///
-/// A progress report is worth less than the work it would delay: the next one
-/// supersedes it a tenth of a second later. So when the client has stopped
-/// draining — a long `call-process` elsewhere in Emacs, a GC pause — the report
-/// is dropped and the indexing carries on, rather than the indexing stopping so
-/// that a number nobody is looking at can be delivered.
+/// `O_NONBLOCK` is set for the duration of this write only.  Every other write
+/// on the descriptor — the reply above all — keeps the blocking behaviour it
+/// needs, and no caller can be surprised by an `EAGAIN` it did not ask for.
 ///
-/// This makes a stall unlikely, not impossible. `POLLOUT` promises that *a*
-/// write would not block, not that a 202-byte one would not; a client that
-/// stops reading in the narrow window where the buffer has room for some of a
-/// message and not all of it can still wedge the run until it resumes.
+/// The flag is what makes "did it fit?" a question the write itself answers.  A
+/// pipe write of at most `PIPE_BUF` bytes is all-or-nothing under it: ours are
+/// ~202 bytes against a floor of 512.  A stdout that is *not* a pipe — a socket
+/// — can still write partially, and half a frame would desynchronise the client
+/// permanently, so a short write is finished blocking rather than abandoned.
+/// The choice is whether to begin a write; once begun, it is always finished.
 #[cfg(unix)]
-fn stdout_has_room() -> bool {
-    use std::os::fd::AsRawFd;
-    let mut p = libc::pollfd { fd: io::stdout().as_raw_fd(), events: libc::POLLOUT, revents: 0 };
-    // Zero timeout: this is a question, not a wait.
-    unsafe { libc::poll(&mut p, 1, 0) > 0 && (p.revents & libc::POLLOUT) != 0 }
+fn write_without_waiting(fd: std::os::fd::RawFd, v: &serde_json::Value) -> Sent {
+    let Ok(body) = serde_json::to_vec(v) else { return Sent::Gone };
+    let mut buf = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    buf.extend_from_slice(&body);
+
+    // Rust's stdout is line-buffered and every other writer here flushes, but
+    // raw bytes must not overtake anything still held back.
+    let _ = io::stdout().flush();
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Sent::Gone;
+    }
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+    let err = std::io::Error::last_os_error();
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+
+    if n < 0 {
+        return match err.raw_os_error() {
+            // EWOULDBLOCK is the same number here; naming both is a pattern
+            // the compiler rejects as unreachable.
+            Some(libc::EAGAIN) => Sent::NoRoom,
+            _ => Sent::Gone,
+        };
+    }
+    let n = n as usize;
+    if n < buf.len() {
+        let mut out = io::stdout().lock();
+        if out.write_all(&buf[n..]).is_err() || out.flush().is_err() {
+            return Sent::Gone;
+        }
+    }
+    Sent::Yes
 }
 
 #[cfg(not(unix))]
-fn stdout_has_room() -> bool {
-    true
+fn write_without_waiting(_fd: i32, v: &serde_json::Value) -> Sent {
+    if write_message(v).is_ok() {
+        Sent::Yes
+    } else {
+        Sent::Gone
+    }
 }
 
-/// Whether a report goes out now.
+/// Whether a report is worth sending at all.
 ///
-/// Two of them always do. A phase's **opening** is news rather than repetition —
-/// it is what the protocol says ends the previous run of reports — and a phase's
-/// **last** is what lets a client stop rendering 6,400 of 6,522. Neither can be
-/// reconstructed from its neighbours, so neither is ever withheld.
+/// About repetition and nothing else. A phase's **opening** is news — it is what
+/// the protocol says ends the previous run of reports — and a phase's **last**
+/// is what lets a client stop rendering 6,400 of 6,522. Neither can be rebuilt
+/// from its neighbours, so neither is ever held back. Everything between them is
+/// superseded a tenth of a second later.
 ///
-/// Everything between them is superseded a tenth of a second later, and is
-/// therefore held to two conditions: enough time since the last one, and room in
-/// the pipe. `ROOM` is a function rather than a bool so this can be tested
-/// without a client on the other end.
-///
-/// The second condition is the one that decides what happens when the client
-/// stops draining: a report is worth less than the work delivering it would
-/// hold up, so it is dropped and the indexing carries on.
-fn deliver(opening: bool, last: bool, since: std::time::Duration, room: impl Fn() -> bool) -> bool {
-    if opening || last {
-        return true;
-    }
-    since >= FLOOR && room()
+/// Whether it then *fits* is a separate question, and one the write answers.
+fn deliver(opening: bool, last: bool, since: std::time::Duration) -> bool {
+    opening || last || since >= FLOOR
 }
 
 /// Report the work as it happens, under the id the caller is already waiting on.
@@ -454,10 +490,14 @@ fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
     let mut gone = false;
     let mut sent = Instant::now() - FLOOR;
     let mut running: Option<(&'static str, &'static str)> = None;
+    let fd = {
+        use std::os::fd::AsRawFd;
+        io::stdout().as_raw_fd()
+    };
     j.watch = Some(Box::new(move |p: &Progress| {
         let opening = running != Some((p.target, p.phase));
         running = Some((p.target, p.phase));
-        if gone || !deliver(opening, p.last, sent.elapsed(), stdout_has_room) {
+        if gone || !deliver(opening, p.last, sent.elapsed()) {
             return;
         }
         sent = Instant::now();
@@ -465,10 +505,14 @@ fn watch(j: &mut Journal, token: Option<&serde_json::Value>) {
             "jsonrpc": "2.0", "method": "$/progress",
             "params": { "token": tok, "value": p },
         });
-        // Rust leaves SIGPIPE ignored, so a client that has gone away would
-        // otherwise mean minutes of collecting write errors nobody will read.
-        if write_message(&msg).is_err() {
-            gone = true;
+        // Nothing here is worth waiting on.  A client that has stopped reading
+        // loses reports; it does not stop the work, and it learns where the run
+        // got to from the reply, which *is* waited on.
+        match write_without_waiting(fd, &msg) {
+            Sent::Yes | Sent::NoRoom => {}
+            // Rust leaves SIGPIPE ignored, so a client that has gone away would
+            // otherwise mean minutes of write errors nobody will ever read.
+            Sent::Gone => gone = true,
         }
     }));
 }
@@ -569,46 +613,57 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// What a client sees when it stops reading.
-    ///
-    /// The end-to-end version of this is not worth its cost: the reports that
-    /// may be dropped only exist in a run long enough to produce hundreds of
-    /// them, which is a semantic reindex — minutes of wall clock and a model on
-    /// disk. In a short run every report is an opening or a last, so nothing is
-    /// droppable and there is nothing to observe. What is worth pinning is the
-    /// rule itself.
+    /// The rate rule, which is about repetition and nothing else.
     #[test]
-    fn a_client_that_stops_reading_loses_reports_rather_than_stalling_the_run() {
-        let full = || false;
-        let room = || true;
-        let (long, short) = (FLOOR, Duration::ZERO);
-
-        // The two a client cannot reconstruct go out regardless — of the clock,
-        // and of whether anyone is listening.
-        assert!(deliver(true, false, short, full), "a phase must be seen to begin");
-        assert!(deliver(false, true, short, full), "and to end");
-
-        // Everything between them yields, to either condition.
-        assert!(deliver(false, false, long, room), "otherwise: time, and room");
-        assert!(!deliver(false, false, short, room), "too soon");
-        assert!(!deliver(false, false, long, full), "nowhere to put it");
+    fn a_phase_is_always_seen_to_begin_and_to_end() {
+        assert!(deliver(true, false, Duration::ZERO), "a phase must be seen to begin");
+        assert!(deliver(false, true, Duration::ZERO), "and to end");
+        assert!(deliver(false, false, FLOOR), "otherwise, once the floor has passed");
+        assert!(!deliver(false, false, Duration::ZERO), "and not before");
     }
 
-    /// `room` is consulted only when the answer can change the outcome — asking
-    /// costs a syscall, and a report that is already too soon to send is not
-    /// made sendable by the pipe being empty.
+    /// A pipe nobody is reading, which is what a wedged editor looks like from
+    /// this side. The write must come back rather than wait, and must say which
+    /// of the two things happened — no room, or nobody there.
     #[test]
-    fn the_pipe_is_not_asked_about_when_the_answer_cannot_matter() {
-        let asked = std::cell::Cell::new(0);
-        let counting = || {
-            asked.set(asked.get() + 1);
-            true
-        };
-        deliver(true, false, Duration::ZERO, counting);
-        deliver(false, true, Duration::ZERO, counting);
-        deliver(false, false, Duration::ZERO, counting);
-        assert_eq!(asked.get(), 0, "openings, endings, and reports too soon to send");
-        deliver(false, false, FLOOR, counting);
-        assert_eq!(asked.get(), 1, "only a report that is otherwise ready");
+    #[cfg(unix)]
+    fn a_full_pipe_costs_a_report_and_not_the_run() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read, write) = (fds[0], fds[1]);
+        let msg = serde_json::json!({ "jsonrpc": "2.0", "method": "$/progress" });
+
+        // Room to begin with.
+        assert_eq!(write_without_waiting(write, &msg), Sent::Yes);
+
+        // Fill it. The descriptor is left blocking between calls, so this also
+        // shows the flag is not leaking out of `write_without_waiting`.
+        let flags = unsafe { libc::fcntl(write, libc::F_GETFL) };
+        unsafe { libc::fcntl(write, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        let junk = [b'x'; 4096];
+        while unsafe { libc::write(write, junk.as_ptr() as *const libc::c_void, junk.len()) } > 0 {}
+        unsafe { libc::fcntl(write, libc::F_SETFL, flags) };
+
+        // The call that would otherwise wait for the editor to breathe. On
+        // another thread, so a write that *does* block fails this test in half a
+        // second instead of hanging it — a guard that wedges the run reports
+        // nothing and costs whatever patience is watching.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sent = msg.clone();
+        std::thread::spawn(move || tx.send(write_without_waiting(write, &sent)));
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(s) => assert_eq!(s, Sent::NoRoom, "a full pipe costs the report"),
+            Err(_) => panic!("the write blocked on a full pipe instead of giving up"),
+        }
+
+        // Drained, and it goes again — the report was dropped, not the channel.
+        let mut sink = [0u8; 65536];
+        unsafe { libc::read(read, sink.as_mut_ptr() as *mut libc::c_void, sink.len()) };
+        assert_eq!(write_without_waiting(write, &msg), Sent::Yes);
+
+        // A reader that has gone is not the same as one that is busy.
+        unsafe { libc::close(read) };
+        assert_eq!(write_without_waiting(write, &msg), Sent::Gone);
+        unsafe { libc::close(write) };
     }
 }
