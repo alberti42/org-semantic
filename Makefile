@@ -11,7 +11,7 @@ EMACS ?= emacs
 # requires an earlier one picks up the .elc just produced.
 ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
 	lisp/org-semantic-results.el \
-	test/org-semantic-tests.el
+	test/org-semantic-tests.el test/org-semantic-results-tests.el
 
 all: build
 
@@ -26,8 +26,10 @@ test-rust:
 # The tests that need the binary find it at target/release and skip if it is
 # not there, so this is worth running on its own; `make test` builds it first.
 test-elisp:
-	$(EMACS) --batch --no-init-file -L lisp -l ert \
-		-l test/org-semantic-tests.el -f ert-run-tests-batch-and-exit
+	$(EMACS) --batch --no-init-file -L lisp -L test -l ert \
+		-l test/org-semantic-tests.el \
+		-l test/org-semantic-results-tests.el \
+		-f ert-run-tests-batch-and-exit
 
 lint: lint-rust lint-elisp
 
@@ -39,13 +41,16 @@ lint-rust:
 # through `display-warning' and returns nil either way, so a style complaint
 # would otherwise pass a build.  The .elc files are removed again -- they are
 # built to be checked, not kept, and a stale one shadows the source.
+# `-L test' because one test file requires another for its fixtures, and a
+# byte-compile that cannot find it fails on the `require' rather than on
+# anything about the code.
 lint-elisp:
-	$(EMACS) --batch --no-init-file -L lisp \
+	$(EMACS) --batch --no-init-file -L lisp -L test \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile $(ELISP)
 	@rm -f lisp/*.elc test/*.elc
 	@for f in $(ELISP); do \
-		$(EMACS) --batch --no-init-file -L lisp \
+		$(EMACS) --batch --no-init-file -L lisp -L test \
 			--eval "(progn \
 			          (require 'checkdoc) \
 			          (defvar said 0) \

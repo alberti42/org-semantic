@@ -563,7 +563,16 @@ nothing.  CLAIMED is the claim map, and is added to."
 
 (defun org-semantic-results--insert-block-head (hit item first)
   "Insert the line or two above HIT's passage, for ITEM.
-FIRST is as in `org-semantic-results--block'."
+FIRST is as in `org-semantic-results--block'.
+
+These lines go to where the passage starts, not to the heading
+that owns it.  Every line in this buffer goes where it says, and
+what these say is which passage they head: a section can run to
+hundreds of lines, so arriving at its heading is arriving with the
+words that matched somewhere off the bottom of the window.  The
+heading is drawn for orientation -- it says which section this is
+-- and `org-semantic-results-describe-hit' gives its line for
+anyone who wants it."
   (let ((props (list 'org-semantic-item item
                      'org-semantic-hit hit
                      'org-semantic-file (org-semantic-results--item-file item)
@@ -584,7 +593,7 @@ FIRST is as in `org-semantic-results--block'."
                                       (org-semantic-hit-start-line hit)
                                       (org-semantic-hit-end-line hit)))
                             'face 'org-semantic-results-heading))
-                   'org-semantic-line (org-semantic-hit-line hit)
+                   'org-semantic-line (org-semantic-results--item-line item)
                    props))
     (when first
       (insert (apply #'propertize
@@ -592,7 +601,7 @@ FIRST is as in `org-semantic-results--block'."
                              (propertize
                               (format "%s:%s"
                                       (org-semantic-hit-path hit)
-                                      (org-semantic-hit-line hit))
+                                      (org-semantic-results--item-line item))
                               'face 'org-semantic-results-location)
                              (if annotation
                                  (propertize (concat "  ·  " annotation)
