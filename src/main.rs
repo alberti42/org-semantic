@@ -344,55 +344,48 @@ struct Journal {
 
 /// Stopping a run that is already under way.
 ///
-/// A flag, set by `$/cancelRequest` and read between units of work.  It was a
-/// `SIGINT` handler, for a reason that has since expired: `serve()` used to sit
-/// inside `index` for the whole of it and read nothing until it answered, so a
-/// cancellation sent over the pipe arrived after the thing it cancelled, and
-/// only a signal could jump the queue.  The index runs on a worker now and the
-/// loop reads throughout, so the protocol's own message arrives while there is
-/// still something to stop — and it carries the **id**, where a signal carried
-/// nothing and was unambiguous only by accident.
+/// **One of these per run, and that is the whole design.** It was a process-wide
+/// `AtomicBool` while only one run could exist; the moment vaults index
+/// concurrently, a global flag means `$/cancelRequest` for one vault silently
+/// stops the others. Owning the flag per run makes that impossible rather than
+/// merely unlikely, and it retires the `rearm` step with it — a fresh `Cancel`
+/// starts unset, so there is no stale request to clear and no window in which
+/// clearing it would discard a cancellation already asked for.
+///
+/// Before that it was a `SIGINT` handler, for a reason that has since expired:
+/// `serve()` used to sit inside `index` for the whole of it and read nothing
+/// until it answered, so a cancellation sent over the pipe arrived after the
+/// thing it cancelled. The index runs on a worker now and the loop reads
+/// throughout, so the protocol's own message arrives while there is still
+/// something to stop — and it carries the **id**.
 ///
 /// Ctrl-C therefore means what it means everywhere else: end the process. That
 /// is also the honest answer for a model download, which has no unit boundaries
 /// to check a flag between and so was never really interruptible anyway.
-mod interrupt {
-    use std::sync::atomic::{AtomicBool, Ordering};
+#[derive(Default)]
+struct Cancel(std::sync::atomic::AtomicBool);
 
-    static STOP: AtomicBool = AtomicBool::new(false);
-
-    /// Ask the run in flight to stop at its next unit boundary.
-    pub fn request() {
-        STOP.store(true, Ordering::SeqCst);
+impl Cancel {
+    fn request(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Called as a run *starts*, and deliberately not per request: with searches
-    /// answered during an index, rearming on every message would clear a
-    /// cancellation that had already been asked for.
-    pub fn rearm() {
-        STOP.store(false, Ordering::SeqCst);
+    /// Give up if the caller has asked this run to stop.
+    ///
+    /// Called between units of work and never inside one, so an abandoned run
+    /// leaves the previous index exactly as it was: every check sits before a
+    /// note is read or a batch embedded, and none of them is anywhere near
+    /// `save_index` or tantivy's commit.
+    fn check(&self) -> Result<()> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fault(
+                "cancelled",
+                serde_json::json!({}),
+                "the run was cancelled before it finished".into(),
+            ));
+        }
+        Ok(())
     }
-
-    pub fn asked() -> bool {
-        STOP.load(Ordering::SeqCst)
-    }
-}
-
-/// Give up if the caller has asked to stop.
-///
-/// Called between units of work and never inside one, so an abandoned run
-/// leaves the previous index exactly as it was: every check sits before a chunk
-/// is read or a batch embedded, and none of them is anywhere near `save_index`
-/// or tantivy's commit.
-fn stop_requested() -> Result<()> {
-    if interrupt::asked() {
-        return Err(fault(
-            "cancelled",
-            serde_json::json!({}),
-            "the run was cancelled before it finished".into(),
-        ));
-    }
-    Ok(())
 }
 
 /// A size as someone would say it aloud.  Decimal units, because that is what a
@@ -3315,6 +3308,7 @@ fn scan_vault(
     rehash: bool,
     target: &'static str,
     j: &mut Journal,
+    stop: &Cancel,
 ) -> Result<Scan> {
     let t0 = Instant::now();
     let mut sc = Scan {
@@ -3331,7 +3325,7 @@ fn scan_vault(
     };
 
     for (i, f) in files.iter().enumerate() {
-        stop_requested()?;
+        stop.check()?;
         // At the top of the body: every path below can `continue`, and a
         // counter bumped at the bottom would under-report by exactly the number
         // of notes that did not change — nearly all of them, on the runs where
@@ -3424,6 +3418,12 @@ fn lex_manifest_path(dir: &Path) -> PathBuf {
 /// 512-token re-splitting — that limit is what BGE can read in one go, and BM25
 /// has no such bound.  Chunks here are therefore whole sections, which is why
 /// this needs neither a download nor a GPU-shaped wait.
+// Eight, one over clippy's threshold, and every one is a distinct input this
+// needs: what to index, how thoroughly, under which policy, where to report, and
+// when to stop.  A parameter object would group them by nothing better than
+// arity — the one honest grouping, the per-run context (`j`, `stop`), is two
+// fields and would read as ceremony.  Revisit if a ninth ever appears.
+#[allow(clippy::too_many_arguments)]
 fn cmd_index_lexical(
     vault: &Path,
     full: bool,
@@ -3432,6 +3432,7 @@ fn cmd_index_lexical(
     fold: bool,
     cfg: &Config,
     j: &mut Journal,
+    stop: &Cancel,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
     let mut files = Vec::new();
@@ -3451,6 +3452,7 @@ fn cmd_index_lexical(
         rehash,
         "lexical",
         j,
+        stop,
     )?;
 
     // Chunk only what changed.  The languages of those notes may introduce a
@@ -3464,7 +3466,7 @@ fn cmd_index_lexical(
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut speculative = Journal::quiet();
     for st in &scan.stale {
-        stop_requested()?;
+        stop.check()?;
         let f = vault.join(&st.path);
         chunks.extend(chunk_file(
             &f,
@@ -3495,7 +3497,7 @@ fn cmd_index_lexical(
             scan.unreadable.iter().map(|(p, _)| p.as_str()).collect();
         let t_chunk = Instant::now();
         for (i, f) in files.iter().enumerate() {
-            stop_requested()?;
+            stop.check()?;
             j.progress(
                 &Progress::new("lexical", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
                     .of(files.len()),
@@ -3714,6 +3716,8 @@ struct Indexed {
     built: Option<Built>,
 }
 
+// As for `cmd_index_lexical`: eight distinct inputs, none of which group.
+#[allow(clippy::too_many_arguments)]
 fn cmd_index(
     vault: &Path,
     full: bool,
@@ -3722,6 +3726,7 @@ fn cmd_index(
     cfg: &Config,
     j: &mut Journal,
     lend: Lend<'_>,
+    stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
     let mut files = Vec::new();
@@ -3738,6 +3743,7 @@ fn cmd_index(
         rehash,
         "semantic",
         j,
+        stop,
     )?;
     report_unreadable(&scan, j);
     let Scan {
@@ -3811,7 +3817,7 @@ fn cmd_index(
 
     let t_chunk = Instant::now();
     for (i, f) in files.iter().enumerate() {
-        stop_requested()?;
+        stop.check()?;
         // Reported here, at the top, and never below: both branches under this
         // one leave the body early, so a counter at the bottom would skip every
         // note that did not change.  (Mind the `j` a few lines down — it is a
@@ -4021,7 +4027,7 @@ fn cmd_index(
 
         let (mut done, mut tokens_done) = (0usize, 0usize);
         for group in order.chunks(BATCH) {
-            stop_requested()?;
+            stop.check()?;
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
             // Locked for one batch and released between them, which is what
             // lets a query embed itself while a rebuild is running.  Held over
@@ -4967,11 +4973,20 @@ fn main() -> Result<()> {
                 }
             }
             if both || !lexical {
-                cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own)?;
+                cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own, &Cancel::default())?;
             }
             if both || lexical {
                 prepare_lang(&lang, &mut j)?;
-                cmd_index_lexical(vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, &mut j)?;
+                cmd_index_lexical(
+                    vault,
+                    full,
+                    rehash,
+                    &lang,
+                    cfg.fold_diacritics,
+                    &cfg,
+                    &mut j,
+                    &Cancel::default(),
+                )?;
             }
             // Cached so a later run need not restate it.
             fs::create_dir_all(state_dir(vault))?;
@@ -5692,10 +5707,18 @@ mod tests {
         let body = fs::read_to_string(&abs).unwrap();
         fs::write(&abs, format!("{body}\n\n")).unwrap();
 
-        let r =
-            cmd_index(&v, false, false, m, &Config::default(), &mut Journal::quiet(), Lend::Own)
-                .unwrap()
-                .report;
+        let r = cmd_index(
+            &v,
+            false,
+            false,
+            m,
+            &Config::default(),
+            &mut Journal::quiet(),
+            Lend::Own,
+            &Cancel::default(),
+        )
+        .unwrap()
+        .report;
 
         assert_eq!(r.embedded, 0, "no passage changed, so none may be embedded");
         assert!(r.carried > 0, "its passages must be carried over, not rebuilt");
@@ -5766,6 +5789,7 @@ mod tests {
             &Config::default(),
             &mut Journal::quiet(),
             Lend::Own,
+            &Cancel::default(),
         )
         .unwrap();
 
@@ -5795,6 +5819,7 @@ mod tests {
             &Config::default(),
             &mut Journal::quiet(),
             Lend::Own,
+            &Cancel::default(),
         )
         .unwrap();
         assert_eq!(fs::read(sem(&v).join("vectors.f32")).unwrap(), before);
@@ -5994,7 +6019,16 @@ mod tests {
         org_files(&v, &mut files).unwrap();
         files.sort();
 
-        let scan = scan_vault(&v, &files, None, false, "lexical", &mut Journal::quiet()).unwrap();
+        let scan = scan_vault(
+            &v,
+            &files,
+            None,
+            false,
+            "lexical",
+            &mut Journal::quiet(),
+            &Cancel::default(),
+        )
+        .unwrap();
         let mut j = Journal::quiet();
         report_unreadable(&scan, &mut j);
         let rs = j.drain();
@@ -6103,6 +6137,7 @@ mod tests {
             false,
             &Config::default(),
             &mut j,
+            &Cancel::default(),
         )
         .unwrap();
 
@@ -6141,8 +6176,18 @@ mod tests {
         let (mut j, log) = watched();
         let m = model_named(DEFAULT_MODEL).unwrap();
         // Nothing changed since the seed, so every file takes an early exit.
-        let r =
-            cmd_index(&v, false, false, m, &Config::default(), &mut j, Lend::Own).unwrap().report;
+        let r = cmd_index(
+            &v,
+            false,
+            false,
+            m,
+            &Config::default(),
+            &mut j,
+            Lend::Own,
+            &Cancel::default(),
+        )
+        .unwrap()
+        .report;
         assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
 
         let seen = lock(&log);
@@ -6179,12 +6224,23 @@ mod tests {
         let lang = LangConfig::default();
         // First run builds the index; the second is incremental over a changed
         // note, which is when the speculative pass has something to do.
-        cmd_index_lexical(&v, true, false, &lang, false, &cfg, &mut Journal::quiet()).unwrap();
+        cmd_index_lexical(
+            &v,
+            true,
+            false,
+            &lang,
+            false,
+            &cfg,
+            &mut Journal::quiet(),
+            &Cancel::default(),
+        )
+        .unwrap();
         let a = v.join("a.org");
         fs::write(&a, format!("{}\nmore prose\n", fs::read_to_string(&a).unwrap())).unwrap();
 
         let (mut j, log) = watched();
-        cmd_index_lexical(&v, false, false, &lang, false, &cfg, &mut j).unwrap();
+        cmd_index_lexical(&v, false, false, &lang, false, &cfg, &mut j, &Cancel::default())
+            .unwrap();
 
         let seen = lock(&log);
         let chunk_ends = seen.iter().filter(|s| s.phase == "chunk" && s.last).count();
@@ -6584,6 +6640,7 @@ mod tests {
             &Config::default(),
             &mut Journal::quiet(),
             Lend::Own,
+            &Cancel::default(),
         )
         .unwrap();
 

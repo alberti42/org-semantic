@@ -530,10 +530,17 @@ Emacs this is =org-semantic-conserve-memory=.
 few milliseconds throughout, which makes it the better fallback while a semantic
 rebuild is going.
 
-*A second =index= is refused, not queued.* It comes back as an error with
-=data.kind= of ="indexing"=. Keep at most one in flight on your side and re-fire
-from its reply; a queued reindex would be the same work again and would answer
-long past the request timeout.
+*A second =index= of the same vault is refused, not queued* --- it comes back as
+an error with =data.kind= of ="indexing"=. Keep at most one in flight per vault
+and re-fire from its reply. A different vault is not refused: vaults index
+independently, and a one-note reindex of one never waits on a full rebuild of
+another.
+
+Refusing rather than replacing is deliberate. A cancelled run writes nothing at
+all, and the reuse that makes a restart cheap reads the last index that /was/
+written --- so cancelling a rebuild to start a newer one throws away every minute
+of work it had done, and a vault saved often enough might never finish indexing at
+all.
 
 *Searches, by contrast, are all answered.* The server keeps no queue of its own
 and supersedes nothing: ten keystrokes are ten searches and ten replies, handled

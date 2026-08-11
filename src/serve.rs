@@ -91,12 +91,31 @@ struct Server {
     /// model is dropped exactly when the last vault using it goes — no reference
     /// counting of our own, and no eviction policy to get wrong.
     models: Mutex<HashMap<&'static str, std::sync::Weak<Mutex<TextEmbedding>>>>,
-    /// The one indexing run allowed at a time, under the id it will answer with
-    /// so `$/cancelRequest` can be matched against it.
+    /// The runs in flight, **one slot per vault**.
+    ///
+    /// It was a single global slot, which meant rebuilding one vault refused a
+    /// one-note reindex of an unrelated one — a vault made to wait on work that
+    /// had nothing to do with it. Per vault, that cannot happen.
+    ///
+    /// Still *refused* rather than queued or cancelled within a vault. Queueing
+    /// would answer minutes later, past the client's timeout; cancelling would be
+    /// worse, because a stopped run writes nothing at all (chunks and vectors are
+    /// positionally paired, so there is no partial index to save), so a rebuild
+    /// restarted by every save could make no progress at all.
     ///
     /// A thread that has finished is reaped here rather than announcing itself:
     /// `JoinHandle::is_finished` is the whole of the bookkeeping.
-    run: Mutex<Option<(RequestId, std::thread::JoinHandle<()>)>>,
+    run: Mutex<HashMap<PathBuf, Run>>,
+}
+
+/// One indexing run, and the two things needed to reach it from outside.
+struct Run {
+    /// What it will answer under, so `$/cancelRequest` can find it.
+    id: RequestId,
+    /// **Its own** stop flag. A global one would mean cancelling a run on one
+    /// vault silently stopped every other vault's.
+    stop: Arc<Cancel>,
+    handle: std::thread::JoinHandle<()>,
 }
 
 /// What a run needs, resolved on the loop thread before anything is spawned.
@@ -208,10 +227,13 @@ impl Server {
         lexical::Analyzer::from_key(&stored).ok_or_else(|| missing("unreadable"))
     }
 
-    /// Whether a run is under way, which is both what refuses a second one and
-    /// what tells a searcher its answer is a version behind.
-    fn indexing(&self) -> bool {
-        lock(&self.run).as_ref().is_some_and(|(_, h)| !h.is_finished())
+    /// Whether **this vault** is being indexed, which is what refuses a second run
+    /// on it and what tells a searcher its answer is a version behind.
+    ///
+    /// Per vault, so a search on one vault no longer reports itself stale because
+    /// an unrelated vault is rebuilding — which the single global slot did.
+    fn indexing(&self, vault: &Path) -> bool {
+        lock(&self.run).get(vault).is_some_and(|r| !r.handle.is_finished())
     }
 
     /// `search` — both modalities, one shape.
@@ -248,7 +270,7 @@ impl Server {
         // Said on every reply, because a hit list answered mid-rebuild is a
         // version behind and the client is the one that decides whether to say
         // so.  It costs a boolean; asking `status` per keystroke would not.
-        let moving = self.indexing();
+        let moving = self.indexing(&vault);
         let answer = |mut v: serde_json::Value| {
             v["indexing"] = moving.into();
             v
@@ -422,29 +444,29 @@ impl Server {
         let mut j = Journal::quiet();
         let plan = self.plan(&req.params, &mut j)?;
 
-        let mut run = lock(&self.run);
-        if run.as_ref().is_some_and(|(_, h)| !h.is_finished()) {
+        let mut runs = lock(&self.run);
+        // Reap whatever has finished, on any vault.  Dropping a handle whose
+        // thread has already ended detaches nothing that is still running.
+        runs.retain(|_, r| !r.handle.is_finished());
+        if runs.contains_key(&plan.vault) {
             return Err(fault(
                 "indexing",
                 serde_json::json!({ "remedy": "wait" }),
-                "an index is already running; wait for it to finish".into(),
+                "an index of this vault is already running; wait for it to finish".into(),
             ));
         }
-        // Reap the previous one, whose thread has ended.
-        if let Some((_, h)) = run.take() {
-            let _ = h.join();
-        }
-        // A cancellation asked for before this run began belongs to nothing.
-        // Here rather than per request: with searches answered *during* a run,
-        // rearming on every message would clear a cancellation already asked for.
-        interrupt::rearm();
+        // Fresh, so there is no stale cancellation to clear — which is what the
+        // old global flag needed a `rearm` step for.
+        let stop = Arc::new(Cancel::default());
 
         let reports = watch(&mut j, sender, &req.id);
         let me = Arc::clone(self);
         let sender = sender.clone();
         let id = req.id.clone();
+        let vault = plan.vault.clone();
+        let mine = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            let done = me.run(plan, &mut j);
+            let done = me.run(plan, &mut j, &mine);
             // The queue is closed and drained *before* the reply, in that order.
             // Reports go out on their own thread, so a reply sent straight to the
             // transport could otherwise overtake ones still queued — and "the
@@ -455,12 +477,12 @@ impl Server {
             let _ = reports.join();
             let _ = sender.send(replied(id, done, &mut j).into());
         });
-        *run = Some((req.id.clone(), handle));
+        runs.insert(vault, Run { id: req.id.clone(), stop, handle });
         Ok(())
     }
 
     /// The run itself, on the worker.
-    fn run(&self, plan: Plan, j: &mut Journal) -> Result<serde_json::Value> {
+    fn run(&self, plan: Plan, j: &mut Journal, stop: &Cancel) -> Result<serde_json::Value> {
         let Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve } = plan;
         let mut done = serde_json::Map::new();
 
@@ -485,7 +507,7 @@ impl Server {
                 (Some(s), false) => Lend::IfShort(&s.model),
                 (None, _) => Lend::Own,
             };
-            let out = cmd_index(&vault, full, rehash, want, &cfg, j, lend)?;
+            let out = cmd_index(&vault, full, rehash, want, &cfg, j, lend, stop)?;
             for r in &mut j.remarks[mark..] {
                 r.target = Some("semantic");
             }
@@ -515,7 +537,7 @@ impl Server {
             let mark = j.remarks.len();
             prepare_lang(&lang, j)?;
             let report =
-                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, j)?;
+                cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, j, stop)?;
             for r in &mut j.remarks[mark..] {
                 r.target = Some("lexical");
             }
@@ -533,18 +555,26 @@ impl Server {
     /// protocol carries one, and honouring it is what makes a late cancellation
     /// — arriving after its run already answered — do nothing instead of
     /// stopping the next one.
+    /// Found by id across every vault, and it stops **that** run: each carries its
+    /// own flag, so a cancellation on one vault leaves the others running.
     fn cancel(&self, params: &serde_json::Value) {
         let Some(asked) = params.get("id") else { return };
         let Ok(asked) = serde_json::from_value::<RequestId>(asked.clone()) else { return };
-        if lock(&self.run).as_ref().is_some_and(|(id, h)| *id == asked && !h.is_finished()) {
-            interrupt::request();
+        if let Some(r) = lock(&self.run).values().find(|r| r.id == asked && !r.handle.is_finished())
+        {
+            r.stop.request();
         }
     }
 
-    /// Wait for the run in flight, so its reply goes out before we do.
+    /// Wait for every run in flight, so their replies go out before we do.
+    ///
+    /// Drained before joining rather than joined under the lock: a worker takes
+    /// the `semantic` lock and this thread would be holding `run`, which is the
+    /// one pairing the "at most one lock at a time" rule exists to prevent.
     fn join(&self) {
-        if let Some((_, h)) = lock(&self.run).take() {
-            let _ = h.join();
+        let runs: Vec<Run> = lock(&self.run).drain().map(|(_, r)| r).collect();
+        for r in runs {
+            let _ = r.handle.join();
         }
     }
 
@@ -564,7 +594,7 @@ impl Server {
             "semantic": models,
             "lexical": lexical,
             "loaded": lock(&self.semantic).len(),
-            "indexing": self.indexing(),
+            "indexing": self.indexing(&vault),
         }))
     }
 }

@@ -646,9 +646,58 @@ fn one_model_serves_several_vaults_and_outlives_all_but_the_last() {
     s.close();
 }
 
-/// One run at a time, refused rather than queued: a second is nearly always the
-/// same work again, and a client firing on every save must coalesce anyway.
-/// Labelled, so it can tell this from a failure and simply wait.
+/// Vaults index independently. A rebuild of one must not refuse a reindex of
+/// another — they share no index, and the run slot is per vault for that reason.
+#[test]
+fn indexing_one_vault_does_not_block_another() {
+    let a = vault("busy-a", 3000);
+    let b = vault("busy-b", 400);
+    let mut s = Session::indexing(&a, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "index",
+                    "params": { "vault": b, "mode": "lexical", "full": true } }));
+
+    // b is small, so it finishes first — which is the point: it did not wait.
+    let first = s.reply();
+    assert_eq!(first["id"], 8, "the second vault ran rather than being refused: {first:?}");
+    assert!(first.get("result").is_some(), "{first:?}");
+    assert_eq!(s.reply()["id"], 7, "and the first still finishes");
+    s.close();
+}
+
+/// Cancelling one vault's run must leave the other's alone.
+///
+/// This is the half a **global** stop flag would get wrong, and silently: with
+/// one `AtomicBool` for the process, `$/cancelRequest` for vault A stopped
+/// vault B's run too, and B would answer `-32800` for something nobody
+/// cancelled. Each run owns its own flag.
+#[test]
+fn cancelling_one_vault_leaves_another_running() {
+    let a = vault("cancel-a", 3000);
+    let b = vault("cancel-b", 3000);
+    let mut s = Session::indexing(&a, 7);
+    s.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "index",
+                    "params": { "vault": b, "mode": "lexical", "full": true } }));
+    s.send(&json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 7 } }));
+
+    let mut by_id = std::collections::HashMap::new();
+    for _ in 0..2 {
+        let m = s.reply();
+        by_id.insert(m["id"].as_i64().unwrap(), m);
+    }
+    assert_eq!(by_id[&7]["error"]["data"]["kind"], "cancelled", "a was asked to stop");
+    assert!(
+        by_id[&8].get("result").is_some(),
+        "b was not, and must have finished: {:?}",
+        by_id[&8]
+    );
+    assert!(b.join(".org-semantic").join("lexical.json").exists(), "b really wrote its index");
+    assert!(!a.join(".org-semantic").join("lexical.json").exists(), "and a really did not");
+    s.close();
+}
+
+/// One run at a time **per vault**, refused rather than queued: a second is
+/// nearly always the same work again, and a client firing on every save must
+/// coalesce anyway. Labelled, so it can tell this from a failure and simply wait.
 #[test]
 fn a_second_index_is_refused_while_one_runs() {
     let v = vault("busy", 3000);
