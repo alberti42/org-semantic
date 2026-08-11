@@ -622,6 +622,36 @@ mod tests {
         assert!(!deliver(false, false, Duration::ZERO), "and not before");
     }
 
+    /// The size the all-or-nothing guarantee depends on.
+    ///
+    /// A pipe write of at most `PIPE_BUF` either goes entirely or not at all, so
+    /// a report is delivered or dropped and never half-sent. Above that limit a
+    /// write can go short, and half a frame desynchronises the client for good —
+    /// the tail is finished blocking for exactly that reason, but on a pipe that
+    /// branch should be unreachable.
+    ///
+    /// Nothing in `Progress` is user text, so the message is small and of fixed
+    /// shape. This is here so that stays true: add a path or a message to it and
+    /// this fails rather than the guarantee quietly evaporating.
+    #[test]
+    fn a_report_fits_in_one_atomic_write() {
+        // Every optional field present, every number at its widest.
+        let p = Progress::new("semantic", "download", "chunks", usize::MAX, 99999.999999)
+            .of(usize::MAX)
+            .tokens(usize::MAX, usize::MAX)
+            .maybe_sized(Some(u64::MAX))
+            .last();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "method": "$/progress",
+            "params": { "token": u64::MAX, "value": p },
+        }))
+        .unwrap();
+        let framed = format!("Content-Length: {}\r\n\r\n", body.len()).len() + body.len();
+        // 512 is the POSIX floor for `PIPE_BUF`; macOS is exactly that, Linux
+        // more. Hold to the floor so this is not a claim about one platform.
+        assert!(framed < 512, "a report of {framed} bytes can be written in halves");
+    }
+
     /// A pipe nobody is reading, which is what a wedged editor looks like from
     /// this side. The write must come back rather than wait, and must say which
     /// of the two things happened — no room, or nobody there.
