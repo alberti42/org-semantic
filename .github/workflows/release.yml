@@ -23,10 +23,27 @@ name: Release
 # it either: Rosetta translates x86_64, and there is no x86_64 binary to
 # translate.
 
+# **Runnable by hand, and that is how to test it.**  A tag-triggered workflow
+# tested by tagging leaves a tag behind pointing at whatever failed, and the
+# parts most likely to fail -- signing, notarization -- are also the slowest and
+# the last to run.  `workflow_dispatch` builds, signs and notarizes exactly as a
+# tag would, and stops before publishing anything: the `release` job is the only
+# one that does not run.  Nothing is created, so a failed dry run costs minutes
+# and leaves no tag, no release and no tidying up.
+#
+# Dispatch it against the `Unreleased` section, which is the honest thing to
+# build against before a release is cut -- and tests the changelog extractor at
+# the same time.
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      section:
+        description: 'Changelog section to build against ("Unreleased" for a dry run)'
+        default: 'Unreleased'
+        required: true
 
 permissions:
   contents: write
@@ -48,29 +65,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: What is being built
+        id: what
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "section=${{ inputs.section }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "section=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
       - name: The tag is the release, and the elisp must say so
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           ELISP=$(sed -n 's/^(defconst org-semantic-version "\(.*\)".*/\1/p' lisp/org-semantic.el)
           MIN=$(sed -n 's/^(defconst org-semantic-minimum-binary-version "\(.*\)".*/\1/p' lisp/org-semantic.el)
-          echo "tag=$TAG  elisp=$ELISP  binary=$CARGO  needs>=$MIN"
-          test "$TAG" = "$ELISP" || {
-            echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+          echo "elisp=$ELISP  binary=$CARGO  needs>=$MIN"
           # A minimum above the binary being shipped is unsatisfiable: every user
-          # of this release would be warned by the release itself.
+          # of this release would be warned by the release itself.  Checked on a
+          # dry run too, since it is a property of the tree rather than the tag.
           printf '%s\n%s\n' "$MIN" "$CARGO" | sort -C -V || {
             echo "::error::this package needs a binary >= $MIN but ships $CARGO"; exit 1; }
+          # Only a tag claims to be a release, so only a tag has to match one.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            test "$TAG" = "$ELISP" || {
+              echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+          fi
       # The changelog is the only place release prose lives.  A second copy per
       # tag would drift from it, which is how the README and the manual drifted
       # the first time a tagline changed.
       - name: Take the release body out of the changelog
+        env:
+          SECTION: ${{ steps.what.outputs.section }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           # Stops at the next version heading, and at the link-reference block
           # the format keeps at the foot of the file — which follows the last
           # section and would otherwise be published as part of it.
-          awk -v v="$TAG" '
+          awk -v v="$SECTION" '
             $0 ~ "^## \\[" v "\\]"  { inside = 1; next }
             inside && /^## \[/      { exit }
             inside && /^\[.*\]: /   { exit }
@@ -79,7 +109,7 @@ jobs:
           # A heading that is still `[Unreleased]` at tag time means the release
           # was never cut; an empty body would publish silently, so it fails.
           test -s body.md || {
-            echo "::error::CHANGELOG.md has no '## [$TAG]' section — move [Unreleased] into one"
+            echo "::error::CHANGELOG.md has no '## [$SECTION]' section — move [Unreleased] into one"
             exit 1; }
           cat body.md
       - uses: actions/upload-artifact@v4
@@ -217,8 +247,12 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
+  # The only job a dry run does not do.  Everything expensive and everything
+  # touching credentials has already happened above; this is the step that
+  # creates something, so it is the step a test must not reach.
   release:
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
