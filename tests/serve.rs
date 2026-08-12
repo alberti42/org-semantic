@@ -1139,3 +1139,38 @@ fn the_download_directory_can_be_moved_and_the_move_is_visible() {
         "ours replaces XDG_CACHE_HOME rather than losing to it: {said}"
     );
 }
+
+/// `lang:` is refused by the semantic side in **both** directions, through the
+/// server as well as the command line.
+///
+/// This is here rather than beside the parser tests because that is where it
+/// went wrong: the CLI's copy of the check learned about `-lang:` and the
+/// server's did not, so a negated language through an editor was parsed,
+/// silently ignored — the semantic index records no language for
+/// `Filters::matches` to consult — and answered as though the exclusion had
+/// applied. Both now call `Filters::wants_language`, and this test is what says
+/// the server's path is covered.
+///
+/// Offline: the refusal happens before any index or model is touched, so a vault
+/// with nothing built reaches it.
+#[test]
+fn a_negated_language_is_refused_by_the_semantic_side_too() {
+    let v = vault("negated-lang", 2);
+    let msgs = talk(
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "search",
+                    "params": { "vault": v, "query": "-lang:en atoms" } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "search",
+                    "params": { "vault": v, "query": "lang:en atoms" } }),
+        ],
+        None,
+    );
+    for id in [1, 2] {
+        let reply = msgs.iter().find(|m| m["id"] == id).expect("a reply");
+        let message = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("lang:"),
+            "id {id} must be refused for naming a language, not answered: {reply:?}"
+        );
+    }
+}

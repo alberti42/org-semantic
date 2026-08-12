@@ -390,7 +390,13 @@ impl Server {
             return Ok(answer(hits_json(&vault, &hits, lim, merge, None)));
         }
 
-        if !f.langs.is_empty() {
+        // Negated as well as plain, and this was missed once: the CLI's copy of
+        // this check grew `not_langs` and the server's did not, so `-lang:en`
+        // through an editor was parsed, ignored -- the semantic index records no
+        // language for `Filters::matches` to consult -- and answered as though
+        // the exclusion had been applied.  A predicate that does nothing looks
+        // exactly like one that found nothing to remove.
+        if f.wants_language() {
             return Err(anyhow!("lang: narrows the lexical index only"));
         }
         let s = self.semantic(&vault, want)?;

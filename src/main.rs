@@ -2474,6 +2474,16 @@ impl Filters {
             && self.not_langs.is_empty()
     }
 
+    /// Does this query ask about a language, in either direction?
+    ///
+    /// One function because there were two copies of the question and they
+    /// drifted: the CLI's grew `not_langs` and `serve`'s did not, so `-lang:en`
+    /// from an editor was accepted and then ignored.  Anything lang-shaped added
+    /// later is answered here or nowhere.
+    fn wants_language(&self) -> bool {
+        !self.langs.is_empty() || !self.not_langs.is_empty()
+    }
+
     fn matches(&self, c: &Chunk) -> bool {
         if !self.tags.iter().all(|t| c.tags.iter().any(|x| x.eq_ignore_ascii_case(t))) {
             return false;
@@ -4811,9 +4821,7 @@ fn cmd_search(
     // A language is a stemmer's business, and an embedding is not stemmed.  The
     // semantic index therefore records no language, so this predicate could only
     // ever match nothing — better said than silently returned.
-    // Negated too: `-lang:de` could only ever exclude nothing, which reads as
-    // having worked.
-    if !f.langs.is_empty() || !f.not_langs.is_empty() {
+    if f.wants_language() {
         return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
     }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&ix.chunks[i])).collect();
