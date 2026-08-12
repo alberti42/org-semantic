@@ -169,32 +169,31 @@ impl Server {
         // download with its size, and has a budget measured in hours. Fetching
         // is a thing you ask for, not a thing a query does to you.
         //
-        // **`weight_bytes` is a proxy, and it is the right one because of which
-        // way it is wrong.** What hf-hub stores is a whole snapshot — the ONNX
-        // files, a `tokenizer.json`, some small configs — and this sums only the
-        // `.onnx*` part, which is 127 MB of the 128 for `bge-small-en`. So a
-        // torn cache holding the weights but not the tokenizer passes here and
-        // fetches a little on the loop: seconds, not minutes.
+        // **`weights_cached` and not `weight_bytes`, and the difference is a
+        // download already in flight.** Summing the `.onnx*` bytes answers yes to
+        // *any* of them, and `e5-large` is a 546 kB `model.onnx` beside a 2.2 GB
+        // `model.onnx_data` fetched after it. For the minutes between the two, a
+        // byte count calls that cached, this check passes, and the query walks
+        // into `model_with` — where hf-hub finds the second file missing, cannot
+        // take the flock the running index holds, retries five times a second
+        // apart and fails (hf-hub sync.rs:86-100, 810-818). No second download,
+        // because that lock is exactly what prevents one — but five seconds of
+        // the loop, spent to arrive at an error with no `kind` on it.
         //
-        // Being wrong the other way would be far worse, because the refusal is
-        // **not self-correcting**. `index` does not populate `Server::models` —
-        // it takes `Lend::Own` and drops its model — so a search that refuses
-        // wrongly refuses again after the very run it asked for, and forever.
-        // Any tightening here must keep that bias: say "missing" only when the
-        // big artifact is genuinely absent, which is the case that costs
-        // minutes.
+        // It still cannot be exact, and the residue is the tokenizer: `ModelInfo`
+        // names the ONNX artifacts alone, while the four files fastembed also
+        // fetches are hardcoded in its loader (common.rs:44-48) and appear in no
+        // metadata. A cache holding the weights but not `tokenizer.json`
+        // therefore passes and fetches ~17 MB on the loop. Seconds, not minutes,
+        // and closing it would mean curating those four names — the one thing
+        // this path refuses, since they are fastembed's to change.
         //
-        // And there is no exact check to be had cheaply, which is worth knowing
-        // before reaching for one. `ModelInfo` names the ONNX artifacts alone —
-        // `model_file` and `additional_files`, which is exactly what
-        // `download_size` walks — while the four files fastembed also fetches
-        // are hardcoded in its own loader (`tokenizer.json`, `config.json`,
-        // `special_tokens_map.json`, `tokenizer_config.json`, common.rs:44-48)
-        // and appear in no metadata. So enumerating `ModelInfo` would check the
-        // same set this already sums, by a longer route; being exact would mean
-        // curating those four names, which is the thing `download_size`
-        // deliberately does not do.
-        if weight_bytes(m).is_none() {
+        // Whatever is done here, **keep the bias**: this must fail towards
+        // "cached". The refusal is not self-correcting — `index` takes
+        // `Lend::Own` and never populates `Server::models` — so a search that
+        // says "missing" about a model that is present says it again after the
+        // very run it asked for, and for ever.
+        if !weights_cached(m) {
             return Err(fault(
                 "model-missing",
                 serde_json::json!({ "target": "semantic", "model": m.name,
@@ -714,7 +713,7 @@ impl Server {
                                     // search will then refuse rather than fetch.
                                     // Said here so a client can offer to fetch
                                     // before someone asks and is turned down.
-                                    "cached": weight_bytes(m).is_some() })
+                                    "cached": weights_cached(m) })
             })
             .collect();
         let lexical = lexical::stored_key(&state_dir(&vault)).is_some();

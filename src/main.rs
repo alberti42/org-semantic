@@ -5029,6 +5029,51 @@ fn weight_bytes(m: &'static Model) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
+/// Whether every weights file fastembed will ask for is already on disk.
+///
+/// **Not the same question as `weight_bytes`, and the difference is a download
+/// in progress.** That one sums the `.onnx*` bytes it can find, so *any* of them
+/// makes it answer yes — and `e5-large` is `model.onnx` at 546 kB beside
+/// `model.onnx_data` at 2.2 GB, fetched one after the other. Between them, the
+/// small one is on disk and the large one is minutes away, and a check that only
+/// weighed the bytes would call that cached.
+///
+/// The file names come from fastembed's own `ModelInfo`, so this asks rather
+/// than curates, and they are exactly the names hf-hub writes the snapshot
+/// pointer under: it renames the temp file into `blobs/` and only then creates
+/// `snapshots/<rev>/<name>` (hf-hub sync.rs:817-828), so a pointer that exists
+/// is a file that finished. `exists` follows the symlink, which is what makes a
+/// dangling one read as absent.
+///
+/// Fails **open** on anything it cannot work out — no metadata, no cache root,
+/// an unreadable directory — because a wrong "yes" costs a load that blocks
+/// briefly and a wrong "no" refuses a search that would have worked.
+fn weights_cached(m: &Model) -> bool {
+    let Some(info) =
+        TextEmbedding::list_supported_models().into_iter().find(|i| i.model == m.which)
+    else {
+        return true;
+    };
+    let Ok(root) = model_cache_root(m) else { return true };
+    let wanted: Vec<&String> =
+        std::iter::once(&info.model_file).chain(info.additional_files.iter()).collect();
+    all_present(&root.join("snapshots"), &wanted)
+}
+
+/// Whether each of FILES exists under some revision in SNAPS.
+///
+/// Its own function so the partial-download case can be tested without a
+/// gigabyte in the cache — the same reason `onnx_bytes` is one.
+///
+/// "Some revision" rather than "one revision": a re-upload leaves two, and
+/// spreading the answer across them errs towards saying yes, which is the
+/// direction this is allowed to be wrong in.
+fn all_present(snaps: &Path, files: &[&String]) -> bool {
+    let Ok(entries) = fs::read_dir(snaps) else { return false };
+    let revs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    !revs.is_empty() && files.iter().all(|f| revs.iter().any(|r| r.join(f.as_str()).exists()))
+}
+
 fn find_tokenizer(m: &Model) -> Result<PathBuf> {
     let snaps = model_cache_root(m)?.join("snapshots");
     for e in fs::read_dir(&snaps).with_context(|| format!("reading {}", snaps.display()))? {
@@ -6830,6 +6875,46 @@ mod tests {
             "both weight files, and nothing that is not one"
         );
         assert_eq!(onnx_bytes(&root.join("nonesuch")), 0, "an absent cache is nought, not a panic");
+    }
+
+    /// A model half-downloaded is not a model, and byte counts cannot say so.
+    ///
+    /// `e5-large` is a 546 kB `model.onnx` followed by a 2.2 GB
+    /// `model.onnx_data`. For the minutes between them the small one is on disk
+    /// and the large one is not, and anything weighing the bytes calls that
+    /// cached — which sends a search into hf-hub to contend for the flock the
+    /// running index is holding, and to spend five seconds of the loop failing.
+    #[test]
+    fn a_half_downloaded_model_is_not_cached() {
+        let root = scratch("partial");
+        let snaps = root.join("snapshots");
+        let snap = snaps.join("abc123");
+        fs::create_dir_all(&snap).unwrap();
+        let small = "model.onnx".to_string();
+        let large = "model.onnx_data".to_string();
+
+        fs::write(snap.join(&small), vec![0u8; 546]).unwrap();
+        assert!(all_present(&snaps, &[&small]), "the file it asked for is here");
+        assert!(!all_present(&snaps, &[&small, &large]), "and the one still coming is not");
+
+        fs::write(snap.join(&large), vec![0u8; 2200]).unwrap();
+        assert!(all_present(&snaps, &[&small, &large]), "both, once the second lands");
+
+        // An empty or absent cache is "no", and neither is a panic.  Note this is
+        // the one direction the caller must not be wrong in, so `weights_cached`
+        // turns an unreadable *root* into "yes" rather than coming here at all.
+        assert!(!all_present(&root.join("nonesuch"), &[&small]));
+        fs::create_dir_all(root.join("empty")).unwrap();
+        assert!(!all_present(&root.join("empty"), &[&small]), "no revisions is not cached");
+
+        // A dangling pointer reads as absent: hf-hub writes the blob first and
+        // links to it after, so a link with nothing behind it is a file that
+        // never finished.
+        let dangling = snaps.join("def456");
+        fs::create_dir_all(&dangling).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), dangling.join("model.onnx")).unwrap();
+        fs::remove_file(snap.join(&small)).unwrap();
+        assert!(!all_present(&snaps, &[&small]), "a link to nothing is not a file");
     }
 
     /// A chunk table is summed rather than guessed at from the count, so the
