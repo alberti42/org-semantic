@@ -374,11 +374,32 @@ Emacs is started from a shell; a daemon started by =launchd= or systemd is not,
 and needs it in the plist or unit file, or here.
 
 ~org-semantic-config~ is the one worth care. It is [[#what-gets-indexed][the same policy]] the command
-line passes with =--config=, written as a plist instead of a JSON file, so arrays
-must be *vectors*:
+line passes with =--config=, and it holds the policy *itself*, not the name of a
+file --- the same object =config.example.json= contains, written as a plist. The
+key names are the JSON ones, so they keep their underscores.
 
+Three Lisp values need care, because JSON has three things that all spell
+themselves =nil= in Emacs: an array is a *vector*, false is ~:json-false~, and
+=nil= means JSON =null=, which the server will not parse. A list where a vector
+belongs is the mistake to expect.
+
+This is the whole of the default policy --- the plist form of
+=config.example.json=. Copy it and edit, as you would the file:
+
+#+name: config-plist
 #+begin_src emacs-lisp
-(setq org-semantic-config '(:languages ["en-US" "de-DE"] :fold_diacritics t))
+(setq org-semantic-config
+      '(:languages ["en-US"]
+        :fold_diacritics :json-false
+        :blocks (:src     (:semantic "placeholder" :lexical t)
+                 :example (:semantic "placeholder" :lexical t)
+                 :results (:semantic :json-false   :lexical t)
+                 :quote   (:semantic t             :lexical t)
+                 :verse   (:semantic t             :lexical t))
+        :planning_line (:semantic :json-false :lexical t)
+        :chunk (:semantic_tokens 350 :lexical_chars 1500)
+        :exclude_tagged ["noexport" "ARCHIVE"]
+        :todo_keywords ["TODO" "DONE"]))
 #+end_src
 
 It is sent with searches as well as with indexing, so that an index built under
@@ -386,9 +407,17 @@ older settings fails the search rather than answering from passages split by
 rules you no longer hold. The buffer then offers to rebuild, to search it anyway,
 or to show what moved --- once, not on every keystroke.
 
-It is compared *whole*: a partial policy reads as a change to everything it
-leaves out. Leave it =nil= --- the default --- and the index is searched as it
-stands, which is what the command line does and is never wrong.
+*A setting you leave out is not left alone --- it takes its default.* The policy
+is read whole, so ~(:languages ["de-DE"])~ does not mean "German, and everything
+else as before": it means German with every other setting at the value above. If
+you indexed with =--config= and a file, say the same thing here, or the search
+will report drift on the settings you did not repeat.
+
+An unknown key is an error rather than an ignored one, for the reason a mistyped
+flag is: a setting that does nothing looks exactly like a typo that does nothing.
+
+Leave it =nil= --- the default --- and the index is searched as it stands, which
+is what the command line does and is never wrong.
 
 The buffer's ten faces are under ~M-x customize-group RET org-semantic-results~.
 They inherit from stock faces, so a theme reaches them without being told about

@@ -99,6 +99,45 @@ is minutes, so a second `C-u' has to be the expensive one."
   (should (equal (org-semantic--reindex-flags '-) '(t . nil))))
 
 
+;;;; The policy, as the manual writes it
+
+(ert-deftest the-documented-policy-is-exactly-the-defaults ()
+  "The plist in the manual must serialise to `config.example.json'.
+
+Read out of the manual rather than restated here, because a
+drifted *document* is the failure -- someone copies it, sends a
+policy that is not the defaults, and every search reports drift
+against an index built without one.  The Rust side guards the JSON
+example the same way.
+
+It also catches the Lisp trap: JSON's array, false and null all
+spell themselves `nil' in Emacs, and a list where a vector belongs
+serialises to something the server will not parse."
+  (let ((manual (expand-file-name "docs/manual.org" org-semantic-tests--root)))
+    (unless (file-readable-p manual) (ert-skip "no manual"))
+    (with-temp-buffer
+      (insert-file-contents manual)
+      (goto-char (point-min))
+      (should (re-search-forward "^#\\+name: config-plist\n#\\+begin_src emacs-lisp\n" nil t))
+      (let* ((start (point))
+             (end (progn (should (re-search-forward "^#\\+end_src" nil t))
+                         (match-beginning 0)))
+             (form (car (read-from-string (buffer-substring start end))))
+             ;; (setq org-semantic-config 'PLIST) -- take the PLIST.
+             (plist (cadr (nth 2 form)))
+             (encoded (json-serialize plist :false-object :json-false :null-object nil))
+             (parse (lambda (s) (json-parse-string s :object-type 'alist :array-type 'list))))
+        (should (eq (nth 0 form) 'setq))
+        (should (eq (nth 1 form) 'org-semantic-config))
+        (should (equal (funcall parse encoded)
+                       (funcall parse
+                                (with-temp-buffer
+                                  (insert-file-contents
+                                   (expand-file-name "config.example.json"
+                                                     org-semantic-tests--root))
+                                  (buffer-string)))))))))
+
+
 ;;;; Which binary gets run
 
 (ert-deftest a-binary-in-the-install-directory-needs-no-configuration ()
