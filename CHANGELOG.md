@@ -53,7 +53,9 @@ is read-only by design for now.
 
 - **Apple Silicon only on macOS.** `ort` publishes no prebuilt ONNX Runtime for
   `x86_64-apple-darwin`, so an Intel build does not link. Rosetta does not help:
-  there is no x86_64 binary for it to translate.
+  there is no x86_64 binary for it to translate. The manual sketches an untested
+  workaround — link against a Homebrew ONNX Runtime — at the cost of the binary
+  no longer being self-contained.
 - The Windows binary starts and answers `--version` and `models` in CI, and
   nothing beyond that has been tried on it — no indexing, no searching.
 - Nothing is interruptible while a model downloads — that wait has no unit

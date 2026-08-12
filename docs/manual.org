@@ -107,6 +107,53 @@ system-wide, no package manager. The default embedding model downloads by itself
 the first time you index, into =$XDG_CACHE_HOME/fastembed= --- or wherever
 =ORG_SEMANTIC_CACHE_HOME= points, see [[#what-it-writes][What it writes]].
 
+Prebuilt binaries are on the [[https://github.com/alberti42/org-semantic/releases][releases page]] for Apple Silicon macOS, Linux
+(x86_64 and arm64) and Windows. The macOS one is Developer ID signed and
+notarized. Unpack it and put =org-semantic= on your =PATH=.
+
+** Intel macOS
+:PROPERTIES:
+:CUSTOM_ID: intel-macos
+:END:
+
+*There is no Intel macOS build, and =cargo build= will not make you one.* The
+ONNX Runtime this links against is fetched as a prebuilt library by [[https://github.com/pykeio/ort][ort]], and ort
+publishes none for =x86_64-apple-darwin=. The build stops with:
+
+#+begin_example
+error: ort-sys@2.0.0-rc.13: no prebuilt binaries available for target x86_64-apple-darwin
+#+end_example
+
+Rosetta is not a way round it --- it translates x86_64 binaries, and there is no
+x86_64 binary to translate.
+
+There is a workaround, which is *not tested here* and is offered as a starting
+point rather than a supported path: install ONNX Runtime yourself and tell ort
+to link against it instead of downloading one.
+
+#+begin_src sh
+brew install onnxruntime
+ORT_LIB_LOCATION="$(brew --prefix onnxruntime)/lib" \
+ORT_PREFER_DYNAMIC_LINK=1 \
+  cargo build --release
+#+end_src
+
+Two things to know before you try it. =ORT_LIB_LOCATION= must point at the
+=lib/= subdirectory and not at the prefix, or you get a different and more
+confusing error about not being able to link to the build; and
+=ORT_PREFER_DYNAMIC_LINK=1= is required, since without it ort still attempts a
+static link that the Homebrew keg does not provide.
+
+*What you get is no longer one self-contained binary.* It loads
+=libonnxruntime.dylib= from wherever Homebrew put it, so it breaks if that is
+upgraded or removed, and it is not something you can copy to another machine.
+That is the reason this is a hint and not the build we ship.
+
+The recipe comes from [[https://github.com/headroomlabs-ai/headroom/pull/1797][headroomlabs-ai/headroom#1797]], which hit the same wall.
+Note that their version also sets =ORT_STRATEGY=system=, which does nothing
+here: that variable belonged to an older ort and the version pinned in this
+project no longer reads it. =ORT_LIB_LOCATION= is what does the work.
+
 * Use
 :PROPERTIES:
 :CUSTOM_ID: use
