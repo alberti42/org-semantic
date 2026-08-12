@@ -602,7 +602,8 @@ notes by meaning, and a lexical one, which finds them by word.
          term must match; --any matches notes carrying any of them.
          Phrases, AND/OR/NOT and parentheses follow tantivy's query
          syntax.  A query may carry predicates:
-           tag:x  -tag:x  dir:x  todo:x  lang:x   (lang: is lexical only)
+           tag:x  dir:x  todo:x  lang:x, and any of them negated with a
+           leading -   (lang: is lexical only)
 
   chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
          A dry run of `index`: how notes would be split, and what a
@@ -2447,10 +2448,17 @@ struct Filters {
     not_tags: Vec<String>,
     /// Any may match: `dir:` names alternative subtrees to look in.
     dirs: Vec<String>,
+    /// None may match.  **Every predicate negates**, and it is not symmetry for
+    /// its own sake: a leading `-` was stripped from any of them and then only
+    /// `tag` looked at it, so `-dir:archive` narrowed *to* the archive — the
+    /// exact opposite of what was asked, silently.
+    not_dirs: Vec<String>,
     todos: Vec<String>,
+    not_todos: Vec<String>,
     /// Language codes; any may match.  `lang:de` matches `de-DE`, so a query
     /// need not know the regional variant a note declared.
     langs: Vec<String>,
+    not_langs: Vec<String>,
     text: String,
 }
 
@@ -2459,8 +2467,11 @@ impl Filters {
         self.tags.is_empty()
             && self.not_tags.is_empty()
             && self.dirs.is_empty()
+            && self.not_dirs.is_empty()
             && self.todos.is_empty()
+            && self.not_todos.is_empty()
             && self.langs.is_empty()
+            && self.not_langs.is_empty()
     }
 
     fn matches(&self, c: &Chunk) -> bool {
@@ -2478,7 +2489,17 @@ impl Filters {
         {
             return false;
         }
+        if self
+            .not_todos
+            .iter()
+            .any(|t| c.todo.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(t)))
+        {
+            return false;
+        }
         if !self.dirs.is_empty() && !self.dirs.iter().any(|d| under(&c.path, d)) {
+            return false;
+        }
+        if self.not_dirs.iter().any(|d| under(&c.path, d)) {
             return false;
         }
         true
@@ -2525,12 +2546,15 @@ fn parse_query(q: &str) -> Filters {
         match body.split_once(':') {
             Some((k, v)) if KEYS.contains(&k.to_ascii_lowercase().as_str()) && !v.is_empty() => {
                 let v = v.trim_matches('"').to_string();
-                match k.to_ascii_lowercase().as_str() {
-                    "tag" if neg => f.not_tags.push(v),
-                    "tag" => f.tags.push(v),
-                    "dir" => f.dirs.push(v),
-                    "lang" => f.langs.push(v),
-                    _ => f.todos.push(v),
+                match (k.to_ascii_lowercase().as_str(), neg) {
+                    ("tag", true) => f.not_tags.push(v),
+                    ("tag", false) => f.tags.push(v),
+                    ("dir", true) => f.not_dirs.push(v),
+                    ("dir", false) => f.dirs.push(v),
+                    ("lang", true) => f.not_langs.push(v),
+                    ("lang", false) => f.langs.push(v),
+                    (_, true) => f.not_todos.push(v),
+                    (_, false) => f.todos.push(v),
                 }
             }
             _ => text.push(tok),
@@ -2575,7 +2599,7 @@ mod lexical {
     use std::collections::HashMap;
     use std::path::Path;
     use tantivy::collector::TopDocs;
-    use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+    use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
     use tantivy::schema::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
         TEXT,
@@ -2909,6 +2933,9 @@ mod lexical {
         for t in &f.todos {
             clauses.push((Occur::Must, term(fl.todo, t)));
         }
+        for t in &f.not_todos {
+            clauses.push((Occur::MustNot, term(fl.todo, t)));
+        }
         if !f.langs.is_empty() {
             let any: Vec<(Occur, Box<dyn Query>)> = f
                 .langs
@@ -2917,6 +2944,9 @@ mod lexical {
                 .collect();
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
         }
+        for l in &f.not_langs {
+            clauses.push((Occur::MustNot, term(fl.lang, &l.to_ascii_lowercase())));
+        }
         if !f.dirs.is_empty() {
             let any: Vec<(Occur, Box<dyn Query>)> = f
                 .dirs
@@ -2924,6 +2954,12 @@ mod lexical {
                 .map(|d| (Occur::Should, term(fl.dirs, d.trim_end_matches('/'))))
                 .collect();
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(any))));
+        }
+        // Each on its own, and `MustNot` rather than a negated `Should` group:
+        // the ancestor chain is indexed per chunk, so excluding a parent
+        // excludes everything under it without naming the children.
+        for d in &f.not_dirs {
+            clauses.push((Occur::MustNot, term(fl.dirs, d.trim_end_matches('/'))));
         }
         if !f.text.trim().is_empty() {
             // Every body field: a query's own language is unknown and too short
@@ -2943,6 +2979,15 @@ mod lexical {
         }
         if clauses.is_empty() {
             return Err(anyhow!("nothing to search for"));
+        }
+        // **A query of nothing but exclusions needs something to exclude from.**
+        // tantivy has no implicit universe: a boolean of `MustNot` alone matches
+        // no document, so `-todo:DONE` on its own answered with nothing where
+        // the semantic side answered with everything that is not done -- the two
+        // rankings disagreeing about the same predicate, which is the one thing
+        // a shared predicate must never do.
+        if !clauses.iter().any(|(occur, _)| matches!(occur, Occur::Must | Occur::Should)) {
+            clauses.push((Occur::Must, Box::new(AllQuery)));
         }
 
         let query = BooleanQuery::new(clauses);
@@ -4688,11 +4733,20 @@ fn describe_filters(f: &Filters) -> String {
     for d in &f.dirs {
         parts.push(format!("dir:{d}"));
     }
+    for d in &f.not_dirs {
+        parts.push(format!("-dir:{d}"));
+    }
     for t in &f.todos {
         parts.push(format!("todo:{t}"));
     }
+    for t in &f.not_todos {
+        parts.push(format!("-todo:{t}"));
+    }
     for l in &f.langs {
         parts.push(format!("lang:{l}"));
+    }
+    for l in &f.not_langs {
+        parts.push(format!("-lang:{l}"));
     }
     parts.join(" ")
 }
@@ -4757,7 +4811,9 @@ fn cmd_search(
     // A language is a stemmer's business, and an embedding is not stemmed.  The
     // semantic index therefore records no language, so this predicate could only
     // ever match nothing — better said than silently returned.
-    if !f.langs.is_empty() {
+    // Negated too: `-lang:de` could only ever exclude nothing, which reads as
+    // having worked.
+    if !f.langs.is_empty() || !f.not_langs.is_empty() {
         return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
     }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&ix.chunks[i])).collect();
@@ -7792,6 +7848,33 @@ mod tests {
         assert!(!f.matches(&chunk_with("a.org", &[], None)));
     }
 
+    /// A leading `-` was stripped from every predicate and read by only one of
+    /// them, so `-dir:archive` narrowed **to** the archive and `-todo:DONE`
+    /// narrowed to what was done — the opposite of the request, silently.
+    #[test]
+    fn every_predicate_negates_and_the_sign_is_not_dropped() {
+        let f = parse_query("-dir:archive x");
+        assert_eq!(f.not_dirs, vec!["archive"], "the sign reaches the right list");
+        assert!(f.dirs.is_empty(), "and not the positive one");
+        assert!(f.matches(&chunk_with("live/n.org", &[], None)));
+        assert!(!f.matches(&chunk_with("archive/n.org", &[], None)));
+        // Excluding a parent excludes what is under it.
+        assert!(!f.matches(&chunk_with("archive/2024/n.org", &[], None)));
+
+        let f = parse_query("-todo:done x");
+        assert_eq!(f.not_todos, vec!["done"]);
+        assert!(f.matches(&chunk_with("a.org", &[], Some("TODO"))), "case-insensitive");
+        assert!(!f.matches(&chunk_with("a.org", &[], Some("DONE"))));
+        assert!(f.matches(&chunk_with("a.org", &[], None)), "no keyword is not DONE");
+
+        // Both directions of the same key, and the quoted form still survives.
+        let f = parse_query("dir:\"03 Literature review\" -dir:\"03 Literature review/2023\" x");
+        assert_eq!(f.dirs, vec!["03 Literature review"]);
+        assert_eq!(f.not_dirs, vec!["03 Literature review/2023"]);
+        assert!(f.matches(&chunk_with("03 Literature review/2024/n.org", &[], None)));
+        assert!(!f.matches(&chunk_with("03 Literature review/2023/n.org", &[], None)));
+    }
+
     /// `dir:03 Lit` must not match `03 Literature review/…`.
     #[test]
     fn dir_matches_whole_components_only() {
@@ -7875,6 +7958,24 @@ mod tests {
         assert_eq!(hits[0].1.path, b);
         let hits = lexical::search(&dir, &parse_query("tag:physics Fuchs"), 10, true, &an).unwrap();
         assert!(hits.is_empty(), "predicate excludes the only textual match");
+
+        // Negation, on the side that has to agree with `Filters::matches`.
+        let hits = lexical::search(&dir, &parse_query("-tag:german Fuchs"), 10, true, &an).unwrap();
+        assert!(hits.is_empty(), "-tag: removes the note that matched");
+        let hits =
+            lexical::search(&dir, &parse_query("-tag:physics Fuchs"), 10, true, &an).unwrap();
+        assert_eq!(hits.len(), 1, "and leaves the one it does not name");
+        assert_eq!(hits[0].1.path, b);
+
+        // **A query of nothing but exclusions.**  tantivy has no implicit
+        // universe, so a boolean of `MustNot` alone matched no document — where
+        // `Filters::matches` returns everything not excluded.  The two rankings
+        // disagreeing about one predicate is the failure this guards.
+        let hits = lexical::search(&dir, &parse_query("-tag:german"), 10, true, &an).unwrap();
+        assert_eq!(hits.len(), 1, "everything not excluded, not nothing at all");
+        assert_eq!(hits[0].1.path, a);
+        let hits = lexical::search(&dir, &parse_query("-tag:nobody"), 10, true, &an).unwrap();
+        assert_eq!(hits.len(), 2, "excluding what nothing carries excludes nothing");
     }
 
     #[test]
