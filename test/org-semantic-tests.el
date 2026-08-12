@@ -99,6 +99,50 @@ is minutes, so a second `C-u' has to be the expensive one."
   (should (equal (org-semantic--reindex-flags '-) '(t . nil))))
 
 
+;;;; Which binary gets run
+
+(ert-deftest a-binary-in-the-install-directory-needs-no-configuration ()
+  "Unpack a release there and it is found, with nothing set.
+
+And a *directory* of that name is not mistaken for it:
+`file-executable-p' answers t for a directory, so the guard is
+`file-regular-p', and getting this wrong hands a directory to
+`make-process' as the program to run."
+  (org-semantic-tests--with-vault dir
+    (let* ((org-semantic-install-directory dir)
+           (org-semantic-executable "org-semantic")
+           (path (expand-file-name "org-semantic" dir)))
+      ;; Nothing there yet, and nothing on exec-path under this name.
+      (let ((exec-path nil))
+        (should-error (org-semantic--binary) :type 'user-error))
+      ;; A directory is not a binary.
+      (make-directory path)
+      (let ((exec-path nil))
+        (should-error (org-semantic--binary) :type 'user-error))
+      (delete-directory path)
+      ;; A file that is there and executable is.
+      (write-region "#!/bin/sh\n" nil path nil 'silent)
+      (set-file-modes path #o755)
+      (should (equal (org-semantic--binary) path)))))
+
+(ert-deftest an-absolute-executable-outranks-the-install-directory ()
+  "The one setting that says outright which binary to run wins.
+
+The install directory is searched before variable `exec-path' so a
+`cargo install' for shell use cannot quietly redirect Emacs; an
+absolute `org-semantic-executable' is the way to override that on
+purpose, so it has to come first."
+  (org-semantic-tests--with-vault dir
+    (let* ((installed (expand-file-name "org-semantic" dir))
+           (chosen (expand-file-name "elsewhere" dir)))
+      (dolist (path (list installed chosen))
+        (write-region "#!/bin/sh\n" nil path nil 'silent)
+        (set-file-modes path #o755))
+      (let ((org-semantic-install-directory dir)
+            (org-semantic-executable chosen))
+        (should (equal (org-semantic--binary) chosen))))))
+
+
 ;;;; Which binary this package will work with
 
 (ert-deftest a-binary-is-old-enough-or-it-is-not ()

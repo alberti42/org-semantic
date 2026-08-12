@@ -88,9 +88,35 @@ the other direction, which is what this catches.")
   :prefix "org-semantic-")
 
 (defcustom org-semantic-executable "org-semantic"
-  "The org-semantic binary, by name on variable `exec-path' or as a path."
+  "The org-semantic binary, by name on variable `exec-path' or as a path.
+
+An absolute path here wins over everything: it is the one setting
+that says outright which binary to run.  A bare name is looked for
+in `org-semantic-install-directory' first and on variable
+`exec-path' after."
   :type '(choice (string :tag "Name or path")
                  (file :tag "File" :must-match t)))
+
+(defcustom org-semantic-install-directory
+  (expand-file-name "org-semantic/" user-emacs-directory)
+  "Where org-semantic keeps a binary of its own, and looks for one first.
+
+Unpack a release here -- the file named `org-semantic' -- and
+nothing needs configuring; this is also where the installer will
+put one.
+
+*Outside the package manager's tree on purpose.* A straight or
+elpaca rebuild deletes and repopulates the package directory, which
+would take the binary out from under a server that is running from
+it.
+
+It is searched *before* variable `exec-path', so that installing a
+copy for shell use -- `cargo install' puts one on PATH -- cannot
+silently move Emacs onto a different build than the one it was
+given.  To run the one on PATH deliberately, either leave this
+directory empty or set `org-semantic-executable' to an absolute
+path."
+  :type 'directory)
 
 (defcustom org-semantic-cache-home nil
   "Where the server downloads its models, or nil to inherit the environment.
@@ -390,14 +416,33 @@ starting a second server or jumping the queue.")
        (jsonrpc-running-p org-semantic--connection)
        t))
 
+(defun org-semantic--installed-binary ()
+  "Return the binary under `org-semantic-install-directory', or nil.
+
+`file-regular-p' as well as `file-executable-p', because the latter
+says yes to a *directory* -- so a stray directory of that name would
+otherwise be handed to `make-process' as the program to run.  It
+follows symlinks, which is the point: linking a development build in
+here is how to test the installed path without installing anything."
+  (let ((path (expand-file-name (if (eq system-type 'windows-nt)
+                                    "org-semantic.exe"
+                                  "org-semantic")
+                                org-semantic-install-directory)))
+    (and (file-regular-p path) (file-executable-p path) path)))
+
 (defun org-semantic--binary ()
-  "Return the org-semantic binary, or signal an error naming what was looked for."
+  "Return the org-semantic binary, or signal an error naming what was looked for.
+
+Three places, in the order of how deliberately each was chosen: an
+absolute `org-semantic-executable', then our own install directory,
+then variable `exec-path'."
   (or (and (file-name-absolute-p org-semantic-executable)
            (file-executable-p org-semantic-executable)
            org-semantic-executable)
+      (org-semantic--installed-binary)
       (executable-find org-semantic-executable)
-      (user-error "No org-semantic binary: %s is not on exec-path"
-                  org-semantic-executable)))
+      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path"
+                  org-semantic-executable org-semantic-install-directory)))
 
 (defun org-semantic-binary-version ()
   "Return the version of the binary on disk, or nil if it will not say.

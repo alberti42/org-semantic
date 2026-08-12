@@ -301,6 +301,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | variable                             | default        | what it decides                                             |
 |--------------------------------------+----------------+-------------------------------------------------------------|
 | ~org-semantic-executable~            | =org-semantic= | the binary, by name on =exec-path= or as a path             |
+| ~org-semantic-install-directory~     | =~/.emacs.d/org-semantic/= | where a binary of its own is kept --- below     |
 | ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |
 | ~org-semantic-model~                 | =nil=          | which model, when a vault has several built                 |
 | ~org-semantic-index-mode~            | ="both"=       | which indexes =M-x org-semantic-reindex= builds             |
@@ -334,6 +335,25 @@ inside your query:
 Pressing it runs the index, which reports the download as it goes and then runs
 your search again by itself. =M-x org-semantic-show-status= says the same thing
 before you ask: a model it lists as not cached is one that would refuse.
+
+~org-semantic-install-directory~ is where org-semantic keeps a binary of its
+own, under your ~user-emacs-directory~. Unpack a release there --- the file
+named =org-semantic= --- and nothing needs configuring:
+
+#+begin_src sh
+mkdir -p ~/.config/emacs/org-semantic
+tar xzf org-semantic-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
+#+end_src
+
+It is deliberately outside your package manager's tree, since a =straight= or
+=elpaca= rebuild repopulates the package directory and would take the binary
+out from under a server running from it. It is searched *before* =exec-path=,
+so a =cargo install= for shell use cannot quietly move Emacs onto a different
+build; to run that one on purpose, set ~org-semantic-executable~ to an absolute
+path, which outranks everything.
+
+A symlink there works, and is the tidy way to run a build you are working on
+without installing it.
 
 ~org-semantic-cache-home~ puts the downloads somewhere other than
 =$XDG_CACHE_HOME= --- an external disk, say --- for the servers *this Emacs
