@@ -60,11 +60,12 @@ built. It then publishes a **draft** release for review.
 
 ## [0.2.0] — 2026-08-12
 
-Binary version 0.2.0, and **this one you want**: 0.1.0 misreads every negated
-predicate as its opposite, so `-dir:archive` searches the archive.
+Binary version 0.2.0. Update the binary as well as the package: 0.1.0 reads
+every negated predicate as its opposite, so `-dir:archive` searches the archive
+rather than excluding it.
 
-The Emacs client is the point of this release. It was described as early in
-0.1.0; it is now the way to use org-semantic from Emacs.
+The Emacs client is what this release is for. In 0.1.0 it was unfinished; it is
+now how org-semantic is meant to be used from Emacs.
 
 ### Added
 
@@ -139,10 +140,11 @@ is read-only by design for now.
   model resident. A warm semantic query is ~9 ms against ~309 ms cold, which is
   what makes search-as-you-type viable. Indexing runs on a worker thread, so
   searches are answered while a rebuild is in flight.
-- An Emacs client, early but usable: `org-semantic-find` draws a results buffer
-  with `next-error` navigation, and `org-semantic-reindex` reports progress. No
+- An Emacs client, unfinished: `org-semantic-find` draws a results buffer with
+  `next-error` navigation, and `org-semantic-reindex` reports progress. No
   dependency on org itself, and none on consult or vertico. You will need to put
-  the binary on `exec-path` yourself, or set `org-semantic-executable`.
+  the binary on `exec-path` yourself, or set `org-semantic-executable`. See 0.2.0,
+  which is where it became usable.
 - `ORG_SEMANTIC_CACHE_HOME`, and `org-semantic-cache-home` on the Emacs side,
   for putting the downloaded models somewhere other than `$XDG_CACHE_HOME`.
   A model is 128 MB to 2.24 GB, which is worth being able to move.
