@@ -264,9 +264,17 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 
 The timeouts are generous rather than tight, and exist because jsonrpc.el wants a
-number: a warm search is under ten milliseconds, and the first one against a
-vault also loads the model. An index is minutes, and is stopped by asking rather
-than by waiting --- =M-x org-semantic-cancel=.
+number: a warm search is under ten milliseconds, the first one against a vault
+also loads the model, and the slowest measured case --- a search during a full
+rebuild, sharing one model with it --- is under two seconds. An index is minutes,
+and is stopped by asking rather than by waiting --- =M-x org-semantic-cancel=.
+
+One thing outlasts the search timeout, and gives no sign of it: a semantic search
+whose *model is not yet downloaded* fetches it first, which is 465 MB for
+=e5-small= and 2.2 GB for the large multilingual ones. The search simply stops
+for thirty seconds and then says it timed out. This is why it is worth running
+=M-x org-semantic-reindex= before the first search on a new machine --- indexing
+has two hours to play with, and says what it is downloading.
 
 ~org-semantic-config~ is the one worth care. It is [[#what-gets-indexed][the same policy]] the command
 line passes with =--config=, written as a plist instead of a JSON file, so arrays
