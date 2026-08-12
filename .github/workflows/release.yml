@@ -61,10 +61,32 @@ jobs:
           # of this release would be warned by the release itself.
           printf '%s\n%s\n' "$MIN" "$CARGO" | sort -C -V || {
             echo "::error::this package needs a binary >= $MIN but ships $CARGO"; exit 1; }
-      - name: Release notes must exist
+      # The changelog is the only place release prose lives.  A second copy per
+      # tag would drift from it, which is how the README and the manual drifted
+      # the first time a tagline changed.
+      - name: Take the release body out of the changelog
         run: |
-          test -f "release-notes/${GITHUB_REF_NAME}.md" || {
-            echo "::error::write release-notes/${GITHUB_REF_NAME}.md before tagging"; exit 1; }
+          TAG="${GITHUB_REF_NAME#v}"
+          # Stops at the next version heading, and at the link-reference block
+          # the format keeps at the foot of the file — which follows the last
+          # section and would otherwise be published as part of it.
+          awk -v v="$TAG" '
+            $0 ~ "^## \\[" v "\\]"  { inside = 1; next }
+            inside && /^## \[/      { exit }
+            inside && /^\[.*\]: /   { exit }
+            inside                  { print }
+          ' CHANGELOG.md > body.md
+          # A heading that is still `[Unreleased]` at tag time means the release
+          # was never cut; an empty body would publish silently, so it fails.
+          test -s body.md || {
+            echo "::error::CHANGELOG.md has no '## [$TAG]' section — move [Unreleased] into one"
+            exit 1; }
+          cat body.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-body
+          path: body.md
+          if-no-files-found: error
 
   build:
     needs: version
@@ -204,13 +226,15 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      - name: Set the body aside, so it is not published as an asset
+        run: mv assets/body.md .
       - name: Checksums
         run: |
           cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: assets/*
-          body_path: release-notes/${{ github.ref_name }}.md
+          body_path: body.md
           make_latest: true
           draft: true
           prerelease: false
