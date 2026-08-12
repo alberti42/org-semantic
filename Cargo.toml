@@ -19,7 +19,17 @@ fastembed = { version = "5.17.4", default-features = false, features = [
 ] }
 # Pinned to exactly what fastembed depends on, so both resolve to one `ort` and
 # the prebuilt static runtime is shared rather than built twice.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
+#
+# `coreml` is asked for **only on macOS**, and that is not tidiness.  `ort` picks
+# a prebuilt ONNX Runtime by matching the feature set against its `dist.tsv`, and
+# demands every requested feature be present in the distribution it takes.  No
+# Linux or Windows build carries `coreml`, so asking for it there resolved
+# nothing and emitted `link_error_bad_dist_features` — a **link** failure, past
+# every compile check, on targets nobody here builds.  Measured: the build script
+# printed `ORT_FEATURE_SET=coreml` beside
+# `ORT_AVAILABLE_DISTS='(no features)' (*); 'webgpu'; 'nvrtx'; …`, none of which
+# it would accept.
+ort = { version = "=2.0.0-rc.13", default-features = false }
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
 # Lexical search.  Its analyzer pipeline (tokenizing, stemming, stopwords) and
 # query parser are the parts worth not reimplementing; BM25 scoring alone would
@@ -53,6 +63,11 @@ crossbeam-channel = "0.5.16"
 # above.
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
+
+# See the note on `ort` above: this is the only target whose prebuilt runtime
+# carries CoreML, and asking for it anywhere else breaks the link.
+[target."cfg(target_os = \"macos\")".dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
 
 [profile.release]
 opt-level = 3

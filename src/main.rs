@@ -2403,8 +2403,18 @@ fn model_with(
     if let Some(n) = max_length {
         opts = opts.with_max_length(n);
     }
+    // CoreML is a macOS execution provider, and the `ort` feature that carries
+    // it is asked for on macOS alone — see the note in Cargo.toml, where wanting
+    // it everywhere broke the *link* on every other target.  So the call is
+    // compiled where the provider exists, and refused where it does not, rather
+    // than the flag quietly meaning nothing.
+    #[cfg(target_os = "macos")]
     if coreml {
         opts = opts.with_execution_providers(vec![ort::ep::CoreML::default().build()]);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if coreml {
+        return Err(anyhow!("CoreML is a macOS execution provider, and this is not macOS"));
     }
     TextEmbedding::try_new(opts).map_err(|e| anyhow!("loading model: {e}"))
 }
