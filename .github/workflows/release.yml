@@ -1,0 +1,205 @@
+name: Release
+
+# Push a version tag (v0.2.0) to build the binaries, sign and notarize the macOS
+# one, and publish a *draft* GitHub release with them attached.  Review the draft
+# and click Publish.  Release notes come from a committed file --
+# release-notes/<tag>.md -- so write it before pushing the tag.
+#
+# Required repository secrets:
+#   CERTIFICATE_BASE64    base64 of the "Developer ID Application" .p12
+#   CERTIFICATE_PASSWORD  password protecting that .p12
+#   APPLE_ID              Apple ID used for notarization
+#   APPLE_ID_PASSWORD     app-specific password for that Apple ID
+#
+# Assets are the bare binaries, named for the platform, which is what
+# `org-semantic-install.el` downloads: one file, chmod, done.  No archive to
+# unpack in elisp.
+#
+# **There is no Intel macOS build, and it is not an omission.**  `ort` selects a
+# prebuilt ONNX Runtime from its own dist table, and that table has no
+# `x86_64-apple-darwin` row at all -- the build fails with "no prebuilt binaries
+# available for target".  Shipping one would mean building ONNX Runtime from
+# source and linking `ort` against it.  Apple Silicon Macs and Rosetta cannot run
+# it either: Rosetta translates x86_64, and there is no x86_64 binary to
+# translate.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  TEAM_ID: 9V3X7C8VCK
+
+jobs:
+  # One repo, one release, one version -- the package checks it is talking to its
+  # own binary.  A tag that disagrees with either declaration would ship a pair
+  # that warns about itself on every handshake, so it fails here instead.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, Cargo.toml and the elisp must agree
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          ELISP=$(sed -n 's/^(defconst org-semantic-version "\(.*\)".*/\1/p' lisp/org-semantic.el)
+          echo "tag=$TAG cargo=$CARGO elisp=$ELISP"
+          test "$TAG" = "$CARGO" || { echo "::error::Cargo.toml says $CARGO, tag says $TAG"; exit 1; }
+          test "$TAG" = "$ELISP" || { echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+      - name: Release notes must exist
+        run: |
+          test -f "release-notes/${GITHUB_REF_NAME}.md" || {
+            echo "::error::write release-notes/${GITHUB_REF_NAME}.md before tagging"; exit 1; }
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: org-semantic-aarch64-macos
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: org-semantic-x86_64-linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: org-semantic-aarch64-linux
+          # Builds and links -- `ort` takes its DirectML distribution, so the
+          # binary wants DirectML.dll (present since Windows 10 1903).  Nobody
+          # here has run it; treat the asset as untested until someone does.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: org-semantic-x86_64-windows.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Name the binary for its platform
+        shell: bash
+        run: |
+          SRC="target/${{ matrix.target }}/release/org-semantic"
+          [ "${{ runner.os }}" = "Windows" ] && SRC="$SRC.exe"
+          cp "$SRC" "${{ matrix.asset }}"
+
+      # Only macOS needs any of what follows.
+      - name: Import the signing certificate
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 20)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security list-keychains -d user \
+            -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Sign and notarize
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ASSET="${{ matrix.asset }}"
+
+          # Hardened runtime and a secure timestamp are both required for
+          # notarization.  Fail loudly: an unsigned release is not shippable.
+          codesign --force --timestamp --options runtime \
+            --sign "Developer ID Application: Andrea Alberti ($TEAM_ID)" "$ASSET"
+          codesign --verify --strict --verbose=2 "$ASSET"
+
+          # notarytool takes an archive, never a bare executable.
+          ditto -c -k "$ASSET" "$ASSET.zip"
+
+          xcrun notarytool store-credentials "notary-profile" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$TEAM_ID"
+
+          # `--wait` has returned 0 on a rejected submission before now, so the
+          # status is read rather than inferred from the exit code.
+          xcrun notarytool submit "$ASSET.zip" \
+            --keychain-profile "notary-profile" --wait \
+            | tee "$RUNNER_TEMP/notary.log"
+          grep -q "status: Accepted" "$RUNNER_TEMP/notary.log" || {
+            echo "::error::notarization was not accepted"; cat "$RUNNER_TEMP/notary.log"; exit 1; }
+
+          rm -f "$ASSET.zip"
+
+          # **The ticket is not stapled, and cannot be.**  `stapler` supports
+          # disk images, code-signed bundles and flat installer packages; a bare
+          # Mach-O executable is none of them.  Notarization still counts -- the
+          # ticket is registered against the cdhash -- but a *quarantined* copy
+          # needs a network check on first run.  Which the ordinary paths never
+          # hit: quarantine is set by browsers, and neither Emacs's url.el nor
+          # curl sets it.
+
+      # Catches a hardened-runtime failure, which shows up only on the signed
+      # build and would otherwise ship.
+      - name: Smoke test the binary that will be published
+        shell: bash
+        run: |
+          chmod +x "${{ matrix.asset }}" || true
+          ./"${{ matrix.asset }}" --version
+          ./"${{ matrix.asset }}" models
+
+      - name: Clean up the keychain
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          body_path: release-notes/${{ github.ref_name }}.md
+          make_latest: true
+          draft: true
+          prerelease: false
