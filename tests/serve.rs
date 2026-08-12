@@ -994,3 +994,59 @@ fn a_cold_embedding_model_is_announced_before_it_is_fetched() {
     );
     assert_announced(&msgs, "semantic", &cache);
 }
+
+/// A search never fetches a model, however much it would have to fetch.
+///
+/// Not a timeout problem, though a client meets it as one. A search is answered
+/// *on the message loop*, so downloading inside it would stop the server dead
+/// for the length of the fetch — 128 MB for `bge-small-en`, 2.24 GB for the
+/// large multilingual ones — with nothing else read meanwhile: no lexical
+/// search, no `status`, no `$/cancelRequest`, no `shutdown`. A download has no
+/// unit boundaries to check a cancel flag between either, so the only way out
+/// would have been killing the process.
+///
+/// This is the state a vault arrives in when it is copied to another machine,
+/// or when a cache is cleared under it: the index is there and the weights are
+/// not. `built_models` asks only that the manifest exists, so an empty file is
+/// exactly that state.
+///
+/// Runs offline *because* it needs the model to be absent, which is the one
+/// thing a fresh `XDG_CACHE_HOME` guarantees.
+#[test]
+fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
+    let v = vault("model-missing", 1);
+    let dir = v.join(".org-semantic").join("semantic").join("bge-small-en");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("manifest.json"), "{}").unwrap();
+    let cache = scratch("model-missing-cache");
+
+    let msgs = talk(
+        &[
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "search",
+                    "params": { "vault": v, "query": "atoms" } }),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "status",
+                    "params": { "vault": v } }),
+        ],
+        Some(&cache),
+    );
+    let reply = |id: i64| msgs.iter().find(|m| m["id"] == id).expect("a reply").clone();
+
+    let err = reply(2)["error"].clone();
+    assert_eq!(err["data"]["kind"], "model-missing", "{err:?}");
+    assert_eq!(err["data"]["model"], "bge-small-en");
+    assert_eq!(err["data"]["remedy"], "index", "and says which call fetches it");
+
+    // Said by `status` too, so a client can offer to fetch before anyone is
+    // turned down rather than after.
+    let semantic = reply(3)["result"]["semantic"].clone();
+    assert_eq!(semantic[0]["name"], "bge-small-en");
+    assert_eq!(semantic[0]["cached"], false, "{semantic:?}");
+
+    // The whole point, and asserted on disk rather than on the clock: refused,
+    // not fetched.
+    assert_eq!(
+        std::fs::read_dir(&cache).map(|d| d.count()).unwrap_or(0),
+        0,
+        "a search must leave the model cache exactly as it found it"
+    );
+}

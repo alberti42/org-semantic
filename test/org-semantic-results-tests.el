@@ -540,6 +540,26 @@ The server labels what a client must act on, so an error with no
                    :data (:kind "index-layout" :remedy "reindex-full")))))
     (should (rassq 'index-full (org-semantic-ui-remedy-offers remedy)))))
 
+(ert-deftest a-missing-model-is-offered-as-a-download ()
+  "The index is here and the weights are not, so say which part takes time.
+
+A search refuses this instantly rather than fetching hundreds of
+megabytes inside a query, so the offer is what does the fetching:
+`index', which reports the download and has hours to do it in.
+Labelling it \"Build it\" would describe the cheap half of what is
+about to happen."
+  (let* ((remedy (org-semantic-ui-remedy
+                  '(:message "the bge-small-en model is not downloaded yet"
+                    :data (:kind "model-missing" :model "bge-small-en"
+                           :remedy "index"))
+                  "semantic"))
+         (offers (org-semantic-ui-remedy-offers remedy)))
+    (should (equal (org-semantic-ui-remedy-kind remedy) "model-missing"))
+    (should (equal (cdr (assoc "Download it" offers)) 'index))
+    (should-not (assoc "Build it" offers))
+    ;; The word index needs no model at all, so it is worth offering.
+    (should (rassq 'lexical offers))))
+
 (ert-deftest the-drift-prompt-is-raised-once ()
   "A drifted policy holds until the user acts, so it is said once.
 

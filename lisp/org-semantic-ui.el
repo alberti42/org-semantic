@@ -208,6 +208,16 @@ nobody parses the prose to find out which call to make."
              (append build
                      (unless (equal mode "lexical")
                        '(("Search by word" . lexical)))))
+            ;; The index is here and the model that built it is not -- a vault
+            ;; copied to another machine, or a cleared cache.  Named as a
+            ;; download rather than as a build, because that is the part that
+            ;; takes the minutes: the search refuses instantly rather than
+            ;; fetching hundreds of megabytes inside a query, and `index' is the
+            ;; call that fetches, reports its size, and has the hours to do it.
+            ("model-missing"
+             (append '(("Download it" . index))
+                     (unless (equal mode "lexical")
+                       '(("Search by word" . lexical)))))
             ("config-drift"
              (append '(("Rebuild fully" . index-full)
                        ("Search anyway" . waive))

@@ -274,6 +274,9 @@ Branch on this and never on the message.  The kinds, and what
 each promises to carry in `org-semantic-error-data':
 
   no-index      target, remedy, and built/model where known
+  model-missing target, model, remedy -- the index is here and the
+                model that built it is not downloaded, so the search
+                refused rather than fetching it inside your query
   index-layout  target, found, expected, remedy
   index-corrupt target, chunks, vectors, remedy
   config-drift  target, changed (setting names), remedy
@@ -928,7 +931,14 @@ Every field is about that vault -- which models have a semantic
 index, whether a lexical one exists, whether its index is
 resident here (so the next search is warm rather than a model
 load), and whether an index is running.  Which release the server
-is comes from the handshake, not from here."
+is comes from the handshake, not from here.
+
+Each entry in `:semantic' carries `:cached', which is whether the
+model that built that index is still downloaded on this machine.
+An index outlives it -- a vault copied elsewhere, a cleared
+cache -- and a search of one that is not cached refuses rather than
+downloading inside the query, so this is how to know before
+asking."
   (org-semantic--call
    "status"
    (org-semantic--params :vault (or vault (org-semantic-vault-or-error)))))
@@ -942,7 +952,14 @@ is comes from the handshake, not from here."
          (models (append (plist-get status :semantic) nil)))
     (message "%s: semantic [%s], lexical %s, %s%s"
              (abbreviate-file-name vault)
-             (mapconcat (lambda (m) (plist-get m :name)) models " ")
+             ;; A model whose weights are gone is named as such: the index is
+             ;; there and unsearchable, which is otherwise indistinguishable
+             ;; from a working one until a search refuses.
+             (mapconcat (lambda (m)
+                          (if (org-semantic-true-p (plist-get m :cached))
+                              (plist-get m :name)
+                            (concat (plist-get m :name) " (not downloaded)")))
+                        models " ")
              (if (org-semantic-true-p (plist-get status :lexical)) "yes" "no")
              (if (org-semantic-true-p (plist-get status :loaded))
                  "resident" "not loaded")

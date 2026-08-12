@@ -150,6 +150,51 @@ impl Server {
         if let Some(loaded) = models.get(m.name).and_then(std::sync::Weak::upgrade) {
             return Ok(loaded);
         }
+        // **A search may not fetch a model.** This is the only place `serve`
+        // loads one — indexing takes `Lend::Own` and loads its own — so the rule
+        // is enforced by the one function that could break it.
+        //
+        // Not a timeout problem, though that is how it shows up: a search is
+        // answered *on the message loop*, and `model_with` would block it for
+        // the length of the download — 465 MB for `e5-small`, 2.24 GB for the
+        // large multilingual ones. Nothing else would be read meanwhile: not a
+        // lexical search, not `status`, not `$/cancelRequest`, not `shutdown`.
+        // And a download has no unit boundaries to check a cancel flag between,
+        // so the only way out would be killing the process. It is silent as
+        // well, since `download` progress comes from the callers holding a
+        // `Journal` and this path holds none.
+        //
+        // So it is refused in about a millisecond, labelled, and `remedy` sends
+        // the client to `index` — which runs on a worker thread, reports the
+        // download with its size, and has a budget measured in hours. Fetching
+        // is a thing you ask for, not a thing a query does to you.
+        //
+        // **`weight_bytes` is a proxy, and it is the right one because of which
+        // way it is wrong.** What hf-hub stores is a whole snapshot — the ONNX
+        // files, a `tokenizer.json`, some small configs — and this sums only the
+        // `.onnx*` part, which is 127 MB of the 128 for `bge-small-en`. So a
+        // torn cache holding the weights but not the tokenizer passes here and
+        // fetches a little on the loop: seconds, not minutes.
+        //
+        // Being wrong the other way would be far worse, because the refusal is
+        // **not self-correcting**. `index` does not populate `Server::models` —
+        // it takes `Lend::Own` and drops its model — so a search that refuses
+        // wrongly refuses again after the very run it asked for, and forever.
+        // Any tightening here must keep that bias: say "missing" only when the
+        // big artifact is genuinely absent, which is the case that costs
+        // minutes. Enumerating fastembed's own file list would be exact and
+        // would trade a brief stall for a permanent wedge.
+        if weight_bytes(m).is_none() {
+            return Err(fault(
+                "model-missing",
+                serde_json::json!({ "target": "semantic", "model": m.name,
+                                    "remedy": "index" }),
+                format!(
+                    "the {} model is not downloaded yet — index this vault to fetch it",
+                    m.name
+                ),
+            ));
+        }
         let loaded = Arc::new(Mutex::new(model_with(m.which.clone(), None, false)?));
         // Overwrites a dead `Weak` if one is there, which is how they are reaped.
         models.insert(m.name, Arc::downgrade(&loaded));
@@ -650,7 +695,17 @@ impl Server {
         );
         let models: Vec<serde_json::Value> = built_models(&vault)
             .iter()
-            .map(|m| serde_json::json!({ "name": m.name, "dim": m.dim, "about": m.about }))
+            .map(|m| {
+                serde_json::json!({ "name": m.name, "dim": m.dim, "about": m.about,
+                                    // Whether a search of this index can be
+                                    // answered at all: an index can outlive the
+                                    // weights that built it — a vault copied to
+                                    // another machine, a cleared cache — and a
+                                    // search will then refuse rather than fetch.
+                                    // Said here so a client can offer to fetch
+                                    // before someone asks and is turned down.
+                                    "cached": weight_bytes(m).is_some() })
+            })
             .collect();
         let lexical = lexical::stored_key(&state_dir(&vault)).is_some();
         Ok(serde_json::json!({
