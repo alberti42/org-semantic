@@ -93,10 +93,19 @@ fn handshake() -> Vec<u8> {
 /// index is still running — and must wait for it, or every assertion about what
 /// a run reported would be racing it.
 fn talk(requests: &[Value], cache: Option<&Path>) -> Vec<Value> {
+    match cache {
+        Some(c) => talk_with(requests, &[("XDG_CACHE_HOME", c)]),
+        None => talk_with(requests, &[]),
+    }
+}
+
+/// `talk`, with the environment spelled out — for the tests about *which*
+/// variable decides where a download lands, which have to set two.
+fn talk_with(requests: &[Value], env: &[(&str, &Path)]) -> Vec<Value> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_org-semantic"));
     cmd.arg("serve").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    if let Some(c) = cache {
-        cmd.env("XDG_CACHE_HOME", c);
+    for (key, value) in env {
+        cmd.env(key, value);
     }
     let mut child = cmd.spawn().expect("spawning the binary Cargo just built");
     let mut input = handshake();
@@ -979,6 +988,44 @@ fn a_cold_classifier_is_announced_before_it_is_fetched() {
     assert!(
         cache.join("org-semantic").join("lid.176.ftz").exists(),
         "and the file landed where the announcement implied"
+    );
+}
+
+/// `ORG_SEMANTIC_CACHE_HOME` decides where the bytes go — proved by fetching
+/// them, not by reading a path back out of `models`.
+///
+/// The cheap end of the same mechanism: the classifier is 938 kB where a model
+/// is 133 MB, and both resolve through the one `xdg_cache()`. Uses the real
+/// network for the same reason the two tests above do — the download path is
+/// the one thing no offline test can reach, and it is what a user meets first.
+///
+/// **Both variables are set, and the decoy is asserted empty.** Naming the
+/// destination is only half the claim; the other half is that nothing leaked
+/// into `$XDG_CACHE_HOME`, which is where every byte went before this existed
+/// and where a partial override would put some of them again.
+#[test]
+#[ignore = "downloads the 938 kB language classifier"]
+fn the_download_lands_in_the_directory_the_variable_names() {
+    let real = scratch("cache-home-real");
+    let decoy = scratch("cache-home-decoy");
+    let v = vault("cache-home", 3);
+    let msgs = talk_with(
+        &[json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
+                  "params": { "vault": v, "mode": "lexical", "full": true } })],
+        &[("ORG_SEMANTIC_CACHE_HOME", &real), ("XDG_CACHE_HOME", &decoy)],
+    );
+
+    let reply = msgs.iter().find(|m| m["id"] == 7).expect("the index replied");
+    assert!(reply.get("result").is_some(), "the run has to succeed to prove anything: {reply:?}");
+    assert!(
+        real.join("org-semantic").join("lid.176.ftz").exists(),
+        "the classifier landed under ORG_SEMANTIC_CACHE_HOME"
+    );
+    assert_eq!(
+        std::fs::read_dir(&decoy).map(|d| d.count()).unwrap_or(0),
+        0,
+        "and nothing at all was written under XDG_CACHE_HOME — ours replaces it, \
+         rather than covering some of the downloads and not others"
     );
 }
 
