@@ -265,6 +265,57 @@ Emacs happens to have."
         (org-semantic-results-goto))
       (should (equal asked '("/vault/notes/" "/vault/notes/a.org"))))))
 
+(ert-deftest the-prefixes-ask-the-common-question-first ()
+  "One `C-u' asks the ranking; two ask about the length of the list too.
+
+Choosing between meaning and word is the common reason to reach for
+a prefix, and it used to drag two questions about list length
+behind it -- three answers to change one thing.  Swapping the two
+levels fails nothing and looks like nothing, which is why the
+mapping is a function and this test holds it."
+  (should (equal (org-semantic--find-prompts nil) '(nil . nil)))
+  (should (equal (org-semantic--find-prompts '(4)) '(t . nil)))
+  (should (equal (org-semantic--find-prompts '(16)) '(t . t)))
+  ;; Deeper, and a plain number, still resolve to one of the two.
+  (should (equal (org-semantic--find-prompts '(64)) '(t . t)))
+  (should (equal (org-semantic--find-prompts 3) '(t . nil))))
+
+(ert-deftest the-ranking-prompt-offers-both-rankings ()
+  "The setting is the default, not text typed into the minibuffer.
+
+Passed as INITIAL-INPUT -- which `completing-read' calls deprecated
+-- the current ranking is what a completion UI filters its
+candidates by, so a prompt for choosing between two offered one:
+whichever you already had, never the one you were reaching for."
+  (let (seen)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &optional _pred _match initial _hist def &rest _)
+                 (setq seen (list :collection collection :initial initial :default def))
+                 "lexical")))
+      (let ((org-semantic-results-ranking "semantic"))
+        (should (equal (org-semantic--read-ranking) "lexical"))))
+    (should (equal (plist-get seen :collection) '("semantic" "lexical")))
+    (should-not (plist-get seen :initial))
+    (should (equal (plist-get seen :default) "semantic"))))
+
+(ert-deftest a-search-asks-for-one-ranking-and-never-both ()
+  "The two are ranked separately, so a search names exactly one.
+
+A BM25 score has no common scale with a cosine -- not even with
+another model's cosine -- so a merged list would order results by a
+number that means different things in different rows."
+  (let (params)
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (&rest args) (setq params args) nil))
+              ((symbol-function 'org-semantic-connection) #'ignore))
+      (org-semantic-results-tests--drawn nil
+        (setq org-semantic-results--mode "lexical")
+        (org-semantic-results--search)))
+    (should (equal (plist-get (cdr params) :mode) "lexical"))
+    ;; One value, not a pair and not a list: there is no shape here that
+    ;; could carry two rankings.
+    (should (stringp (plist-get (cdr params) :mode)))))
+
 (ert-deftest every-prompt-remembers-what-was-searched-for ()
   "One history, shared by all three prompts, and an interned symbol.
 

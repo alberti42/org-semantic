@@ -317,26 +317,62 @@ is here, since the notes may have moved on.
 ;;;; Asking
 
 ;;;###autoload
+(defun org-semantic--find-prompts (arg)
+  "Return (RANKING . LIMITS): what a raw prefix ARG asks to be asked.
+
+Ordered by how often it is wanted, which is what a second `C-u'
+should mean -- the same rule `org-semantic--reindex-flags' follows:
+
+  plain      neither; the settings decide.
+  \\[universal-argument]        the ranking, and only that.  Choosing between
+             meaning and word is the common reason to reach for a
+             prefix at all, and it used to drag two questions
+             about list length along behind it.
+  \\[universal-argument] \\[universal-argument]    the ranking and the limits.
+
+A function of its own so a test can hold the mapping: an
+interactive spec is not otherwise checkable, and swapping these
+two fails nothing and looks like nothing."
+  (let ((level (prefix-numeric-value arg)))
+    (cond ((null arg) (cons nil nil))
+          ((>= level 16) (cons t t))
+          (t (cons t nil)))))
+
+(defun org-semantic--read-ranking ()
+  "Ask which ranking to use, offering both.
+
+The setting is the *default*, not text put into the minibuffer:
+`completing-read' calls INITIAL-INPUT deprecated and says to use
+DEF instead, and here the reason is plain to see.  Inserted as
+input, \"semantic\" is what a completion UI filters the candidates
+by -- so the prompt for choosing between two rankings offered
+exactly one of them, and it was never the one you were reaching
+for."
+  (completing-read "Rank by: " '("semantic" "lexical") nil t
+                   nil nil org-semantic-results-ranking))
+
 (defun org-semantic-find (query &optional arg)
   "Search the current buffer's vault for QUERY and show what comes back.
 
-With a prefix ARG, ask for the ranking, how many notes may appear
-and how many passages any one of them may contribute, instead of
-taking them from the settings.
+One ranking is used, never both: `semantic' finds notes by meaning
+and `lexical' by word, and the two are ranked separately because a
+score from one has no meaning beside a score from the other.  `m'
+in the results buffer switches.
+
+With one prefix ARG, ask which ranking; with two, ask about the
+length of the list as well.  See `org-semantic--find-prompts'.
 
 A query may carry predicates the server reads out of it --
-`tag:x', `-tag:x', `dir:x', `todo:x', and `lang:x' for a word
-search -- with the rest of it as free text."
+`tag:x', `dir:x', `todo:x', `lang:x' for a word search, and any of
+them negated with a leading `-' -- with the rest as free text."
   (interactive
    (list (read-string "Search notes for: " nil 'org-semantic-search-history)
          current-prefix-arg))
-  (let* ((vault (org-semantic-vault-or-error))
-         (mode (if arg
-                   (completing-read "Rank by: " '("semantic" "lexical") nil t
-                                    org-semantic-results-ranking)
-                 org-semantic-results-ranking))
-         (k (and arg (read-number "Notes at most: " 8)))
-         (per-file (and arg (read-number "Passages per note at most: " 3)))
+  (let* ((asks (org-semantic--find-prompts arg))
+         (vault (org-semantic-vault-or-error))
+         (mode (if (car asks) (org-semantic--read-ranking) org-semantic-results-ranking))
+         (k (and (cdr asks) (read-number "Notes at most: " 8)))
+         (per-file (and (cdr asks) (read-number "Passages per note at most: " 3)))
          (buffer (org-semantic-results--buffer vault)))
     (with-current-buffer buffer
       (setq org-semantic-results--vault vault

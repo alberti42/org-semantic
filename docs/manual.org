@@ -231,7 +231,8 @@ be found before anything has been indexed:
 #+end_src
 
 Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
-searches the vault that note belongs to and shows what came back:
+searches the vault that note belongs to and shows what came back. One =C-u=
+asks which ranking to use, two ask about the length of the list as well:
 
 #+begin_example
 org-semantic  semantic  "vacuum bakeout procedure"
