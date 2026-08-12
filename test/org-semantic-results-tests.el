@@ -203,6 +203,40 @@ Emacs happens to have."
         (org-semantic-results-goto))
       (should (equal asked '("/vault/notes/" "/vault/notes/a.org"))))))
 
+(ert-deftest every-prompt-remembers-what-was-searched-for ()
+  "One history, shared by all three prompts, and an interned symbol.
+
+Interned matters and is not decoration: `savehist-minibuffer-hook'
+records whichever variable a minibuffer used, but skips one whose
+symbol it cannot `intern-soft' -- so an uninterned history is the
+one thing that would silently fail to survive a session.
+
+The three prompts share it because they are the same question
+asked from different places; separate histories would mean `M-p'
+in the results buffer could not reach what was typed to get there."
+  (let ((prompts nil))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt &optional initial history default &rest _)
+                 (push (list history initial default) prompts)
+                 "typed"))
+              ((symbol-function 'org-semantic-find) #'ignore)
+              ((symbol-function 'org-semantic-results--search) #'ignore)
+              ((symbol-function 'use-region-p) #'ignore)
+              ((symbol-function 'thing-at-point) (lambda (&rest _) "atpoint")))
+      (call-interactively #'org-semantic-find-at-point)
+      (let ((org-semantic-results--query "old"))
+        (call-interactively #'org-semantic-results-set-query)))
+    (should (= 2 (length prompts)))
+    (should (cl-every (lambda (p) (eq (nth 0 p) 'org-semantic-search-history)) prompts))
+    (should (intern-soft "org-semantic-search-history"))
+    ;; The thing at point is a suggestion, so it arrives as the default;
+    ;; the query being refined is text to edit, so it arrives as initial.
+    (let ((at-point (car (last prompts)))
+          (refine (car prompts)))
+      (should (equal (nth 2 at-point) "atpoint"))
+      (should-not (nth 1 at-point))
+      (should (equal (nth 1 refine) "old")))))
+
 (ert-deftest the-buffer-asks-to-be-shown-and-does-not-insist ()
   "The action is passed to `display-buffer', not written into the user's alist.
 

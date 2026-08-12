@@ -328,7 +328,7 @@ A query may carry predicates the server reads out of it --
 `tag:x', `-tag:x', `dir:x', `todo:x', and `lang:x' for a word
 search -- with the rest of it as free text."
   (interactive
-   (list (read-string "Search notes for: ")
+   (list (read-string "Search notes for: " nil 'org-semantic-search-history)
          current-prefix-arg))
   (let* ((vault (org-semantic-vault-or-error))
          (mode (if arg
@@ -351,10 +351,34 @@ search -- with the rest of it as free text."
 (defun org-semantic-find-at-point (&optional arg)
   "Search for the region, or the thing at point.  ARG is as in `org-semantic-find'."
   (interactive "P")
-  (let ((query (if (use-region-p)
-                   (buffer-substring-no-properties (region-beginning) (region-end))
-                 (or (thing-at-point 'symbol t) ""))))
-    (org-semantic-find (read-string "Search notes for: " query) arg)))
+  (let* ((thing (if (use-region-p)
+                    (buffer-substring-no-properties (region-beginning) (region-end))
+                  (thing-at-point 'symbol t)))
+         ;; A *suggestion*, so it goes in as the default and not as text
+         ;; already typed: RET takes it, `M-n' fetches it for editing, and
+         ;; anything else replaces it without having to be deleted first.
+         ;; `read-string' says outright that INITIAL-INPUT "has been
+         ;; superseded by DEFAULT-VALUE and should normally be nil in new
+         ;; code".
+         (query (read-string (if thing
+                                 (format "Search notes for (default %s): " thing)
+                               "Search notes for: ")
+                             nil 'org-semantic-search-history thing)))
+    (org-semantic-find query arg)))
+
+(defvar org-semantic-search-history nil
+  "Queries searched for, most recent first.
+
+The ordinary Emacs arrangement, and it needs nothing else to be
+useful: `M-p' and `M-n' walk it in the minibuffer, and
+`savehist-mode' carries it between sessions **by itself** --
+`savehist-minibuffer-hook' records whichever history variable each
+minibuffer used, so an interned symbol passed to `read-string' is
+picked up without anyone adding it to
+`savehist-additional-variables'.
+
+A `defvar' rather than a `defcustom': a history is data the
+package accumulates, not a setting anyone chooses.")
 
 (defun org-semantic-results--buffer (vault)
   "The results buffer for VAULT, made if there is not one yet."
@@ -1147,9 +1171,15 @@ of what they said then."
   (org-semantic-results--search))
 
 (defun org-semantic-results-set-query (query)
-  "Search this vault for QUERY instead."
+  "Search this vault for QUERY instead.
+
+The one prompt here that keeps INITIAL-INPUT, against
+`read-string''s advice, because this command exists to *edit* the
+query rather than to suggest one: offering it as a default would
+mean pressing \\`M-n' before every refinement."
   (interactive
-   (list (read-string "Search notes for: " org-semantic-results--query))
+   (list (read-string "Search notes for: " org-semantic-results--query
+                      'org-semantic-search-history))
    org-semantic-results-mode)
   (setq org-semantic-results--query query)
   (org-semantic-results--search))

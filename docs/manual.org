@@ -421,6 +421,17 @@ flag is: a setting that does nothing looks exactly like a typo that does nothing
 Leave it =nil= --- the default --- and the index is searched as it stands, which
 is what the command line does and is never wrong.
 
+*Past searches come back with =M-p=.* Every prompt --- =C-c n s=, searching for
+the thing at point, and =s= in the results buffer --- shares one history,
+~org-semantic-search-history~, so the query you typed to get here is reachable
+from the buffer it produced. Nothing needs configuring for it to survive
+restarts either: =savehist-mode= records whichever history a minibuffer used,
+so if you have it on, this is saved with the rest.
+
+Searching for the thing at point offers it as the *default* rather than as text
+already typed --- =RET= takes it, =M-n= fetches it to edit, and typing anything
+replaces it without deleting first.
+
 *Where the results buffer appears is yours, and this package does not touch
 =display-buffer-alist=.* That is a user option, and Emacs consults it *before*
 the action a caller passes --- so whatever you put there wins over
