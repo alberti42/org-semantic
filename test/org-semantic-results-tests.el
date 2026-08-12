@@ -561,6 +561,42 @@ the same question on every keystroke."
       (should (= 1 (org-semantic-results-tests--occurrences "Rebuild fully"))))))
 
 
+;;;; Settings, and the manual that lists them
+
+(defun org-semantic-results-tests--settings (group)
+  "Every user option under GROUP, its subgroups included."
+  (let (out)
+    (dolist (member (get group 'custom-group))
+      (pcase (cadr member)
+        ('custom-variable (push (car member) out))
+        ('custom-group
+         (setq out (append (org-semantic-results-tests--settings (car member))
+                           out)))))
+    out))
+
+(ert-deftest every-setting-is-written-down ()
+  "A setting the manual does not mention is one nobody finds.
+
+Checked rather than remembered, because the failure is quiet in
+the direction that matters: the package goes on working perfectly
+with a new option that no user has ever heard of.  Four of these
+had drifted out of the manual before this test existed."
+  (let ((manual (expand-file-name "docs/manual.org" org-semantic-tests--root)))
+    (unless (file-readable-p manual) (ert-skip "no manual to check against"))
+    (let ((text (with-temp-buffer
+                  (insert-file-contents manual)
+                  (buffer-string)))
+          (settings (org-semantic-results-tests--settings 'org-semantic))
+          (missing nil))
+      ;; The group has to have been found at all, or this passes by
+      ;; checking nothing.
+      (should (> (length settings) 5))
+      (dolist (setting settings)
+        (unless (string-match-p (regexp-quote (symbol-name setting)) text)
+          (push setting missing)))
+      (should-not missing))))
+
+
 ;;;; Against the binary, over the word index
 
 (ert-deftest a-word-search-fills-a-results-buffer ()
