@@ -99,6 +99,44 @@ is minutes, so a second `C-u' has to be the expensive one."
   (should (equal (org-semantic--reindex-flags '-) '(t . nil))))
 
 
+;;;; Where the server downloads its models
+
+(ert-deftest a-cache-directory-is-expanded-before-it-is-handed-over ()
+  "And nil sends nothing, which is not the same as sending nothing useful.
+
+The server turns the variable into a path verbatim, so a literal
+\"~/cache\" would make a directory *named* \"~\" wherever the
+process happened to start and download gigabytes into it, without
+failing."
+  (let ((org-semantic-cache-home nil))
+    (should-not (seq-find (lambda (e) (string-prefix-p "ORG_SEMANTIC_CACHE_HOME=" e))
+                          (org-semantic--process-environment))))
+  (let ((org-semantic-cache-home "~/nowhere/cache"))
+    (should (member (concat "ORG_SEMANTIC_CACHE_HOME="
+                            (expand-file-name "~/nowhere/cache"))
+                    (org-semantic--process-environment)))
+    (should-not (seq-find (lambda (e) (string-match-p "\\`ORG_SEMANTIC_CACHE_HOME=~" e))
+                          (org-semantic--process-environment)))))
+
+(ert-deftest the-cache-directory-reaches-the-process-we-start ()
+  "Asked of the binary, since a list of strings proves only half of it.
+
+`models' names the directory it would download into, so running
+it under the environment we build is the whole path end to end:
+the defcustom, the expansion, the child process, and the server's
+own resolution.  It downloads nothing."
+  (let ((binary (org-semantic-tests--binary)))
+    (unless binary (ert-skip "no org-semantic binary built"))
+    (org-semantic-tests--with-vault dir
+      (let* ((org-semantic-cache-home dir)
+             (process-environment (org-semantic--process-environment))
+             (said (with-temp-buffer
+                     (should (zerop (process-file binary nil t nil "models")))
+                     (buffer-string))))
+        (should (string-search (expand-file-name "fastembed" dir) said))
+        (should (string-search (expand-file-name "org-semantic" dir) said))))))
+
+
 ;;;; Which vault a buffer belongs to
 
 (ert-deftest an-index-is-enough-to-find-a-vault ()

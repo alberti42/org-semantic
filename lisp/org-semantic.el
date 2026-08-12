@@ -76,6 +76,34 @@ server that is still running.")
   :type '(choice (string :tag "Name or path")
                  (file :tag "File" :must-match t)))
 
+(defcustom org-semantic-cache-home nil
+  "Where the server downloads its models, or nil to inherit the environment.
+
+The embedding model and the language classifier are the only
+things written outside a vault, and a model is 128 MB for the
+small English one and up to 2.24 GB for the large multilingual
+ones.  They go under `$XDG_CACHE_HOME' -- in practice
+~/.cache/fastembed and ~/.cache/org-semantic.  Set this to put
+them somewhere else: an external disk, or a directory shared
+between accounts.
+
+Nil, the default, sends nothing and lets the server resolve the
+path as it always would, which is also what a shell inherits.
+
+The value is passed to the server as ORG_SEMANTIC_CACHE_HOME,
+which replaces `$XDG_CACHE_HOME' for org-semantic alone; the
+layout beneath it is unchanged, so moving an existing cache is a
+`mv' of those two directories.
+
+*It applies to servers this Emacs starts, and to nothing else.*
+A shell `org-semantic index' reads its own environment, so if you
+run the binary from a terminal as well, set the variable there
+too -- otherwise the model is downloaded a second time into the
+default location, which nothing will report, because both runs
+are behaving correctly."
+  :type '(choice (const :tag "Inherit from the environment" nil)
+                 (directory :tag "Directory")))
+
 (defcustom org-semantic-model nil
   "Which embedding model to use, or nil to let the server choose.
 
@@ -394,6 +422,26 @@ The only one it sends is `$/progress'."
   (clrhash org-semantic--watchers)
   (clrhash org-semantic--runs))
 
+(defun org-semantic--process-environment ()
+  "`process-environment' for the server, honouring `org-semantic-cache-home'.
+
+Its own function so a test can hold the two things that are easy
+to get wrong and impossible to notice.
+
+The path is expanded, because the server does not do it: the
+variable becomes a `PathBuf' verbatim, so a literal \"~/cache\"
+would create a directory *named* \"~\" beside wherever the server
+happened to be started, download gigabytes into it, and succeed.
+
+Nil sends nothing rather than an empty value.  Setting it to \"\"
+would not mean \"inherit\" on the far side -- it would resolve the
+cache against the current directory."
+  (if org-semantic-cache-home
+      (cons (concat "ORG_SEMANTIC_CACHE_HOME="
+                    (expand-file-name org-semantic-cache-home))
+            process-environment)
+    process-environment))
+
 (defun org-semantic--start ()
   "Start a server, complete its handshake, and return the connection."
   (let* ((binary (org-semantic--binary))
@@ -418,12 +466,13 @@ The only one it sends is `$/progress'."
            ;; arguments, and the current one asks `func-arity' first.
            :process
            (lambda ()
-             (make-process :name name
-                           :command (list binary "serve")
-                           :connection-type 'pipe
-                           :coding 'utf-8-emacs-unix
-                           :stderr (get-buffer-create stderr)
-                           :noquery t))))
+             (let ((process-environment (org-semantic--process-environment)))
+               (make-process :name name
+                             :command (list binary "serve")
+                             :connection-type 'pipe
+                             :coding 'utf-8-emacs-unix
+                             :stderr (get-buffer-create stderr)
+                             :noquery t)))))
     ;; Synchronously, and before this connection is visible to anything
     ;; else: `initialized' has to be the very next message the server
     ;; reads, so no request may slip in front of it.

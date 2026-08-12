@@ -254,6 +254,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | variable                             | default        | what it decides                                             |
 |--------------------------------------+----------------+-------------------------------------------------------------|
 | ~org-semantic-executable~            | =org-semantic= | the binary, by name on =exec-path= or as a path             |
+| ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |
 | ~org-semantic-model~                 | =nil=          | which model, when a vault has several built                 |
 | ~org-semantic-index-mode~            | ="both"=       | which indexes =M-x org-semantic-reindex= builds             |
 | ~org-semantic-config~                | =nil=          | the indexing policy to send --- below                       |
@@ -286,6 +287,24 @@ inside your query:
 Pressing it runs the index, which reports the download as it goes and then runs
 your search again by itself. =M-x org-semantic-show-status= says the same thing
 before you ask: a model it lists as not cached is one that would refuse.
+
+~org-semantic-cache-home~ puts the downloads somewhere other than
+=$XDG_CACHE_HOME= --- an external disk, say --- for the servers *this Emacs
+starts*:
+
+#+begin_src emacs-lisp
+(setq org-semantic-cache-home "/Volumes/data/cache")
+#+end_src
+
+It is passed as =ORG_SEMANTIC_CACHE_HOME= (see [[#what-it-writes][What it writes]]) and expanded
+first, so =~/= works here even though it would not in the variable itself.
+
+*If you also run the binary from a terminal, set the variable there too.* The two
+are separate environments, and a shell that does not have it downloads the model
+a second time into the default location --- silently, since both runs are
+behaving correctly. Setting it in your shell profile alone is enough for both if
+Emacs is started from a shell; a daemon started by =launchd= or systemd is not,
+and needs it in the plist or unit file, or here.
 
 ~org-semantic-config~ is the one worth care. It is [[#what-gets-indexed][the same policy]] the command
 line passes with =--config=, written as a plist instead of a JSON file, so arrays
