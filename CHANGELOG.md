@@ -20,6 +20,14 @@ section for the GitHub release body and refuses a tag it cannot find one for.
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-08-12
+
+Binary version 0.1.0. **The command line is the release; the Emacs client is
+early.** Everything below about `index`, `search` and `serve` is in use and
+measured. The elisp searches, draws results and reindexes, but it is still being
+built — there is no minibuffer interface, no installer, and the results buffer
+is read-only by design for now.
+
 ### Added
 
 - Initial release. A CLI that indexes a tree of org-mode notes and searches it
@@ -32,9 +40,10 @@ section for the GitHub release body and refuses a tag it cannot find one for.
   model resident. A warm semantic query is ~9 ms against ~309 ms cold, which is
   what makes search-as-you-type viable. Indexing runs on a worker thread, so
   searches are answered while a rebuild is in flight.
-- An Emacs client: `org-semantic-find` draws a results buffer with `next-error`
-  navigation, and `org-semantic-reindex` reports progress. No dependency on org
-  itself, and none on consult or vertico.
+- An Emacs client, early but usable: `org-semantic-find` draws a results buffer
+  with `next-error` navigation, and `org-semantic-reindex` reports progress. No
+  dependency on org itself, and none on consult or vertico. You will need to put
+  the binary on `exec-path` yourself, or set `org-semantic-executable`.
 - `ORG_SEMANTIC_CACHE_HOME`, and `org-semantic-cache-home` on the Emacs side,
   for putting the downloaded models somewhere other than `$XDG_CACHE_HOME`.
   A model is 128 MB to 2.24 GB, which is worth being able to move.
@@ -49,5 +58,8 @@ section for the GitHub release body and refuses a tag it cannot find one for.
   nothing beyond that has been tried on it — no indexing, no searching.
 - Nothing is interruptible while a model downloads — that wait has no unit
   boundaries to check a cancellation between.
+- The Emacs package does not install or update the binary yet. It checks the
+  version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/commits/main
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.1.0
