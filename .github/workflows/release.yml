@@ -67,6 +67,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Whole history and every tag: the check below compares this release
+          # against the one before it.
+          fetch-depth: 0
       - name: What is being built
         id: what
         run: |
@@ -91,6 +95,33 @@ jobs:
             TAG="${GITHUB_REF_NAME#v}"
             test "$TAG" = "$ELISP" || {
               echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+          fi
+
+      # **Rust that changed must say so, or the floor stops being able to name
+      # anything.**  `org-semantic-minimum-binary-version` works by naming the
+      # binary version that introduced what the elisp needs.  Ship two different
+      # binaries reporting the same version and no floor can tell them apart: a
+      # user on the older one is told nothing and meets an "unknown method"
+      # instead.  Silent, and only discovered by whoever hits it.
+      #
+      # Comparing against the previous *tag* rather than the previous commit, so
+      # this asks the question a release asks: has the binary changed since the
+      # last one that shipped?  Skipped when there is no previous tag, and on a
+      # dry run, which has no release to be compared with.
+      - name: Rust that changed since the last release must carry a new version
+        if: github.event_name == 'push'
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -z "$PREV" ]; then echo "no previous tag; nothing to compare"; exit 0; fi
+          NOW=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          WAS=$(git show "$PREV:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          echo "since $PREV: binary was $WAS, is $NOW"
+          if git diff --quiet "$PREV" HEAD -- src/ Cargo.lock; then
+            echo "no Rust change since $PREV"
+          elif [ "$NOW" = "$WAS" ]; then
+            echo "::error::the Rust changed since $PREV but Cargo.toml still says $NOW"
+            git diff --stat "$PREV" HEAD -- src/ Cargo.lock
+            exit 1
           fi
       # The changelog is the only place release prose lives.  A second copy per
       # tag would drift from it, which is how the README and the manual drifted

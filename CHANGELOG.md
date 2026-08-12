@@ -14,9 +14,36 @@ otherwise the only way to find out is to update and see. A release that changes
 the elisp alone leaves the binary where it was, and there is nothing to
 download — the client checks a version floor rather than a match.
 
-Cutting a release: move everything under `[Unreleased]` into a new version
-heading with today's date, and push the tag. The release workflow reads that
-section for the GitHub release body and refuses a tag it cannot find one for.
+### Three version numbers, and when each moves
+
+| number | where | moves when |
+|---|---|---|
+| release | `org-semantic-version`, and the tag | anything ships at all |
+| binary | `version` in `Cargo.toml` | the Rust changes |
+| floor | `org-semantic-minimum-binary-version` | the elisp starts needing something the server did not have |
+
+The floor is the one users feel: raising it tells everyone with an older binary
+to update. So raise it only when the elisp actually depends on something new — a
+new method, a new field, a changed reply shape — and raise it, in the same commit
+that starts depending on it, to the binary version that introduced the thing. Not
+to "the current version", and never merely to be tidy.
+
+The binary version is what the floor names, so it has to move whenever the Rust
+does, whether or not the elisp cares yet. Skip it and two different binaries
+report the same version, after which no floor can tell them apart — the release
+job refuses a tag whose Rust changed without it.
+
+### Cutting a release
+
+1. Set `org-semantic-version` to the new release. Bump `Cargo.toml` if the Rust
+   changed since the last tag; leave it alone if it did not.
+2. Move everything under `[Unreleased]` into a new version heading with today's
+   date, and say in it which binary version the release carries.
+3. Commit, tag `vX.Y.Z`, push the tag.
+
+The workflow refuses the tag unless it matches `org-semantic-version`, the
+changelog has a section for it, and the floor is not above the binary being
+built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
