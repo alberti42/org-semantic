@@ -182,8 +182,18 @@ impl Server {
         // wrongly refuses again after the very run it asked for, and forever.
         // Any tightening here must keep that bias: say "missing" only when the
         // big artifact is genuinely absent, which is the case that costs
-        // minutes. Enumerating fastembed's own file list would be exact and
-        // would trade a brief stall for a permanent wedge.
+        // minutes.
+        //
+        // And there is no exact check to be had cheaply, which is worth knowing
+        // before reaching for one. `ModelInfo` names the ONNX artifacts alone —
+        // `model_file` and `additional_files`, which is exactly what
+        // `download_size` walks — while the four files fastembed also fetches
+        // are hardcoded in its own loader (`tokenizer.json`, `config.json`,
+        // `special_tokens_map.json`, `tokenizer_config.json`, common.rs:44-48)
+        // and appear in no metadata. So enumerating `ModelInfo` would check the
+        // same set this already sums, by a longer route; being exact would mean
+        // curating those four names, which is the thing `download_size`
+        // deliberately does not do.
         if weight_bytes(m).is_none() {
             return Err(fault(
                 "model-missing",
