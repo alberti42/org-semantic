@@ -400,12 +400,27 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// How a first run explains the wait it is about to impose.
-fn fetching_now(what: &str, size: Option<u64>) -> String {
+///
+/// BESIDES says what the number leaves out, and exists because the two callers
+/// download different shapes of thing. The language classifier is one file, so
+/// its size is the whole of it. An embedding model is weights *plus* a tokenizer
+/// and three small configs, which `download_size` cannot count — they are named
+/// nowhere in fastembed's metadata, only in its loader — so quoting the weights
+/// alone as though it were the total would be a figure that is quietly short.
+/// It is short by little for a WordPiece tokenizer (0.7 MB) and by 17 MB for a
+/// multilingual one, which is a quarter of a minute on a slow line.
+///
+/// Naming the shortfall rather than measuring it is deliberate: measuring would
+/// mean writing fastembed's four filenames down here, and this whole path exists
+/// to follow fastembed's choices instead of restating them.
+fn fetching_now(what: &str, size: Option<u64>, besides: &str) -> String {
     match size {
         Some(n) => format!(
-            "{what} ({}) is not cached; fetching it before this run can start",
+            "{what} ({}{besides}) is not cached; fetching it before this run can start",
             human_bytes(n)
         ),
+        // Nothing is claimed about the composition either, when the size itself
+        // could not be had.
         None => format!("{what} is not cached; fetching it before this run can start"),
     }
 }
@@ -834,7 +849,10 @@ fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
         // things redrawn in place, and a run with its output in a log file
         // still deserves to know why it is about to sit there.
         let size = head_size(LID_URL);
-        j.remark(Remark::new("model-downloaded", fetching_now("the language classifier", size)));
+        j.remark(Remark::new(
+            "model-downloaded",
+            fetching_now("the language classifier", size, ""),
+        ));
         j.progress(&Progress::new("lexical", "download", "bytes", 0, 0.0).maybe_sized(size));
     }
     let lid = classifier()?;
@@ -4018,7 +4036,10 @@ fn cmd_index(
         let cold = find_tokenizer(m).is_err();
         if cold {
             let size = download_size(m);
-            j.remark(Remark::new("model-downloaded", fetching_now(m.name, size)));
+            j.remark(Remark::new(
+                "model-downloaded",
+                fetching_now(m.name, size, " of weights, plus its tokenizer and config"),
+            ));
             j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).maybe_sized(size));
         }
         let t = tokenizer_for(m)?;
@@ -6474,8 +6495,26 @@ mod tests {
         assert_eq!(human_bytes(133_093_490), "133 MB");
         assert_eq!(human_bytes(2_235_909_179), "2.2 GB");
         // Not knowing is a supported answer, and must not read as knowing zero.
-        assert!(!fetching_now("a model", None).contains('('));
-        assert!(fetching_now("a model", Some(133_093_490)).contains("133 MB"));
+        assert!(!fetching_now("a model", None, "").contains('('));
+        assert!(fetching_now("a model", Some(133_093_490), "").contains("133 MB"));
+    }
+
+    /// A quoted size says what it covers, because for one of the two callers it
+    /// is not the whole download.
+    ///
+    /// The classifier is a single file, so its size is all of it.  An embedding
+    /// model is weights plus a tokenizer and three configs that `download_size`
+    /// cannot see — 0.7 MB of tokenizer under BGE's WordPiece, 17 MB under E5's
+    /// 250,002-token unigram vocabulary.  Quoting the weights alone as the total
+    /// is short by a quarter of a minute's download on a slow line.
+    #[test]
+    fn a_quoted_size_says_what_it_leaves_out() {
+        let model = fetching_now("e5-small", Some(448_000_000), " of weights, plus its tokenizer");
+        assert!(model.contains("448 MB of weights, plus its tokenizer"), "{model}");
+        // And the classifier says no such thing, having no tokenizer at all.
+        let classifier = fetching_now("the language classifier", Some(938_013), "");
+        assert!(classifier.contains("(938 kB)"), "{classifier}");
+        assert!(!classifier.contains("tokenizer"), "{classifier}");
     }
 
     /// One report as a test cares about it.
