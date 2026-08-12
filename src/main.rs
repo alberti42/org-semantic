@@ -1415,6 +1415,18 @@ fn resolve_config(vault: &Path, given: Option<&Path>, j: &mut Journal) -> Result
 /// How the CLI says yes.  `serve` names its own, since an editor has no flags.
 const CLI_REMEDY: &str = "pass --full to rebuild under the new one";
 
+/// Why a `lang:` predicate cannot be answered by the semantic index.
+///
+/// One sentence in one place, with each caller appending its own remedy — the
+/// arrangement `CLI_REMEDY` above already uses, and for the reason this needs it:
+/// the two copies of this message drifted, and the one in `serve` went on
+/// accepting `-lang:` after the other had learned to refuse it.
+///
+/// "applies to" rather than "narrows": narrowing is what a predicate that *works*
+/// does, so the old wording read as though the search had been filtered, which is
+/// the opposite of what happened.
+const LANG_IS_LEXICAL: &str = "lang: applies to the lexical index only";
+
 fn check_config(
     previous: Option<u64>,
     cfg: &Config,
@@ -4822,7 +4834,7 @@ fn cmd_search(
     // semantic index therefore records no language, so this predicate could only
     // ever match nothing — better said than silently returned.
     if f.wants_language() {
-        return Err(anyhow!("lang: narrows the lexical index only; add --lexical"));
+        return Err(anyhow!("{LANG_IS_LEXICAL}; add --lexical"));
     }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&ix.chunks[i])).collect();
     if !f.is_empty() && !json {

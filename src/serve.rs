@@ -397,7 +397,7 @@ impl Server {
         // the exclusion had been applied.  A predicate that does nothing looks
         // exactly like one that found nothing to remove.
         if f.wants_language() {
-            return Err(anyhow!("lang: narrows the lexical index only"));
+            return Err(anyhow!("{LANG_IS_LEXICAL}"));
         }
         let s = self.semantic(&vault, want)?;
         let dim = s.which.dim;
