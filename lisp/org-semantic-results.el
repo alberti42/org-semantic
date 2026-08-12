@@ -339,7 +339,6 @@ is here, since the notes may have moved on.
 
 ;;;; Asking
 
-;;;###autoload
 (defun org-semantic--find-prompts (arg)
   "Return (RANKING . LIMITS): what a raw prefix ARG asks to be asked.
 
@@ -402,6 +401,7 @@ front-end is free to rebind."
        (complete-with-action action org-semantic--rankings string predicate)))
    nil t nil nil org-semantic-results-ranking))
 
+;;;###autoload
 (defun org-semantic-find (query &optional arg)
   "Search the current buffer's vault for QUERY and show what comes back.
 

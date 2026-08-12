@@ -138,6 +138,57 @@ serialises to something the server will not parse."
                                   (buffer-string)))))))))
 
 
+;;;; What can be reached before the package is loaded
+
+(defun org-semantic-tests--autoloaded ()
+  "Every name carrying an autoload cookie, read out of the sources.
+
+Read from the files rather than from `autoloadp', because what goes
+wrong is the cookie drifting off the definition it belonged to --
+and once that has happened the symbol is not autoloaded at all,
+which is precisely what cannot be observed from inside a session
+that has already loaded everything."
+  (let (out)
+    (dolist (file '("org-semantic.el" "org-semantic-ui.el" "org-semantic-results.el"))
+      (let ((path (expand-file-name (concat "lisp/" file) org-semantic-tests--root)))
+        (when (file-readable-p path)
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (while (re-search-forward "^;;;###autoload\n(\\(?:cl-\\)?def[a-z]* \\([^ ()\n]+\\)" nil t)
+              (push (intern (match-string 1)) out))))))
+    out))
+
+(ert-deftest every-entry-point-is-autoloaded ()
+  "A command a user types must not need the package loaded first.
+
+**The failure is silent until a restart.**  Inserting a helper
+between a cookie and the function it belonged to moves the cookie
+onto the helper, and nothing complains: the command still works for
+the rest of that session, because everything is already loaded.  It
+is the next fresh Emacs that cannot find it -- and `use-package'
+`:bind' makes it worse by autoloading the command from the
+package's *main* file, so the error names a file the command was
+never in.
+
+That is not hypothetical; it happened to `org-semantic-find' while
+its prefix handling was being rewritten."
+  (let ((autoloaded (org-semantic-tests--autoloaded)))
+    ;; Found something at all, or this passes by checking nothing.
+    (should (> (length autoloaded) 5))
+    (dolist (command '(org-semantic-find
+                       org-semantic-find-at-point
+                       org-semantic-reindex
+                       org-semantic-cancel
+                       org-semantic-show-status
+                       org-semantic-visit-hit))
+      (should (memq command autoloaded)))
+    ;; And nothing private is: an autoload for a `--' name is a cookie that
+    ;; has slid off whatever it was written for.
+    (dolist (name autoloaded)
+      (should-not (string-match-p "--" (symbol-name name))))))
+
+
 ;;;; Which binary gets run
 
 (ert-deftest a-binary-in-the-install-directory-needs-no-configuration ()
