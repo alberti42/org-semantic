@@ -158,8 +158,19 @@ something else:
 (defface org-semantic-results-heading '((t :inherit default))
   "Face for a hit's outline path.")
 
-(defface org-semantic-results-score '((t :inherit shadow))
-  "Face for how well a hit matched.")
+(defface org-semantic-results-score '((t :inherit bold))
+  "Face for how well a hit matched.
+
+**Not `shadow'.**  It was, which made the head of a block the
+dimmest thing in it and its body the brightest -- so a screen of
+hits read as one wall of prose with no visible seam between
+entries.
+
+A weight and not a colour, because the address beside it is already
+a link and a second colour would compete with it.  `bold' rather
+than `semi-bold': a font without a semi-bold face falls back to
+normal, which would leave the head as flat as the body again on
+someone else's machine and say nothing about it.")
 
 (defface org-semantic-results-location '((t :inherit shadow))
   "Face for the separators between the parts of a hit's address.")
@@ -174,8 +185,16 @@ different, and nothing else says so.")
 (defface org-semantic-results-annotation '((t :inherit shadow))
   "Face for a hit's TODO keyword, priority and tags.")
 
-(defface org-semantic-results-gutter '((t :inherit line-number))
-  "Face for the few columns at the start of a passage line.")
+(defface org-semantic-results-gutter '((t :inherit shadow))
+  "Face for the few columns at the start of a passage line.
+
+`shadow' and **not `line-number', which many themes give a
+background**: the gutter is blank unless
+`org-semantic-results-line-numbers' is on, so a background painted
+it as a grey block four columns wide against nothing else in the
+buffer -- decoration marking a margin that carries no information.
+`shadow' colours the digits when there are digits and is invisible
+when there are not.")
 
 (defface org-semantic-results-duplicate '((t :inherit shadow))
   "Face for a passage line already shown, in full, further up.")
@@ -305,7 +324,11 @@ is here, since the notes may have moved on.
   (setq-local word-wrap t)
   (setq next-error-function #'org-semantic-results--next-error)
   (setq next-error-last-buffer (current-buffer))
-  (add-to-invisibility-spec '(org-semantic-results . t))
+  ;; The symbol alone, **not `(symbol . t)`**: the cons is what asks Emacs to
+  ;; draw its own `...' where the hidden text was, which lands at the end of
+  ;; the last visible line and says a second time what `⋯ 3 lines' already
+  ;; says -- less precisely, and in the wrong place.
+  (add-to-invisibility-spec 'org-semantic-results)
   (add-hook 'kill-buffer-hook #'org-semantic-results--abandon nil t))
 
 (defun org-semantic-results--abandon ()
@@ -874,23 +897,39 @@ line and not a rendering of one."
                           ;; gutter rather than under the note's own
                           ;; first column.
                           'wrap-prefix (make-string (length gutter) ?\s))))
-        (unless mine
-          (setq props (append (list 'face 'org-semantic-results-duplicate) props)))
         (when (and limit (>= shown limit))
           (setq props (append (list 'invisible 'org-semantic-results
                                     'org-semantic-elided t)
                               props)))
-        (insert (apply #'propertize (concat gutter line "\n") props)))
+        ;; The dimming goes on the note's own text and **not over the gutter**,
+        ;; which keeps its own face.  Applied to the whole line it overrode the
+        ;; gutter's, so a repeated line lost the margin its neighbours had and
+        ;; the left edge came out ragged — the same four columns present on some
+        ;; lines and absent on others, for no reason a reader could see.
+        (insert (apply #'propertize
+                       (concat gutter
+                               (if mine
+                                   line
+                                 (propertize
+                                  line 'face 'org-semantic-results-duplicate))
+                               "\n")
+                       props)))
       (setq number (1+ number)
             shown (1+ shown)))
     (when (and limit (> (length lines) limit))
       (setf (org-semantic-results--item-elided item) (- (length lines) limit))
-      (org-semantic-results--insert-elision item))))
+      ;; Indented to the gutter, not to a constant: with line numbers on the
+      ;; gutter is wider than four columns, and a label that assumed four sat
+      ;; left of the text it stands in for.
+      (org-semantic-results--insert-elision
+       item (make-string (+ 4 (if org-semantic-results-line-numbers width 0)) ?\s)))))
 
-(defun org-semantic-results--insert-elision (item)
-  "Insert the marker standing in for the lines ITEM folded away."
+(defun org-semantic-results--insert-elision (item indent)
+  "Insert the marker standing in for the lines ITEM folded away.
+INDENT is the gutter it lines up with."
   (insert (propertize
-           (format "    ⋯ %d line%s\n"
+           (format "%s⋯ %d line%s\n"
+                   indent
                    (org-semantic-results--item-elided item)
                    (if (= (org-semantic-results--item-elided item) 1) "" "s"))
            'face 'org-semantic-results-elision

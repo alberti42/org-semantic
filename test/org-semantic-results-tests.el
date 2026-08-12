@@ -201,6 +201,64 @@ under point survives having no mouse affordance on it."
     ;; what RET, `n' and `next-error' all read.
     (should (equal (org-semantic-results-tests--passage-lines) '(4 5 6)))))
 
+(ert-deftest the-gutter-is-the-same-width-on-every-passage-line ()
+  "Including the lines a repeat dims, which used to lose it.
+
+The dimming was applied over the whole line, so it overrode the
+gutter's own face and a repeated line came out with four columns of
+margin where its neighbours had none, or the other way about.  The
+left edge went ragged for a reason no reader could see.
+
+Also: the gutter must not be the face `display-line-numbers' uses.
+Many themes give `line-number' a *background*, which painted the
+blank gutter as a grey block marking a margin that carries nothing."
+  (org-semantic-results-tests--drawn
+      ;; The second hit repeats two of the first's lines, so the claim map
+      ;; dims them.
+      (list (org-semantic-results-tests--hit :startLine 4 :endLine 6)
+            (org-semantic-results-tests--hit :startLine 6 :endLine 8
+                                             :text "three\nfour\nfive"))
+    (let ((widths nil))
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (get-text-property (line-beginning-position) 'occur-prefix)
+          (let ((p (line-beginning-position)) (n 0))
+            (while (eq (get-text-property p 'face) 'org-semantic-results-gutter)
+              (setq n (1+ n) p (1+ p)))
+            (push n widths)))
+        (forward-line 1))
+      (should (> (length widths) 3))
+      (should (equal (delete-dups (copy-sequence widths)) '(4))))
+    ;; And a dimmed line is still dimmed -- the fix moved the face, not
+    ;; removed it.
+    (goto-char (point-min))
+    (should (re-search-forward "^    three$" nil t))
+    (should (re-search-forward "^    three$" nil t))
+    (goto-char (+ 4 (line-beginning-position)))
+    (should (eq (get-text-property (point) 'face) 'org-semantic-results-duplicate)))
+  (should-not (eq (face-attribute 'org-semantic-results-gutter :inherit) 'line-number)))
+
+(ert-deftest hidden-lines-are-counted-and-not-also-elided-by-emacs ()
+  "One statement of what was folded away, in the right place.
+
+`(SYMBOL . t)' in `buffer-invisibility-spec' asks Emacs to draw its
+own `...' where the hidden text was -- at the end of the last
+visible line, saying less precisely what `⋯ 2 lines' already says
+one line below.  The symbol alone hides without commentary."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :startLine 1 :endLine 5 :text "one\ntwo\nthree\nfour\nfive"))
+    (let ((org-semantic-results-passage-lines 3))
+      (org-semantic-results--render
+       (list :hits (list (org-semantic-results-tests--hit
+                          :startLine 1 :endLine 5
+                          :text "one\ntwo\nthree\nfour\nfive")))))
+    (should (memq 'org-semantic-results buffer-invisibility-spec))
+    (should-not (assq 'org-semantic-results buffer-invisibility-spec))
+    ;; The label says how many, and lines up with the text it stands for.
+    (goto-char (point-min))
+    (should (re-search-forward "^    ⋯ 2 lines$" nil t))))
+
 (ert-deftest the-note-title-is-not-repeated-beside-its-filename ()
   "The heading begins with the title, which the file already names.
 
