@@ -35,21 +35,32 @@ env:
   TEAM_ID: 9V3X7C8VCK
 
 jobs:
-  # One repo, one release, one version -- the package checks it is talking to its
-  # own binary.  A tag that disagrees with either declaration would ship a pair
-  # that warns about itself on every handshake, so it fails here instead.
+  # **Two versions, deliberately.**  The tag is the *release*, which is the
+  # package's: it moves whenever anything ships, an elisp-only change included.
+  # Cargo.toml is the *binary's*, and moves only when the Rust does -- otherwise
+  # every documentation fix would hand users a 40 MB download with nothing in it.
+  #
+  # So the tag must equal the elisp release version, and nothing here compares
+  # either of them to Cargo.toml.  What is checked instead is the one way the
+  # pair can actually be broken: a package requiring a binary newer than the one
+  # this release builds, which no user could satisfy.
   version:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: The tag, Cargo.toml and the elisp must agree
+      - name: The tag is the release, and the elisp must say so
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           ELISP=$(sed -n 's/^(defconst org-semantic-version "\(.*\)".*/\1/p' lisp/org-semantic.el)
-          echo "tag=$TAG cargo=$CARGO elisp=$ELISP"
-          test "$TAG" = "$CARGO" || { echo "::error::Cargo.toml says $CARGO, tag says $TAG"; exit 1; }
-          test "$TAG" = "$ELISP" || { echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+          MIN=$(sed -n 's/^(defconst org-semantic-minimum-binary-version "\(.*\)".*/\1/p' lisp/org-semantic.el)
+          echo "tag=$TAG  elisp=$ELISP  binary=$CARGO  needs>=$MIN"
+          test "$TAG" = "$ELISP" || {
+            echo "::error::org-semantic-version is $ELISP, tag says $TAG"; exit 1; }
+          # A minimum above the binary being shipped is unsatisfiable: every user
+          # of this release would be warned by the release itself.
+          printf '%s\n%s\n' "$MIN" "$CARGO" | sort -C -V || {
+            echo "::error::this package needs a binary >= $MIN but ships $CARGO"; exit 1; }
       - name: Release notes must exist
         run: |
           test -f "release-notes/${GITHUB_REF_NAME}.md" || {

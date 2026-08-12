@@ -364,8 +364,8 @@ exactly as long as the editor does.
 
 A session opens with =initialize= and the =initialized= notification, as LSP
 sessions do; =jsonrpc.el= and Eglot do this for you. Nothing is negotiated there
---- the package and the binary are [[#version][one release]] --- but it is where
-the server says which one it is.
+--- the package and the binary ship from [[#version][one repository]] --- but it is where
+the server says which version it is.
 
 *An index runs on a thread of its own, so the server keeps answering while it
 works.* A =search= sent during a reindex is answered from the version committed
@@ -478,10 +478,21 @@ what the CLI does.
 :CUSTOM_ID: version
 :END:
 
-The Emacs package and the binary are one release, shipped from one repository,
-so there is one version between them and nothing to negotiate. A client checks
-that the binary is the one its own release expects, and installs the right one
-if it is not.
+The Emacs package and the binary ship from one repository, so there is nothing
+to negotiate --- but they carry *two* versions, because they do not change
+together. The package's moves whenever anything ships, a change to one elisp file
+included; the binary's moves only when the Rust does.
+
+So a client checks a **floor**, not a match: it needs a binary no older than the
+oldest one it knows how to talk to, and anything from there up is fine. A newer
+binary is not a problem --- the protocol gains methods and fields rather than
+changing them --- and neither is one that will not say what it is, which is a
+missing answer rather than an old one.
+
+The practical effect: *a release that only touches the elisp asks you to
+download nothing.* Comparing the two for equality instead would report that one
+of them was stale every time one of them moved, and the only way to quiet it
+would be a 40 MB rebuild with no change in it.
 
 Ask the *file*, before starting anything:
 

@@ -56,12 +56,28 @@
 (defconst org-semantic-version "0.1.0"
   "The release this package is from.
 
-The package and the binary ship from one repository as one release,
-so there is no protocol to negotiate: either the binary is the one
-this file expects or it is the wrong binary.  Compared against the
-file before starting it, and against the process afterwards -- two
-different questions once a new binary has been installed under a
-server that is still running.")
+The release version, which is the package's: it moves whenever
+anything here ships, including a change to this file alone.  It is
+*not* what the binary reports, and the two are compared through
+`org-semantic-minimum-binary-version' rather than for equality.")
+
+(defconst org-semantic-minimum-binary-version "0.1.0"
+  "The oldest binary this package knows how to talk to.
+
+Bump this only when the elisp starts needing something the server
+did not have -- a new method, a new field, a changed reply shape.
+Not when the binary merely gains something this file does not use.
+
+*Why a minimum and not the release version.* They ship from one
+repository, but they do not change together: an elisp-only release
+is common and a rebuild of the binary is 40 MB the user has no
+reason to fetch.  Comparing for equality made every such release
+warn that one of them was stale, when nothing was.
+
+A binary *newer* than this package is not a problem and is not
+mentioned: the protocol only gains things, so an old client and a
+new server understand each other by construction.  What breaks is
+the other direction, which is what this catches.")
 
 
 ;;;; Settings
@@ -392,14 +408,26 @@ one from `org-semantic--server-version'."
     (when (zerop (process-file (org-semantic--binary) nil t nil "--version"))
       (string-trim (buffer-string)))))
 
+(defun org-semantic--too-old-p (found)
+  "Whether FOUND is a binary version older than this package can use.
+
+Nil for a version at or above the minimum, and nil for nil: a
+binary that will not say what it is has not said it is too old,
+and refusing to work with it on that basis would be guessing."
+  (and found (ignore-errors (version< found org-semantic-minimum-binary-version))))
+
 (defun org-semantic--check-version (found where)
-  "Warn unless FOUND is this package's release.  WHERE says what was asked."
-  (when (and found (not (equal found org-semantic-version)))
+  "Warn when FOUND is too old for this package.  WHERE says what was asked.
+
+Only the lower bound is checked; see
+`org-semantic-minimum-binary-version' for why a newer binary is
+silent rather than suspicious."
+  (when (org-semantic--too-old-p found)
     (display-warning
      'org-semantic
-     (format "%s is org-semantic %s, but this package is %s; \
-they ship as one release, so one of them is stale"
-             where found org-semantic-version))))
+     (format "%s is org-semantic %s, but this package needs %s or newer; \
+update the binary"
+             where found org-semantic-minimum-binary-version))))
 
 (defun org-semantic--handle-notification (_conn method params)
   "Handle METHOD with PARAMS, a notification from the server.

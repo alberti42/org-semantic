@@ -99,6 +99,41 @@ is minutes, so a second `C-u' has to be the expensive one."
   (should (equal (org-semantic--reindex-flags '-) '(t . nil))))
 
 
+;;;; Which binary this package will work with
+
+(ert-deftest a-binary-is-old-enough-or-it-is-not ()
+  "A minimum, not an equality -- and the direction is the whole point.
+
+The release version moves whenever anything ships, an elisp-only
+change included, so comparing the binary against it warned that
+one of them was stale every time nothing was.  What matters is
+only whether the server predates something this file needs.
+
+Inverting the comparison fails nothing and looks like nothing,
+which is why it is pinned here rather than left to the one call
+site."
+  (let ((org-semantic-minimum-binary-version "0.2.0"))
+    (should (org-semantic--too-old-p "0.1.9"))
+    (should (org-semantic--too-old-p "0.1.99"))
+    (should-not (org-semantic--too-old-p "0.2.0"))
+    ;; Newer is silent, not suspicious: the protocol only gains things.
+    (should-not (org-semantic--too-old-p "0.3.0"))
+    (should-not (org-semantic--too-old-p "1.0.0"))
+    ;; A binary that will not say what it is has not said it is too old.
+    (should-not (org-semantic--too-old-p nil))
+    (should-not (org-semantic--too-old-p "not a version"))))
+
+(ert-deftest an-elisp-only-release-does-not-condemn-the-binary ()
+  "The regression this split exists for, stated as the case that bit.
+
+Ship 0.2.1 of the package against a binary still reporting 0.1.0,
+with the minimum left where it was: nothing is wrong, so nothing
+is said."
+  (let ((org-semantic-version "0.2.1")
+        (org-semantic-minimum-binary-version "0.1.0"))
+    (should-not (org-semantic--too-old-p "0.1.0"))))
+
+
 ;;;; Where the server downloads its models
 
 (ert-deftest a-cache-directory-is-expanded-before-it-is-handed-over ()

@@ -80,7 +80,7 @@ starting from [`config.example.json`](config.example.json).
   - [Searching from Emacs](https://alberti42.github.io/org-semantic/#searching-from-emacs) — the results buffer, and the keys that walk it
     - [Settings](https://alberti42.github.io/org-semantic/#emacs-settings) — every variable the package exposes
   - [Driving it from Emacs, or anything else](https://alberti42.github.io/org-semantic/#driving-it-from-an-editor) — `--json` and `serve`
-    - [Which binary you are talking to](https://alberti42.github.io/org-semantic/#version) — one repo, one release, one version
+    - [Which binary you are talking to](https://alberti42.github.io/org-semantic/#version) — one repo, and a version floor rather than a match
     - [Errors you are meant to act on](https://alberti42.github.io/org-semantic/#errors-a-client-acts-on) — labelled, so a client can offer the fix
     - [Watching an index happen](https://alberti42.github.io/org-semantic/#progress) — `$/progress` while a reindex runs
     - [Stopping a run](https://alberti42.github.io/org-semantic/#cancelling) — `$/cancelRequest`, by the id it answers under
