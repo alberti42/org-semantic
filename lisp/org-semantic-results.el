@@ -96,6 +96,39 @@ seconds.  It is the `mode' the server is asked for, spelled
   :type '(choice (const :tag "By meaning" "semantic")
                  (const :tag "By word" "lexical")))
 
+(defcustom org-semantic-results-display-action
+  '(display-buffer-reuse-mode-window)
+  "How the results buffer asks to be shown, as a `display-buffer' ACTION.
+
+**A default, never a decision.**  `display-buffer-alist' is a user
+option and is consulted *before* the ACTION a caller passes, so
+anything set there wins over this without having to know it
+exists.  That is why this package does not add an entry to
+`display-buffer-alist' itself: a package writing to a user's own
+option would sit in front of what the user asked for.
+
+The default expresses a *behaviour* and not a layout: reuse a
+window already showing results, so searching again does not open
+another one.  Where that window goes, and how large it is, is
+taste, and taste is the user's -- with nothing reusable it simply
+falls through to how Emacs shows any other buffer.
+
+For a results panel down the right-hand side, put this in your
+configuration rather than here:
+
+  (add-to-list \\='display-buffer-alist
+               \\='((derived-mode . org-semantic-results-mode)
+                 (display-buffer-reuse-mode-window
+                  display-buffer-in-direction
+                  display-buffer-use-some-window)
+                 (direction . right)
+                 (window-width . 0.5)))
+
+Order matters there, and not obviously: `display-buffer-use-some-window'
+falls back to `get-largest-window' and so all but always succeeds,
+which leaves anything after it unreachable.  Put it last."
+  :type 'sexp)
+
 (defcustom org-semantic-results-reveal-function
   #'org-semantic-results-reveal-in-dired
   "How to show the directory part of a hit's address.
@@ -312,7 +345,7 @@ search -- with the rest of it as free text."
             org-semantic-results--k k
             org-semantic-results--per-file per-file)
       (org-semantic-results--search))
-    (pop-to-buffer buffer)))
+    (pop-to-buffer buffer org-semantic-results-display-action)))
 
 ;;;###autoload
 (defun org-semantic-find-at-point (&optional arg)

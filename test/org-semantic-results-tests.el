@@ -203,6 +203,25 @@ Emacs happens to have."
         (org-semantic-results-goto))
       (should (equal asked '("/vault/notes/" "/vault/notes/a.org"))))))
 
+(ert-deftest the-buffer-asks-to-be-shown-and-does-not-insist ()
+  "The action is passed to `display-buffer', not written into the user's alist.
+
+`display-buffer-alist' is consulted first, so a preference passed
+this way is overridden by anything the user set without either
+side having to know about the other.  Writing to that option
+instead would put this package in front of what the user asked
+for, which is why the test is that the action *travels* rather
+than that a window appears somewhere."
+  (let (action)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (_buffer &optional a &rest _) (setq action a)))
+              ((symbol-function 'org-semantic-results--search) #'ignore)
+              ((symbol-function 'org-semantic-vault-or-error) (lambda (&rest _) "/vault"))
+              ((symbol-function 'read-string) (lambda (&rest _) "q")))
+      (let ((org-semantic-results-display-action '(a-deliberate-marker)))
+        (org-semantic-find "q")
+        (should (equal action '(a-deliberate-marker)))))))
+
 (ert-deftest a-word-score-never-grows-a-sigma ()
   "BM25 is unbounded and comparable with nothing, so it gets no scale.
 

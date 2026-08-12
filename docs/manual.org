@@ -313,6 +313,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 | ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |
+| ~org-semantic-results-display-action~ | reuse a results window | how the buffer asks to be shown --- below         |
 
 The timeouts are generous rather than tight, and exist because jsonrpc.el wants a
 number: a warm search is under ten milliseconds, the first one against a vault
@@ -419,6 +420,31 @@ flag is: a setting that does nothing looks exactly like a typo that does nothing
 
 Leave it =nil= --- the default --- and the index is searched as it stands, which
 is what the command line does and is never wrong.
+
+*Where the results buffer appears is yours, and this package does not touch
+=display-buffer-alist=.* That is a user option, and Emacs consults it *before*
+the action a caller passes --- so whatever you put there wins over
+~org-semantic-results-display-action~ without either side knowing about the
+other. What the default asks for is a behaviour rather than a layout: reuse a
+window already showing results, so searching again does not open another one.
+With nothing to reuse it falls through to however Emacs shows any other buffer.
+
+For a panel down the right-hand side, in your own configuration:
+
+#+begin_src emacs-lisp
+(add-to-list 'display-buffer-alist
+             '((derived-mode . org-semantic-results-mode)
+               (display-buffer-reuse-mode-window
+                display-buffer-in-direction
+                display-buffer-use-some-window)
+               (direction . right)
+               (window-width . 0.5)))
+#+end_src
+
+The order of those three matters, and not obviously:
+=display-buffer-use-some-window= falls back to =get-largest-window= and so all
+but always succeeds, which leaves anything listed after it unreachable ---
+=direction= and =window-width= included. Put it last.
 
 A hit's address is four links --- the directory, the note, the section and the
 line --- and each goes to the thing it names. The directory opens in Dired;
