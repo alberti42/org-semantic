@@ -174,11 +174,10 @@ policy that has since drifted, which is a decision they make once.")
 (defvar-local org-semantic-results--indexing nil
   "Whether the last reply said an index was running.")
 
-(defvar-local org-semantic-results--drift nil
-  "Whether a drifted policy has already been raised in this buffer.
-The condition holds until the user acts on it, so it is said once
-and then kept to a line -- otherwise every later search says it
-again.")
+(defvar-local org-semantic-results--latched nil
+  "The failure kinds already said in full in this buffer.
+See `org-semantic-results--latching' for which ones those are and
+why they are not said twice.")
 
 
 ;;;; A drawn unit
@@ -692,24 +691,34 @@ against a span of several lines is this and not a blank line."
 
 ;;;; Errors
 
+(defconst org-semantic-results--latching '("config-drift" "model-missing")
+  "The failures that hold until the user acts on them.
+
+Said in full once and kept to a line after that.  Both of these
+describe a state of the vault rather than of the request: a policy
+that has drifted stays drifted, and a model that is not downloaded
+stays undownloaded, so asking again cannot answer differently.
+Anything else -- a mistyped model, a vault that vanished -- is
+about the request, and the next one may well be fine.
+
+This is what stops search-as-you-type raising the same prompt on
+every keystroke.")
+
 (defun org-semantic-results--render-error (error-object)
   "Draw what ERROR-OBJECT says, and what can be done about it."
   (let* ((inhibit-read-only t)
          (remedy (org-semantic-ui-remedy error-object org-semantic-results--mode))
          (kind (org-semantic-ui-remedy-kind remedy))
-         (drift (equal kind "config-drift")))
+         (latching (member kind org-semantic-results--latching)))
     (setq mode-line-process nil)
     (force-mode-line-update)
-    ;; A drifted policy holds until the user acts on it, so it is said in
-    ;; full once and kept to a line after that.  Unlatched, a search on
-    ;; every keystroke would raise it on every keystroke.
-    (if (and drift org-semantic-results--drift)
+    (if (and latching (member kind org-semantic-results--latched))
         (save-excursion
           (goto-char (point-max))
           (insert (propertize (format "\n%s\n"
                                       (org-semantic-ui-remedy-message remedy))
                               'face 'org-semantic-results-stale 'read-only t)))
-      (when drift (setq org-semantic-results--drift t))
+      (when latching (push kind org-semantic-results--latched))
       (erase-buffer)
       (org-semantic-results--insert-header nil nil)
       (insert (propertize (format "  %s\n\n"

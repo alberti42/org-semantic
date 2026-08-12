@@ -145,7 +145,10 @@ impl Server {
     /// The load (0.12–0.64 s) happens with this map locked, which is the one slow
     /// thing under a lock here. Releasing it around the load would buy a race in
     /// which two copies load for one name — the very waste this exists to remove.
-    fn model(&self, m: &'static Model) -> Result<Arc<Mutex<TextEmbedding>>> {
+    ///
+    /// VAULT is not used to find the model — one model serves every vault — but
+    /// to say, when refusing, whether a run that will fetch it is already going.
+    fn model(&self, m: &'static Model, vault: &Path) -> Result<Arc<Mutex<TextEmbedding>>> {
         let mut models = lock(&self.models);
         if let Some(loaded) = models.get(m.name).and_then(std::sync::Weak::upgrade) {
             return Ok(loaded);
@@ -194,14 +197,26 @@ impl Server {
         // says "missing" about a model that is present says it again after the
         // very run it asked for, and for ever.
         if !weights_cached(m) {
+            // **Whether a fetch is already going, on an error reply.** `indexing`
+            // otherwise rides `answer`, which only ever wraps a *result*, so a
+            // client repeating a search — and a search-as-you-type client repeats
+            // it per keystroke — could not tell the first refusal from the
+            // hundredth and would go on offering to start what is already
+            // running. Nothing would break, since a second `index` on one vault
+            // is refused in its turn, but the offer would be a lie.
+            let fetching = self.indexing(vault);
             return Err(fault(
                 "model-missing",
                 serde_json::json!({ "target": "semantic", "model": m.name,
-                                    "remedy": "index" }),
-                format!(
-                    "the {} model is not downloaded yet — index this vault to fetch it",
-                    m.name
-                ),
+                                    "remedy": "index", "indexing": fetching }),
+                if fetching {
+                    format!("the {} model is being downloaded now", m.name)
+                } else {
+                    format!(
+                        "the {} model is not downloaded yet — index this vault to fetch it",
+                        m.name
+                    )
+                },
             ));
         }
         let loaded = Arc::new(Mutex::new(model_with(m.which.clone(), None, false)?));
@@ -224,7 +239,7 @@ impl Server {
         if let Some(s) = lock(&self.semantic).get(&key) {
             return Ok(Arc::clone(s));
         }
-        let model = self.model(m)?;
+        let model = self.model(m, vault)?;
         let mut cache = lock(&self.semantic);
         if let Some(s) = cache.get(&key) {
             return Ok(Arc::clone(s));

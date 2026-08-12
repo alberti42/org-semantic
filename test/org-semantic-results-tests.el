@@ -560,6 +560,65 @@ about to happen."
     ;; The word index needs no model at all, so it is worth offering.
     (should (rassq 'lexical offers))))
 
+(ert-deftest a-fetch-already-running-is-not-offered-again ()
+  "Typing keeps asking, and every answer must not invite a second start.
+
+A search-as-you-type client repeats the query per keystroke, so it
+meets this refusal over and over.  Offering to download each time
+would send the user into an error of a different kind, since one
+index per vault is all there is -- so the error carries whether a
+run is already fetching, which is the one error that has to."
+  (let ((offers (org-semantic-ui-remedy-offers
+                 (org-semantic-ui-remedy
+                  '(:message "the e5-small model is being downloaded now"
+                    :data (:kind "model-missing" :model "e5-small"
+                           :remedy "index" :indexing t))
+                  "semantic"))))
+    (should-not (rassq 'index offers))
+    (should (rassq 'retry offers)))
+  ;; And `:json-false' is not nil, which is the trap that would make every
+  ;; refusal look like a fetch in progress.
+  (let ((offers (org-semantic-ui-remedy-offers
+                 (org-semantic-ui-remedy
+                  '(:message "the e5-small model is not downloaded yet"
+                    :data (:kind "model-missing" :model "e5-small"
+                           :remedy "index" :indexing :json-false))
+                  "semantic"))))
+    (should (rassq 'index offers))
+    (should-not (rassq 'retry offers))))
+
+(ert-deftest a-condition-that-holds-is-said-once-however-often-it-is-met ()
+  "The point of the latch, and the reason live search needs one.
+
+Both of these describe the vault rather than the request, so
+asking again cannot answer differently.  Ten keystrokes would
+otherwise redraw the same prompt ten times."
+  (pcase-dolist (`(,kind ,button) '(("config-drift" "Rebuild fully")
+                                    ("model-missing" "Download it")))
+    (let ((error-object (list :message (format "%s happened" kind)
+                              :data (list :kind kind :remedy "index"))))
+      (with-temp-buffer
+        (org-semantic-results-mode)
+        (setq org-semantic-results--vault "/vault"
+              org-semantic-results--query "q")
+        (dotimes (_ 5) (org-semantic-results--render-error error-object))
+        (should (member kind org-semantic-results--latched))
+        ;; Offered once, however many times the condition was met.
+        (should (= 1 (org-semantic-results-tests--occurrences button)))
+        ;; And still said each time, as a line -- silence would read as
+        ;; the search having quietly worked.
+        (should (= 5 (org-semantic-results-tests--occurrences
+                      (format "%s happened" kind)))))))
+  ;; A kind that is *not* latched is drawn in full every time, because the
+  ;; next request really may answer differently.
+  (with-temp-buffer
+    (org-semantic-results-mode)
+    (setq org-semantic-results--vault "/vault" org-semantic-results--query "q")
+    (dotimes (_ 3)
+      (org-semantic-results--render-error
+       '(:message "no such model" :data (:kind "unknown-model" :known ["a"]))))
+    (should-not org-semantic-results--latched)))
+
 (ert-deftest the-drift-prompt-is-raised-once ()
   "A drifted policy holds until the user acts, so it is said once.
 
@@ -573,7 +632,7 @@ the same question on every keystroke."
       (setq org-semantic-results--vault "/vault"
             org-semantic-results--query "q")
       (org-semantic-results--render-error error-object)
-      (should org-semantic-results--drift)
+      (should (member "config-drift" org-semantic-results--latched))
       (should (= 1 (org-semantic-results-tests--occurrences "Rebuild fully")))
       (org-semantic-results--render-error error-object)
       ;; Said again, but as a line rather than as the whole prompt.

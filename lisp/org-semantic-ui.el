@@ -215,9 +215,18 @@ nobody parses the prose to find out which call to make."
             ;; fetching hundreds of megabytes inside a query, and `index' is the
             ;; call that fetches, reports its size, and has the hours to do it.
             ("model-missing"
-             (append '(("Download it" . index))
-                     (unless (equal mode "lexical")
-                       '(("Search by word" . lexical)))))
+             (append
+              ;; Not offered while a run is already fetching it.  Pressing it
+              ;; then would be refused in its turn -- one index per vault -- so
+              ;; the offer would be inviting the user into a second error.  This
+              ;; is the one error that carries `indexing', because it is the one
+              ;; a client repeats: every keystroke of a search-as-you-type asks
+              ;; again, and without it the hundredth refusal reads as the first.
+              (if (org-semantic-true-p (plist-get data :indexing))
+                  '(("Wait for it" . retry))
+                '(("Download it" . index)))
+              (unless (equal mode "lexical")
+                '(("Search by word" . lexical)))))
             ("config-drift"
              (append '(("Rebuild fully" . index-full)
                        ("Search anyway" . waive))

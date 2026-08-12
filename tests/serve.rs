@@ -1035,6 +1035,11 @@ fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
     assert_eq!(err["data"]["kind"], "model-missing", "{err:?}");
     assert_eq!(err["data"]["model"], "bge-small-en");
     assert_eq!(err["data"]["remedy"], "index", "and says which call fetches it");
+    // No run is fetching it, so offering to start one is honest.  This is the
+    // one error carrying `indexing', because it is the one a client repeats:
+    // search-as-you-type meets it per keystroke, and without this the
+    // hundredth refusal reads exactly like the first.
+    assert_eq!(err["data"]["indexing"], false, "{err:?}");
 
     // Said by `status` too, so a client can offer to fetch before anyone is
     // turned down rather than after.
