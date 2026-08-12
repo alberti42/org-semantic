@@ -238,17 +238,21 @@ org-semantic  semantic  "vacuum bakeout procedure"
 6 notes, 11 passages in 0.31 s
 
 lab/vacuum.org  ·  2 passages
-  0.780 (+2.4σ)  Vacuum > Bakeout > Turbo pump
-  lab/vacuum.org:142  ·  :lab:vac:
+  0.780 (+2.4σ)  lab / vacuum.org > Bakeout > Turbo pump > line 142 :lab:vac:
     The turbo pump was baked out at 120 °C for 48 h before the
     chamber was vented.  Pressure after the bake settled at
     2e-10 mbar, which is the best we have seen on this chamber.
-    ⋯ 9 lines
 
-  0.712 (+1.9σ)  lines 181–194
+  0.712 (+1.9σ)  line 181
     A second bake was needed after the viewport swap: the copper
     gasket had been reused once too often.
 #+end_example
+
+A hit's address reads left to right and each part is a link: the *directory*
+opens in Dired, the *note* opens at its top, the *section* goes to its heading,
+and the *line* goes to the passage. Only the leading passage of a section
+carries the address --- the ones after it name their line alone, since the path
+is unchanged and only the line has moved.
 
 A passage is shown as the note's own lines, in order and unaltered, so =RET= goes
 to *the line under point* rather than to the top of the section --- which

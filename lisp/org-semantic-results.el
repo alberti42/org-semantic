@@ -745,8 +745,11 @@ above them and only the line has changed."
       (org-semantic-results--link
        (format "line %s" start) 'line props start
        "mouse-2: go to this passage")
+      ;; One space, as org itself separates a headline from its tags.  The
+      ;; middot the header lines use is for holding apart facts that have
+      ;; nothing to do with each other; tags follow what they belong to.
       (if annotation
-          (concat (funcall sep "  ·  ")
+          (concat (funcall plain " " 'default)
                   (funcall plain annotation 'org-semantic-results-annotation))
         "")
       (funcall plain "\n" 'default)))))
