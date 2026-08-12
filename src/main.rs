@@ -211,7 +211,7 @@ struct Progress {
     /// How large this work is when that is known but not countable.
     /// Deliberately **not** `total`: `total` is a denominator `done` climbs
     /// towards, and a bar frozen at nought for four minutes reads as a hang.
-    /// This is a fact to state beside a spinner — "about 465 MB".
+    /// This is a fact to state beside a spinner — "about 470 MB".
     #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<u64>,
     /// Seconds into *this phase*.  Not reconstructible by a client, whose clock
@@ -6509,8 +6509,8 @@ mod tests {
     /// is short by a quarter of a minute's download on a slow line.
     #[test]
     fn a_quoted_size_says_what_it_leaves_out() {
-        let model = fetching_now("e5-small", Some(448_000_000), " of weights, plus its tokenizer");
-        assert!(model.contains("448 MB of weights, plus its tokenizer"), "{model}");
+        let model = fetching_now("e5-small", Some(470_268_510), " of weights, plus its tokenizer");
+        assert!(model.contains("470 MB of weights, plus its tokenizer"), "{model}");
         // And the classifier says no such thing, having no tokenizer at all.
         let classifier = fetching_now("the language classifier", Some(938_013), "");
         assert!(classifier.contains("(938 kB)"), "{classifier}");

@@ -156,7 +156,7 @@ impl Server {
         //
         // Not a timeout problem, though that is how it shows up: a search is
         // answered *on the message loop*, and `model_with` would block it for
-        // the length of the download — 465 MB for `e5-small`, 2.24 GB for the
+        // the length of the download — 487 MB for `e5-small`, over 2 GB for the
         // large multilingual ones. Nothing else would be read meanwhile: not a
         // lexical search, not `status`, not `$/cancelRequest`, not `shutdown`.
         // And a download has no unit boundaries to check a cancel flag between,
