@@ -2474,7 +2474,60 @@ struct Filters {
     text: String,
 }
 
+/// `~` and `~/…` as the shell would, and everything else untouched.
+///
+/// Only the bare `~` form: `~other/…` is another user's home, which needs the
+/// password database and has never been what anyone meant here.
+fn expand_tilde(s: &str) -> String {
+    let Some(rest) = s.strip_prefix('~') else { return s.to_string() };
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return s.to_string();
+    }
+    match std::env::var("HOME") {
+        Ok(home) => format!("{home}{rest}"),
+        Err(_) => s.to_string(),
+    }
+}
+
 impl Filters {
+    /// Rewrite every `dir:` value as a path relative to VAULT.
+    ///
+    /// **Emacs's rule, which is `expand-file-name`'s: a path is absolute when it
+    /// begins with `/` or `~`, and relative otherwise.**  So `dir:notes` is inside
+    /// the vault, `dir:/Users/me/notes/lab` is the same place spelled in full, and
+    /// `dir:./lab` is `dir:lab` — accepted because a shell completes paths that
+    /// way and it costs one `strip_prefix` to honour.
+    ///
+    /// The alternative — a leading `./` marking the relative case and bare words
+    /// meaning absolute — was not chosen: it reads backwards to anyone who has
+    /// used Emacs, and it makes the common case the decorated one.
+    ///
+    /// An absolute path **outside** the vault is an error rather than a filter
+    /// that matches nothing.  Nothing under the vault can be under it, so leaving
+    /// it to return no hits would say "nothing matched your search" when the truth
+    /// is "that directory is not in this collection".
+    fn relative_to(&mut self, vault: &Path) -> Result<()> {
+        let root = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+        for d in self.dirs.iter_mut().chain(self.not_dirs.iter_mut()) {
+            let expanded = expand_tilde(d);
+            let p = Path::new(&expanded);
+            if !p.is_absolute() {
+                // `./lab` and `lab` name the same directory.
+                *d = d.trim_start_matches("./").to_string();
+                continue;
+            }
+            let abs = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let rel = abs.strip_prefix(&root).map_err(|_| {
+                anyhow!(
+                    "dir:{d} is not inside {} — an absolute dir: must name a directory of the vault",
+                    root.display()
+                )
+            })?;
+            *d = rel.to_string_lossy().into_owned();
+        }
+        Ok(())
+    }
+
     fn is_empty(&self) -> bool {
         self.tags.is_empty()
             && self.not_tags.is_empty()
@@ -4829,7 +4882,8 @@ fn cmd_search(
 
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
-    let f = parse_query(query);
+    let mut f = parse_query(query);
+    f.relative_to(vault)?;
     // A language is a stemmer's business, and an embedding is not stemmed.  The
     // semantic index therefore records no language, so this predicate could only
     // ever match nothing — better said than silently returned.
@@ -5368,7 +5422,8 @@ fn cmd_lexical(
         .ok_or_else(|| anyhow!("no lexical index in {} — run `index --lexical`", dir.display()))?;
     let analyzer = lexical::Analyzer::from_key(&stored)
         .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
-    let f = parse_query(query);
+    let mut f = parse_query(query);
+    f.relative_to(vault)?;
     if !f.is_empty() && !json {
         println!("filter: {}", describe_filters(&f));
     }
@@ -7893,6 +7948,55 @@ mod tests {
         assert_eq!(f.not_dirs, vec!["03 Literature review/2023"]);
         assert!(f.matches(&chunk_with("03 Literature review/2024/n.org", &[], None)));
         assert!(!f.matches(&chunk_with("03 Literature review/2023/n.org", &[], None)));
+    }
+
+    /// A `dir:` is absolute when it starts with `/` or `~`, and relative
+    /// otherwise — `expand_file_name`'s rule, and so the one an Emacs user
+    /// already has.  The other arrangement, where `./` marks the relative case
+    /// and a bare word is absolute, reads backwards and decorates the common
+    /// case.
+    #[test]
+    fn an_absolute_dir_names_the_same_place_as_a_relative_one() {
+        let v = scratch("dir-abs");
+        fs::create_dir_all(v.join("08 Conferences/2024")).unwrap();
+        let root = v.canonicalize().unwrap();
+
+        let rel = |q: &str| {
+            let mut f = parse_query(q);
+            f.relative_to(&root).map(|()| f.dirs)
+        };
+        // Every spelling of the one directory collapses to the same value, so
+        // `under` and the tantivy term see what they always saw.
+        for q in [
+            "dir:\"08 Conferences\" x",
+            "dir:\"./08 Conferences\" x",
+            &format!("dir:\"{}/08 Conferences\" x", root.display()),
+        ] {
+            assert_eq!(rel(q).unwrap(), vec!["08 Conferences"], "for {q}");
+        }
+        // Nested, and negated by the same route.
+        let mut f = parse_query(&format!("-dir:\"{}/08 Conferences/2024\" x", root.display()));
+        f.relative_to(&root).unwrap();
+        assert_eq!(f.not_dirs, vec!["08 Conferences/2024"]);
+
+        // Outside the vault is an error, not a filter that matches nothing:
+        // "nothing matched" and "that is not in this collection" are different
+        // answers, and only one of them is true.
+        let err = rel("dir:/etc x").unwrap_err().to_string();
+        assert!(err.contains("not inside"), "{err}");
+        assert!(err.contains("dir:/etc"), "and names what was asked for: {err}");
+    }
+
+    #[test]
+    fn a_tilde_is_a_home_directory_and_only_the_bare_form() {
+        let home = std::env::var("HOME").expect("a home directory");
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/notes"), format!("{home}/notes"));
+        // Another user's home needs the password database and was never meant.
+        assert_eq!(expand_tilde("~root/x"), "~root/x");
+        // Anything else is untouched, tildes inside a name included.
+        assert_eq!(expand_tilde("notes/~draft"), "notes/~draft");
+        assert_eq!(expand_tilde("/abs"), "/abs");
     }
 
     /// `dir:03 Lit` must not match `03 Literature review/…`.

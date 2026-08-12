@@ -345,7 +345,8 @@ impl Server {
             v
         };
 
-        let f = parse_query(query);
+        let mut f = parse_query(query);
+        f.relative_to(&vault)?;
         if f.text.trim().is_empty() && f.is_empty() {
             // An empty query is not an error while someone is still typing.
             return Ok(answer(serde_json::json!({ "hits": [] })));

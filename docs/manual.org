@@ -1301,6 +1301,22 @@ text and the filter matches nothing. Directories are matched by whole component,
 so =dir:"03 Lit"= is not an abbreviation for =03 Literature review= --- it
 matches nothing at all.
 
+A =dir:= is *absolute when it starts with =/= or =~=, and relative to the vault
+otherwise* --- the rule =expand-file-name= uses, so it is the one Emacs already
+taught you. All four of these name the same directory, which means a path pasted
+out of Dired works as it stands:
+
+#+begin_src sh
+dir:"08 Conferences"                      # relative to the vault
+dir:"./08 Conferences"                    # the same
+dir:"/Users/me/notes/08 Conferences"      # spelled in full
+dir:"~/notes/08 Conferences"              # and with a home directory
+#+end_src
+
+An absolute =dir:= *outside* the vault is an error rather than a search that
+finds nothing --- "nothing matched" and "that directory is not in this
+collection" are different answers, and only one of them would be true.
+
 ** What gets indexed
 :PROPERTIES:
 :CUSTOM_ID: what-gets-indexed
