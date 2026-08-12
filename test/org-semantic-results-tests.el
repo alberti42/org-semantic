@@ -287,6 +287,155 @@ that matched."
         (should (equal went '(("/v/a.org" . 11))))))))
 
 
+;;;; Reaching a note
+
+(ert-deftest a-narrowed-note-is-widened-before-a-line-is-counted ()
+  "Line numbers are counted over the whole note, so a restriction must go.
+
+A buffer narrowed to some other subtree counts from its own
+beginning, so the jump lands somewhere else entirely and nothing
+looks wrong -- there is a passage on the screen either way."
+  (let ((file (make-temp-file "org-semantic-visit" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "one\ntwo\nthree\nfour\nfive\nsix\n"))
+          (let ((buffer (find-file-noselect file)))
+            (unwind-protect
+                (progn
+                  (with-current-buffer buffer
+                    (narrow-to-region (point-min) (point-min))
+                    (should (buffer-narrowed-p)))
+                  (org-semantic-ui-visit file 4)
+                  (with-current-buffer buffer
+                    (should-not (buffer-narrowed-p))
+                    (should (equal (buffer-substring (line-beginning-position)
+                                                     (line-end-position))
+                                   "four"))))
+              (kill-buffer buffer))))
+      (delete-file file))))
+
+(ert-deftest showing-a-note-is-not-going-to-it ()
+  "Without SELECT the note is displayed and this buffer keeps point.
+
+Which is what a preview needs, and what `next-error-no-select'
+assumes -- it puts the selected window back itself, so the
+non-selecting case has to be a real one and not a jump undone
+afterwards."
+  (let ((file (make-temp-file "org-semantic-visit" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "one\ntwo\nthree\n"))
+          (let ((buffer (find-file-noselect file)))
+            (unwind-protect
+                (let ((window (org-semantic-ui-visit file 2)))
+                  (should (eq (window-buffer window) buffer))
+                  ;; Point is placed in that window, not merely shown.
+                  (should (= (with-current-buffer buffer
+                               (line-number-at-pos (window-point window)))
+                             2)))
+              (kill-buffer buffer))))
+      (delete-file file))))
+
+
+;;;; Folding a long passage
+
+(ert-deftest a-folded-passage-comes-back-and-goes-away-again ()
+  "TAB is the only thing here that rewrites the buffer after it is drawn.
+
+Both halves matter: the hidden lines are still in the buffer, so
+they carry their numbers and would still be written back, and the
+marker has to stop claiming lines are folded once they are not."
+  (let ((org-semantic-results-passage-lines 3))
+    (org-semantic-results-tests--drawn
+        (list (org-semantic-results-tests--hit
+               :startLine 4 :endLine 9
+               :text "one\ntwo\nthree\nfour\nfive\nsix"))
+      ;; Hidden, but drawn: every line still claims its own number.
+      (should (equal (org-semantic-results-tests--passage-lines)
+                     '(4 5 6 7 8 9)))
+      (goto-char (point-min))
+      (org-semantic-results--first-item)
+      (let* ((item (org-semantic-results--item-at-point))
+             (bounds (org-semantic-results--elided-bounds item)))
+        (should (= (org-semantic-results--item-elided item) 3))
+        (should (eq (get-text-property (car bounds) 'invisible)
+                    'org-semantic-results))
+        (should (string-match-p "⋯ 3 lines" (buffer-string)))
+        (org-semantic-results-toggle-passage)
+        (should-not (get-text-property
+                     (car (org-semantic-results--elided-bounds item))
+                     'invisible))
+        (should-not (string-match-p "⋯ 3 lines" (buffer-string)))
+        (org-semantic-results-toggle-passage)
+        (should (eq (get-text-property
+                     (car (org-semantic-results--elided-bounds item))
+                     'invisible)
+                    'org-semantic-results))
+        (should (string-match-p "⋯ 3 lines" (buffer-string)))))))
+
+(ert-deftest a-passage-that-fits-has-nothing-to-unfold ()
+  "And says so rather than doing nothing, which reads as a broken key."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit))
+    (goto-char (point-min))
+    (org-semantic-results--first-item)
+    (should-error (org-semantic-results-toggle-passage) :type 'user-error)))
+
+
+;;;; Asking again, differently
+
+(ert-deftest g-asks-again-rather-than-redrawing ()
+  "The notes may have moved on, so what is here is a picture and not a cache."
+  (let ((asked 0))
+    (cl-letf (((symbol-function 'org-semantic-ui-ask)
+               (lambda (_driver _params) (cl-incf asked))))
+      (org-semantic-results-tests--drawn
+          (list (org-semantic-results-tests--hit))
+        (revert-buffer)
+        (should (= asked 1))))))
+
+(ert-deftest the-two-limits-say-which-of-them-moved ()
+  "`+' counts notes, not hits, which is the surprising half of the interface.
+
+A vault kept in a few large files answers a large k with very few
+hits, and no amount of raising it helps until the per-note limit
+moves too -- so the message names both."
+  (let ((asked 0) (said nil))
+    (cl-letf (((symbol-function 'org-semantic-ui-ask)
+               (lambda (_driver _params) (cl-incf asked)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (org-semantic-results-tests--drawn
+          (list (org-semantic-results-tests--hit))
+        (org-semantic-results-more-notes)
+        (should (= org-semantic-results--k 16))
+        (should (string-match-p "16 notes" said))
+        (should (string-match-p "passages each" said))
+        (org-semantic-results-fewer-notes)
+        (should (= org-semantic-results--k 8))
+        ;; Never to nothing: a k of zero answers with an empty list and
+        ;; looks exactly like a query that matched nothing.
+        (dotimes (_ 6) (org-semantic-results-fewer-notes))
+        (should (= org-semantic-results--k 1))
+        (should (= asked 8))))))
+
+(ert-deftest matching-any-of-the-words-is-a-question-only-about-words ()
+  "An embedding has no terms to match any of, so the key refuses.
+
+The server ignores `any' on a semantic search rather than
+failing, which would make the key look as though it had worked."
+  (cl-letf (((symbol-function 'org-semantic-ui-ask) #'ignore))
+    (org-semantic-results-tests--drawn
+        (list (org-semantic-results-tests--hit))
+      (setq org-semantic-results--mode "semantic")
+      (should-error (org-semantic-results-toggle-any) :type 'user-error)
+      (should-not org-semantic-results--any)
+      (setq org-semantic-results--mode "lexical")
+      (org-semantic-results-toggle-any)
+      (should org-semantic-results--any))))
+
+
 ;;;; One search in flight
 
 (ert-deftest at-most-one-search-is-ever-in-flight ()
