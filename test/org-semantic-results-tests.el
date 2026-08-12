@@ -294,9 +294,37 @@ whichever you already had, never the one you were reaching for."
                  "lexical")))
       (let ((org-semantic-results-ranking "semantic"))
         (should (equal (org-semantic--read-ranking) "lexical"))))
-    (should (equal (plist-get seen :collection) '("semantic" "lexical")))
+    ;; Both, in a stable order, whatever shape the table takes.
+    (should (equal (all-completions "" (plist-get seen :collection))
+                   '("semantic" "lexical")))
     (should-not (plist-get seen :initial))
     (should (equal (plist-get seen :default) "semantic"))))
+
+(ert-deftest each-ranking-says-which-index-it-reads ()
+  "Two words alone invite the wrong guess: one search, ordered twice.
+
+They are separate indexes, built by separate commands and never
+merged, so the prompt names the index each one reads.  The
+annotation rides the table's own metadata rather than
+`completion-extra-properties', which is global state a front-end
+may rebind."
+  (let (table)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _) (setq table collection) "semantic")))
+      (org-semantic--read-ranking))
+    ;; The table carries the annotation itself.
+    (should (equal (completion-metadata "" table nil)
+                   '(metadata (annotation-function . org-semantic--ranking-annotation)))))
+  ;; And the annotations distinguish the two by *index*, not by adjective.
+  (let ((semantic (org-semantic--ranking-annotation "semantic"))
+        (lexical (org-semantic--ranking-annotation "lexical")))
+    (should (string-match-p "meaning" semantic))
+    (should (string-match-p "embedding index" semantic))
+    (should (string-match-p "word" lexical))
+    (should (string-match-p "BM25 index" lexical))
+    (should-not (equal semantic lexical)))
+  ;; Nothing else is offered, so nothing else can go unexplained.
+  (should-not (org-semantic--ranking-annotation "fused")))
 
 (ert-deftest a-search-asks-for-one-ranking-and-never-both ()
   "The two are ranked separately, so a search names exactly one.

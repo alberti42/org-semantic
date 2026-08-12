@@ -338,8 +338,26 @@ two fails nothing and looks like nothing."
           ((>= level 16) (cons t t))
           (t (cons t nil)))))
 
+(defconst org-semantic--rankings
+  '(("semantic" . "by meaning, over the embedding index")
+    ("lexical"  . "by word, over the BM25 index"))
+  "The two rankings, and what each one is.
+
+**Each names its own index, and that is the point of saying it.**
+`semantic' and `lexical' read as two orderings of one result set,
+which is the opposite of the truth: they are separate indexes,
+built by separate commands, searched by separate code, and never
+merged -- a BM25 score has no common scale with a cosine, so there
+is no list they could both belong to.  A prompt offering two words
+and no explanation invites exactly the wrong guess.")
+
+(defun org-semantic--ranking-annotation (candidate)
+  "What CANDIDATE means, for the ranking prompt's right-hand column."
+  (let ((what (cdr (assoc candidate org-semantic--rankings))))
+    (and what (concat "  " what))))
+
 (defun org-semantic--read-ranking ()
-  "Ask which ranking to use, offering both.
+  "Ask which ranking to use, offering both and saying what each is.
 
 The setting is the *default*, not text put into the minibuffer:
 `completing-read' calls INITIAL-INPUT deprecated and says to use
@@ -347,9 +365,19 @@ DEF instead, and here the reason is plain to see.  Inserted as
 input, \"semantic\" is what a completion UI filters the candidates
 by -- so the prompt for choosing between two rankings offered
 exactly one of them, and it was never the one you were reaching
-for."
-  (completing-read "Rank by: " '("semantic" "lexical") nil t
-                   nil nil org-semantic-results-ranking))
+for.
+
+The annotation rides the *table* rather than
+`completion-extra-properties': a table carries its own metadata
+wherever it is passed, where the variable is global state a
+front-end is free to rebind."
+  (completing-read
+   "Rank by: "
+   (lambda (string predicate action)
+     (if (eq action 'metadata)
+         '(metadata (annotation-function . org-semantic--ranking-annotation))
+       (complete-with-action action org-semantic--rankings string predicate)))
+   nil t nil nil org-semantic-results-ranking))
 
 (defun org-semantic-find (query &optional arg)
   "Search the current buffer's vault for QUERY and show what comes back.
