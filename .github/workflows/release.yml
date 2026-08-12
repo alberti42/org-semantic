@@ -12,9 +12,10 @@ name: Release
 #   APPLE_ID              Apple ID used for notarization
 #   APPLE_ID_PASSWORD     app-specific password for that Apple ID
 #
-# Assets are the bare binaries, named for the platform, which is what
-# `org-semantic-install.el` downloads: one file, chmod, done.  No archive to
-# unpack in elisp.
+# One asset per platform: an archive named for the platform, holding a binary
+# named `org-semantic`.  Bare binaries were tried for a day and are wrong twice
+# over -- 40.7 MB against 13.0 MB packed, and a release asset carries no mode
+# bits, so one downloads as 0644 and does not run.
 #
 # **There is no Intel macOS build, and it is not an omission.**  `ort` selects a
 # prebuilt ONNX Runtime from its own dist table, and that table has no
@@ -127,20 +128,21 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: org-semantic-aarch64-macos
+            asset: org-semantic-aarch64-macos.tar.gz
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: org-semantic-x86_64-linux
+            asset: org-semantic-x86_64-linux.tar.gz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            asset: org-semantic-aarch64-linux
+            asset: org-semantic-aarch64-linux.tar.gz
           # Builds and links -- `ort` takes its DirectML distribution, so the
           # binary wants DirectML.dll (present since Windows 10 1903).  The smoke
           # test below is the whole of what has ever been run on it: nobody has
-          # indexed or searched anything on Windows.
+          # indexed or searched anything on Windows.  Zip rather than tar.gz
+          # because that is what Explorer opens.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: org-semantic-x86_64-windows.exe
+            asset: org-semantic-x86_64-windows.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -155,12 +157,16 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Name the binary for its platform
+      # The *archive* carries the platform in its name; the binary inside keeps
+      # the name it is meant to have on PATH, so unpacking gives something ready
+      # to use rather than something to rename.
+      - name: Collect the binary
         shell: bash
         run: |
-          SRC="target/${{ matrix.target }}/release/org-semantic"
-          [ "${{ runner.os }}" = "Windows" ] && SRC="$SRC.exe"
-          cp "$SRC" "${{ matrix.asset }}"
+          BIN=org-semantic
+          [ "${{ runner.os }}" = "Windows" ] && BIN=org-semantic.exe
+          cp "target/${{ matrix.target }}/release/$BIN" "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
 
       # Only macOS needs any of what follows.
       - name: Import the signing certificate
@@ -196,16 +202,18 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
         run: |
           set -euo pipefail
-          ASSET="${{ matrix.asset }}"
 
           # Hardened runtime and a secure timestamp are both required for
           # notarization.  Fail loudly: an unsigned release is not shippable.
           codesign --force --timestamp --options runtime \
-            --sign "Developer ID Application: Andrea Alberti ($TEAM_ID)" "$ASSET"
-          codesign --verify --strict --verbose=2 "$ASSET"
+            --sign "Developer ID Application: Andrea Alberti ($TEAM_ID)" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
 
-          # notarytool takes an archive, never a bare executable.
-          ditto -c -k "$ASSET" "$ASSET.zip"
+          # notarytool takes a zip, a dmg or a pkg -- never a bare executable and
+          # never a tarball, so this zip exists only to submit.  What is
+          # published is the tar.gz built below, and it carries the same signed
+          # bytes: the signature lives inside the Mach-O, not in the container.
+          ditto -c -k "$BIN" "$RUNNER_TEMP/submit.zip"
 
           xcrun notarytool store-credentials "notary-profile" \
             --apple-id "$APPLE_ID" \
@@ -214,13 +222,11 @@ jobs:
 
           # `--wait` has returned 0 on a rejected submission before now, so the
           # status is read rather than inferred from the exit code.
-          xcrun notarytool submit "$ASSET.zip" \
+          xcrun notarytool submit "$RUNNER_TEMP/submit.zip" \
             --keychain-profile "notary-profile" --wait \
             | tee "$RUNNER_TEMP/notary.log"
           grep -q "status: Accepted" "$RUNNER_TEMP/notary.log" || {
             echo "::error::notarization was not accepted"; cat "$RUNNER_TEMP/notary.log"; exit 1; }
-
-          rm -f "$ASSET.zip"
 
           # **The ticket is not stapled, and cannot be.**  `stapler` supports
           # disk images, code-signed bundles and flat installer packages; a bare
@@ -228,16 +234,36 @@ jobs:
           # ticket is registered against the cdhash -- but a *quarantined* copy
           # needs a network check on first run.  Which the ordinary paths never
           # hit: quarantine is set by browsers, and neither Emacs's url.el nor
-          # curl sets it.
+          # curl sets it.  Verified by hand: quarantine the downloaded binary and
+          # it still runs.
 
       # Catches a hardened-runtime failure, which shows up only on the signed
       # build and would otherwise ship.
       - name: Smoke test the binary that will be published
         shell: bash
         run: |
-          chmod +x "${{ matrix.asset }}" || true
-          ./"${{ matrix.asset }}" --version
-          ./"${{ matrix.asset }}" models
+          chmod +x "$BIN" || true
+          ./"$BIN" --version
+          ./"$BIN" models
+
+      # **Compressed, and not merely for tidiness.**  40.7 MB of binary is
+      # 13.0 MB packed, and a release asset carries no mode bits -- a bare
+      # binary downloads as 0644 and will not run until someone thinks to
+      # `chmod +x`.  An archive records the mode and restores it.
+      #
+      # `tar.gz` where it can be, because Emacs unpacks one with no external
+      # tool at all: `zlib-decompress-region` inflates it and `tar-untar-buffer`
+      # extracts it, both built in.  Windows gets a zip, which is what Explorer
+      # opens.
+      - name: Pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Windows) 7z a -mx=9 "${{ matrix.asset }}" "$BIN" > /dev/null ;;
+            *)       tar czf "${{ matrix.asset }}" "$BIN" ;;
+          esac
+          ls -l "${{ matrix.asset }}"
 
       - name: Clean up the keychain
         if: always() && runner.os == 'macOS'
