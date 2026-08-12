@@ -24,9 +24,15 @@ download — the client checks a version floor rather than a match.
 
 The floor is the one users feel: raising it tells everyone with an older binary
 to update. So raise it only when the elisp actually depends on something new — a
-new method, a new field, a changed reply shape — and raise it, in the same commit
-that starts depending on it, to the binary version that introduced the thing. Not
-to "the current version", and never merely to be tidy.
+new method, a new field, a changed reply shape — or when a release *documents*
+behaviour that only the newer binary provides and the older one gets **silently
+wrong**. Raise it in the same commit, to the binary version that introduced the
+thing. Not to "the current version", and never merely to be tidy.
+
+That second case is why 0.2.0 raised it: nothing in the elisp calls a new method,
+but 0.1.0 has no negated predicates at all, so it reads `-dir:archive` as
+`dir:archive` and answers with the opposite of the request. The floor exists to
+prevent silence, not merely to gate method calls.
 
 The binary version is what the floor names, so it has to move whenever the Rust
 does, whether or not the elisp cares yet. Skip it and two different binaries
@@ -35,17 +41,83 @@ job refuses a tag whose Rust changed without it.
 
 ### Cutting a release
 
-1. Set `org-semantic-version` to the new release. Bump `Cargo.toml` if the Rust
-   changed since the last tag; leave it alone if it did not.
-2. Move everything under `[Unreleased]` into a new version heading with today's
+1. Set `org-semantic-version` to the new release, and the `;; Version:` header of
+   each file in `lisp/` with it.
+2. Bump `Cargo.toml` if the Rust changed since the last tag; leave it alone if it
+   did not.
+3. Raise `org-semantic-minimum-binary-version` if this release needs the new
+   binary — by the rule above, which includes a release documenting behaviour the
+   old binary gets silently wrong.
+4. Move everything under `[Unreleased]` into a new version heading with today's
    date, and say in it which binary version the release carries.
-3. Commit, tag `vX.Y.Z`, push the tag.
+5. Commit, tag `vX.Y.Z`, push the tag.
 
 The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
+
+## [0.2.0] — 2026-08-12
+
+Binary version 0.2.0, and **this one you want**: 0.1.0 misreads every negated
+predicate as its opposite, so `-dir:archive` searches the archive.
+
+The Emacs client is the point of this release. It was described as early in
+0.1.0; it is now the way to use org-semantic from Emacs.
+
+### Added
+
+- **A hit's address is four links**, and each goes where it names: the directory
+  opens in Dired (`org-semantic-results-reveal-function` replaces that), the note
+  opens at its top, the section goes to its heading, and the two line numbers go
+  to where the passage starts and ends.
+- **Search history**, shared by every prompt and saved by `savehist-mode` with no
+  configuration — so `M-p` from the results buffer reaches the query that made it.
+- **`dir:` may be absolute**, by Emacs's own rule: `/` or `~` means absolute,
+  anything else is relative to the vault. A path pasted out of Dired works as it
+  stands, and one outside the vault is an error rather than a search that finds
+  nothing.
+- **Every predicate negates** — `-dir:`, `-todo:` and `-lang:` join `-tag:` — and
+  a query may be nothing but exclusions, so `-todo:DONE` on its own is every
+  passage that is not done.
+- `org-semantic-install-directory`: unpack a release there and nothing needs
+  configuring. Searched before `exec-path`, so a `cargo install` for shell use
+  cannot quietly move Emacs onto a different build.
+- `org-semantic-cache-home` and `ORG_SEMANTIC_CACHE_HOME`, for putting the
+  downloaded models somewhere other than `$XDG_CACHE_HOME`.
+- `org-semantic-results-display-action`, a *default* for where the buffer appears.
+  `display-buffer-alist` is consulted first, so anything you set there still wins.
+
+### Fixed
+
+- **`-dir:` and `-todo:` were read as their positives** — the opposite of the
+  request, silently. A leading `-` was stripped from every key and consulted by
+  only one of them.
+- **A query of only exclusions returned nothing** from the word index: tantivy has
+  no implicit universe, so a boolean of `MustNot` alone matched no document where
+  the semantic side matched everything not excluded.
+- **`-lang:` was accepted and ignored** by the semantic side through the server,
+  which had its own copy of a check that had learned about negation only in the
+  command line's copy.
+- **The ranking prompt offered one of its two rankings.** The current one was
+  passed as initial input, which a completion UI treats as a filter.
+- **A passage could not be selected with the mouse**: every line carried
+  `follow-link`, so a click jumped instead of placing point. Only the address
+  links answer the mouse now.
+- The gutter no longer paints a background, and a repeated line keeps it, so the
+  left edge stays straight.
+- `org-semantic-find` had lost its autoload cookie, so a fresh Emacs could not
+  find the command.
+
+### Changed
+
+- **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
+  the executable bit survives, which a bare release asset does not carry.
+- `C-u` asks which ranking and nothing else; `C-u C-u` asks about the length of
+  the list as well. It used to take three answers to change one thing.
+- Searching for the thing at point offers it as a *default* rather than as text
+  already typed, so `RET` takes it and typing replaces it.
 
 ## [0.1.0] — 2026-08-12
 
@@ -90,5 +162,6 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.1.0

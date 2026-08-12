@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Andrea Alberti
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
@@ -53,7 +53,7 @@
 (require 'cl-lib)
 (require 'jsonrpc)
 
-(defconst org-semantic-version "0.1.0"
+(defconst org-semantic-version "0.2.0"
   "The release this package is from.
 
 The release version, which is the package's: it moves whenever
@@ -61,12 +61,21 @@ anything here ships, including a change to this file alone.  It is
 *not* what the binary reports, and the two are compared through
 `org-semantic-minimum-binary-version' rather than for equality.")
 
-(defconst org-semantic-minimum-binary-version "0.1.0"
+(defconst org-semantic-minimum-binary-version "0.2.0"
   "The oldest binary this package knows how to talk to.
 
-Bump this only when the elisp starts needing something the server
-did not have -- a new method, a new field, a changed reply shape.
-Not when the binary merely gains something this file does not use.
+Bump this when the elisp starts needing something the server did
+not have -- a new method, a new field, a changed reply shape -- and
+also when a release *documents* behaviour that only the newer binary
+provides and the older one gets **silently wrong**.
+
+The second half is what 0.2.0 raised it for, and it is worth stating
+because nothing here calls a new method: 0.1.0 has no negated
+predicates at all, so it reads `-dir:archive' as `dir:archive'
+and answers with the opposite of the request.  A user reading the
+0.2.0 notes and keeping the old binary would be quietly served
+wrong results.  The floor exists to prevent silence, not merely to
+gate method calls.
 
 *Why a minimum and not the release version.* They ship from one
 repository, but they do not change together: an elisp-only release
