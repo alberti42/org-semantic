@@ -96,6 +96,22 @@ seconds.  It is the `mode' the server is asked for, spelled
   :type '(choice (const :tag "By meaning" "semantic")
                  (const :tag "By word" "lexical")))
 
+(defcustom org-semantic-results-reveal-function
+  #'org-semantic-results-reveal-in-dired
+  "How to show the directory part of a hit's address.
+
+Called with two arguments, both absolute: the DIRECTORY the note
+is in, and the FILE itself.  The second is for putting point on
+the note once the directory is shown; a function with no use for
+it may ignore it.
+
+Dired is only the default because it is what Emacs has.  To use
+something else:
+
+  (setq org-semantic-results-reveal-function
+        (lambda (directory _file) (my-file-manager directory)))"
+  :type 'function)
+
 
 ;;;; Faces
 
@@ -113,7 +129,14 @@ seconds.  It is the `mode' the server is asked for, spelled
   "Face for how well a hit matched.")
 
 (defface org-semantic-results-location '((t :inherit shadow))
-  "Face for the file and line a hit is at.")
+  "Face for the separators between the parts of a hit's address.")
+
+(defface org-semantic-results-link '((t :inherit link))
+  "Face for the parts of a hit's address that go somewhere.
+
+Inherits `link', so they look like every other link in Emacs --
+which is the point: each part of the address goes somewhere
+different, and nothing else says so.")
 
 (defface org-semantic-results-annotation '((t :inherit shadow))
   "Face for a hit's TODO keyword, priority and tags.")
@@ -560,54 +583,109 @@ nothing.  CLAIMED is the claim map, and is added to."
           (insert "\n"))
         (buffer-string)))))
 
+(defun org-semantic-results--sections (hit)
+  "The outline path of HIT below its note, or nil if it is the note itself.
+
+The stored heading begins with the note's `#+title:', which the
+address already names by its file, so it is dropped: on this
+author's vault it repeated the filename on 85 hits in 88.  What it
+costs is the three where they differ -- a `README.org' titled for
+what it contains -- and that is the trade taken."
+  (let ((parts (split-string (or (plist-get hit :heading) "") " > " t)))
+    (when (cdr parts)
+      (string-join (cdr parts) " > "))))
+
+(defun org-semantic-results--link (text target props &optional line help)
+  "Propertize TEXT as a link to TARGET, over PROPS.
+
+LINE is the line it goes to, where that means anything.  HELP is
+the `help-echo'.  TARGET is a **symbol** and not a function: what
+a piece of this buffer points at is then something a test can read
+back off the text, which a closure would not be."
+  (apply #'propertize text
+         'face 'org-semantic-results-link
+         'org-semantic-target target
+         'help-echo (or help "mouse-2: go here")
+         (append (and line (list 'org-semantic-line line)) props)))
+
+(defun org-semantic-results--plain (text props line)
+  "Propertize TEXT as part of a head that is not a link, over PROPS.
+
+LINE is the passage's own, so that point anywhere between the
+links -- on the score, on a separator -- still goes to the
+passage.
+
+Every piece of the head is propertized on its own and the results
+concatenated, rather than the line being propertized once at the
+end: `propertize' overrides what a string already carries, so a
+final pass would give every link the passage's line and quietly
+undo the whole point of having four of them."
+  (apply #'propertize text 'org-semantic-line line props))
+
 (defun org-semantic-results--insert-block-head (hit item first)
-  "Insert the line or two above HIT's passage, for ITEM.
+  "Insert the line above HIT's passage, for ITEM.
 FIRST is as in `org-semantic-results--block'.
 
-These lines go to where the passage starts, not to the heading
-that owns it.  Every line in this buffer goes where it says, and
-what these say is which passage they head: a section can run to
-hundreds of lines, so arriving at its heading is arriving with the
-words that matched somewhere off the bottom of the window.  The
-heading is drawn for orientation -- it says which section this is
--- and `org-semantic-results-describe-hit' gives its line for
-anyone who wants it."
-  (let ((props (list 'org-semantic-item item
-                     'org-semantic-hit hit
-                     'org-semantic-file (org-semantic-results--item-file item)
-                     'mouse-face 'highlight
-                     'keymap org-semantic-results-passage-map
-                     'follow-link t
-                     'help-echo "mouse-2: go to this passage"
-                     'read-only t))
-        (annotation (org-semantic-ui-annotate hit)))
-    (insert (apply #'propertize
-                   (format "  %s  %s\n"
-                           (propertize (org-semantic-ui-score hit)
-                                       'face 'org-semantic-results-score)
-                           (propertize
-                            (if first
-                                (or (plist-get hit :heading) "")
-                              (format "lines %s–%s"
-                                      (org-semantic-hit-start-line hit)
-                                      (org-semantic-hit-end-line hit)))
-                            'face 'org-semantic-results-heading))
-                   'org-semantic-line (org-semantic-results--item-line item)
-                   props))
-    (when first
-      (insert (apply #'propertize
-                     (format "  %s%s\n"
-                             (propertize
-                              (format "%s:%s"
-                                      (org-semantic-hit-path hit)
-                                      (org-semantic-results--item-line item))
-                              'face 'org-semantic-results-location)
-                             (if annotation
-                                 (propertize (concat "  ·  " annotation)
-                                             'face 'org-semantic-results-annotation)
-                               ""))
-                     'org-semantic-line (org-semantic-hit-line hit)
-                     props)))))
+**The address is four links, not one.**  It names a directory, a
+note, a section and a line, and each goes to the thing it names --
+the directory in `org-semantic-results-reveal-function', the note
+at its top, the section at its heading, the line at the passage.
+A single target for a line that says four things leaves most of
+what it displays inert, and leaves the reader guessing which of
+the four it will pick.
+
+Only the leading passage of a section carries the address; the
+ones after it name their line alone, since the path is already
+above them and only the line has changed."
+  (let* ((props (list 'org-semantic-item item
+                      'org-semantic-hit hit
+                      'org-semantic-file (org-semantic-results--item-file item)
+                      'mouse-face 'highlight
+                      'keymap org-semantic-results-passage-map
+                      'follow-link t
+                      'read-only t))
+         (start (org-semantic-results--item-line item))
+         (path (or (org-semantic-hit-path hit) ""))
+         (directory (directory-file-name (or (file-name-directory path) "")))
+         (sections (org-semantic-results--sections hit))
+         (annotation (and first (org-semantic-ui-annotate hit)))
+         (plain (lambda (text face)
+                  (org-semantic-results--plain
+                   (propertize text 'face face)
+                   (append (list 'help-echo "mouse-2: go to this passage") props)
+                   start)))
+         (sep (lambda (s) (funcall plain s 'org-semantic-results-location))))
+    (insert
+     (concat
+      (funcall plain "  " 'default)
+      (funcall plain (org-semantic-ui-score hit) 'org-semantic-results-score)
+      (funcall plain "  " 'default)
+      (when first
+        (concat
+         ;; A note at the vault root has no directory to show, and would
+         ;; otherwise be introduced by a bare separator.
+         (unless (string-empty-p directory)
+           (concat (org-semantic-results--link
+                    directory 'directory props nil
+                    "mouse-2: show this directory")
+                   (funcall sep " / ")))
+         (org-semantic-results--link
+          (file-name-nondirectory path) 'file props 1
+          "mouse-2: open this note")
+         (when sections
+           (concat (funcall sep " > ")
+                   (org-semantic-results--link
+                    sections 'heading props (org-semantic-hit-line hit)
+                    "mouse-2: go to this section")))
+         (funcall sep " > ")))
+      (org-semantic-results--link
+       (format "line %s" start) 'line props start
+       "mouse-2: go to this passage")
+      (if annotation
+          (concat (funcall sep "  ·  ")
+                  (funcall plain annotation 'org-semantic-results-annotation))
+        "")
+      (funcall plain "\n" 'default)))))
 
 (defun org-semantic-results--insert-lines (item lines start owned)
   "Insert LINES for ITEM as the note's own lines, the first being START.
@@ -854,8 +932,33 @@ such block."
       (let ((item (org-semantic-results--item-at-point)))
         (and item (org-semantic-results--item-line item)))))
 
+(defun org-semantic-results-reveal-in-dired (directory file)
+  "Show DIRECTORY in Dired, with point on FILE.
+
+The default `org-semantic-results-reveal-function'.  `dired-jump'
+is preferred because it lands on the note rather than merely in
+the directory holding it; it has been in `dired' itself since
+Emacs 28, and the fallback covers a Dired that has been replaced."
+  (if (fboundp 'dired-jump)
+      (dired-jump nil file)
+    (dired directory)))
+
 (defun org-semantic-results--visit (&rest keys)
-  "Go where point says, passing KEYS on to `org-semantic-ui-visit'."
+  "Go where point says, passing KEYS on to `org-semantic-ui-visit'.
+
+A directory is the one thing here that is not a place in a note,
+so it is the one target handled apart -- everything else differs
+only in which line it carries."
+  (if (eq (get-text-property (point) 'org-semantic-target) 'directory)
+      (let ((file (org-semantic-results--file-at-point)))
+        (unless file (user-error "Nothing to show here"))
+        (funcall org-semantic-results-reveal-function
+                 (file-name-directory file) file)
+        nil)
+    (org-semantic-results--visit-note keys)))
+
+(defun org-semantic-results--visit-note (keys)
+  "Go to the note point names, passing KEYS on to `org-semantic-ui-visit'."
   (let ((file (org-semantic-results--file-at-point))
         (line (org-semantic-results--line-at-point))
         (buffer (current-buffer)))

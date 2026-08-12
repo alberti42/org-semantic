@@ -44,6 +44,30 @@ easier problem."
       (setq hit (plist-put hit (pop overrides) (pop overrides))))
     hit))
 
+(defun org-semantic-results-tests--targets ()
+  "Each address segment on the line at point, as (TARGET LINE TEXT).
+
+Read off the text properties rather than off the rendering,
+because the two can disagree in exactly the way that matters: the
+first version of this drew a perfectly correct-looking line whose
+four links all carried the passage's line, so every one of them
+went to the same place."
+  (save-excursion
+    (goto-char (line-beginning-position))
+    (let ((end (line-end-position))
+          (out nil))
+      (while (< (point) end)
+        (let ((target (get-text-property (point) 'org-semantic-target))
+              (next (or (next-single-property-change (point) 'org-semantic-target nil end)
+                        end)))
+          (when target
+            (push (list target
+                        (get-text-property (point) 'org-semantic-line)
+                        (buffer-substring-no-properties (point) next))
+                  out))
+          (goto-char next)))
+      (nreverse out))))
+
 (defmacro org-semantic-results-tests--drawn (hits &rest body)
   "Draw HITS in a results buffer and run BODY there."
   (declare (indent 1))
@@ -90,6 +114,94 @@ easier problem."
 
 
 ;;;; What a score may be written as
+
+(ert-deftest each-part-of-an-address-goes-where-it-says ()
+  "Four links, four destinations -- and the line is what tells them apart.
+
+The directory has no line and is revealed instead; the note opens
+at its top; the section goes to its heading; the passage goes to
+where it starts.  This is asserted on the properties because the
+rendering cannot show it: the first version drew exactly this line
+with all four links carrying the passage's line, since a final
+`propertize' over the whole string overrode what each piece had
+already been given."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "lit/2024/note.org" :file "/vault/lit/2024/note.org"
+             :heading "Note title > Observations"
+             :headingLine 12 :startLine 25 :endLine 27))
+    (goto-char (point-min))
+    (should (re-search-forward "line 25" nil t))
+    (let ((parts (org-semantic-results-tests--targets)))
+      (should (equal (mapcar #'car parts) '(directory file heading line)))
+      (should (equal (nth 0 parts) '(directory nil "lit/2024")))
+      (should (equal (nth 1 parts) '(file 1 "note.org")))
+      (should (equal (nth 2 parts) '(heading 12 "Observations")))
+      (should (equal (nth 3 parts) '(line 25 "line 25"))))))
+
+(ert-deftest the-note-title-is-not-repeated-beside-its-filename ()
+  "The heading begins with the title, which the file already names.
+
+Dropping it is a trade, not a free win: it costs the notes whose
+title says what the filename does not.  It is taken because those
+are rare -- 3 of 88 hits on the vault this was measured against."
+  (should (equal (org-semantic-results--sections
+                  '(:heading "Note title > Observations > Deeper"))
+                 "Observations > Deeper"))
+  ;; A hit on the note itself has no section below it, and so no segment.
+  (should-not (org-semantic-results--sections '(:heading "Note title")))
+  (should-not (org-semantic-results--sections '(:heading nil))))
+
+(ert-deftest a-note-at-the-vault-root-has-no-directory-part ()
+  "And no separator introducing one that is not there."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "README.org" :file "/vault/README.org"
+             :heading "Imported notes" :startLine 8 :endLine 8 :text "one"))
+    (goto-char (point-min))
+    (should (re-search-forward "line 8" nil t))
+    (let ((parts (org-semantic-results-tests--targets)))
+      (should (equal (mapcar #'car parts) '(file line)))
+      (should-not (string-match-p " / " (buffer-substring-no-properties
+                                         (line-beginning-position)
+                                         (line-end-position)))))))
+
+(ert-deftest only-the-leading-passage-of-a-section-carries-the-address ()
+  "The passages after it name their line alone.
+
+The path is already above them, and only the line has changed."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit :startLine 4 :endLine 6)
+            (org-semantic-results-tests--hit :startLine 40 :endLine 42
+                                             :text "ten\neleven\ntwelve"))
+    (goto-char (point-min))
+    (should (re-search-forward "line 4$" nil t))
+    (should (equal (mapcar #'car (org-semantic-results-tests--targets))
+                   '(directory file heading line)))
+    (should (re-search-forward "line 40" nil t))
+    (should (equal (mapcar #'car (org-semantic-results-tests--targets))
+                   '(line)))))
+
+(ert-deftest revealing-a-directory-is-the-user-s-to-replace ()
+  "A directory is the one target that is not a place in a note.
+
+So it is the one reached through a function rather than through a
+line, and the function is a defcustom because Dired is only what
+Emacs happens to have."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit))
+    ;; Found by its property, not by its text: the vault path appears in
+    ;; the header too, and matching that would test the header.
+    (goto-char (point-min))
+    (while (and (not (eobp))
+                (not (eq (get-text-property (point) 'org-semantic-target) 'directory)))
+      (forward-char 1))
+    (should (eq (get-text-property (point) 'org-semantic-target) 'directory))
+    (let (asked)
+      (let ((org-semantic-results-reveal-function
+             (lambda (directory file) (setq asked (list directory file)))))
+        (org-semantic-results-goto))
+      (should (equal asked '("/vault/notes/" "/vault/notes/a.org"))))))
 
 (ert-deftest a-word-score-never-grows-a-sigma ()
   "BM25 is unbounded and comparable with nothing, so it gets no scale.

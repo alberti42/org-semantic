@@ -312,6 +312,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-results-ranking~       | ="semantic"=   | which ranking =M-x org-semantic-find= asks for              |
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
+| ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |
 
 The timeouts are generous rather than tight, and exist because jsonrpc.el wants a
 number: a warm search is under ten milliseconds, the first one against a vault
@@ -419,7 +420,19 @@ flag is: a setting that does nothing looks exactly like a typo that does nothing
 Leave it =nil= --- the default --- and the index is searched as it stands, which
 is what the command line does and is never wrong.
 
-The buffer's ten faces are under ~M-x customize-group RET org-semantic-results~.
+A hit's address is four links --- the directory, the note, the section and the
+line --- and each goes to the thing it names. The directory opens in Dired;
+~org-semantic-results-reveal-function~ replaces that with anything else:
+
+#+begin_src emacs-lisp
+(setq org-semantic-results-reveal-function
+      (lambda (directory _file) (my-file-manager directory)))
+#+end_src
+
+It is called with the directory and the note, both absolute; the second is for
+putting point on the note once the directory is shown, and may be ignored.
+
+The buffer's faces are under ~M-x customize-group RET org-semantic-results~.
 They inherit from stock faces, so a theme reaches them without being told about
 this package.
 

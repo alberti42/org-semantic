@@ -111,7 +111,7 @@ against an index built without one.  The Rust side guards the JSON
 example the same way.
 
 It also catches the Lisp trap: JSON's array, false and null all
-spell themselves `nil' in Emacs, and a list where a vector belongs
+spell themselves nil in Emacs, and a list where a vector belongs
 serialises to something the server will not parse."
   (let ((manual (expand-file-name "docs/manual.org" org-semantic-tests--root)))
     (unless (file-readable-p manual) (ert-skip "no manual"))
