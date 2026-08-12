@@ -2,8 +2,9 @@ name: Release
 
 # Push a version tag (v0.2.0) to build the binaries, sign and notarize the macOS
 # one, and publish a *draft* GitHub release with them attached.  Review the draft
-# and click Publish.  Release notes come from a committed file --
-# release-notes/<tag>.md -- so write it before pushing the tag.
+# and click Publish.  The body is the tag's section of CHANGELOG.md, so move
+# [Unreleased] into a dated version heading before tagging -- a tag with no such
+# section is refused rather than published empty.
 #
 # Required repository secrets:
 #   CERTIFICATE_BASE64    base64 of the "Developer ID Application" .p12
@@ -64,7 +65,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: What is being built
         id: what
         run: |
@@ -112,7 +113,7 @@ jobs:
             echo "::error::CHANGELOG.md has no '## [$SECTION]' section — move [Unreleased] into one"
             exit 1; }
           cat body.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: release-body
           path: body.md
@@ -134,14 +135,15 @@ jobs:
             target: aarch64-unknown-linux-gnu
             asset: org-semantic-aarch64-linux
           # Builds and links -- `ort` takes its DirectML distribution, so the
-          # binary wants DirectML.dll (present since Windows 10 1903).  Nobody
-          # here has run it; treat the asset as untested until someone does.
+          # binary wants DirectML.dll (present since Windows 10 1903).  The smoke
+          # test below is the whole of what has ever been run on it: nobody has
+          # indexed or searched anything on Windows.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: org-semantic-x86_64-windows.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install the Rust toolchain
         run: rustup target add ${{ matrix.target }}
@@ -241,7 +243,7 @@ jobs:
         if: always() && runner.os == 'macOS'
         run: security delete-keychain "$RUNNER_TEMP/build.keychain" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -255,8 +257,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           path: assets
           merge-multiple: true

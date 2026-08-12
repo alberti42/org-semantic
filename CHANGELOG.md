@@ -45,7 +45,8 @@ section for the GitHub release body and refuses a tag it cannot find one for.
 - **Apple Silicon only on macOS.** `ort` publishes no prebuilt ONNX Runtime for
   `x86_64-apple-darwin`, so an Intel build does not link. Rosetta does not help:
   there is no x86_64 binary for it to translate.
-- The Windows binary is built by CI and has not been run by anyone.
+- The Windows binary starts and answers `--version` and `models` in CI, and
+  nothing beyond that has been tried on it — no indexing, no searching.
 - Nothing is interruptible while a model downloads — that wait has no unit
   boundaries to check a cancellation between.
 
