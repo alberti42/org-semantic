@@ -131,13 +131,37 @@ already been given."
              :heading "Note title > Observations"
              :headingLine 12 :startLine 25 :endLine 27))
     (goto-char (point-min))
-    (should (re-search-forward "line 25" nil t))
+    (should (re-search-forward "lines 25" nil t))
     (let ((parts (org-semantic-results-tests--targets)))
-      (should (equal (mapcar #'car parts) '(directory file heading line)))
+      (should (equal (mapcar #'car parts) '(directory file heading line line)))
       (should (equal (nth 0 parts) '(directory nil "lit/2024")))
       (should (equal (nth 1 parts) '(file 1 "note.org")))
       (should (equal (nth 2 parts) '(heading 12 "Observations")))
-      (should (equal (nth 3 parts) '(line 25 "line 25"))))))
+      ;; Both ends of the passage, each reachable on its own.
+      (should (equal (nth 3 parts) '(line 25 "25")))
+      (should (equal (nth 4 parts) '(line 27 "27"))))))
+
+(ert-deftest a-passage-of-one-line-is-not-a-range ()
+  "And a stale one names no range it could not honour.
+
+The span of a passage the note has outgrown cannot be trusted --
+that is what makes it stale -- so the block falls back to the one
+line it can still reach, which is the heading's."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit :startLine 8 :endLine 8 :text "one"))
+    (goto-char (point-min))
+    (should (re-search-forward "line 8" nil t))
+    (should (equal (org-semantic-results-tests--targets)
+                   '((directory nil "notes") (file 1 "a.org")
+                     (heading 3 "Section") (line 8 "8")))))
+  ;; Stale: three lines of span, no text to fill them.
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit :startLine 8 :endLine 10 :text ""))
+    (goto-char (point-min))
+    (should (re-search-forward "line 3" nil t))
+    (let ((parts (org-semantic-results-tests--targets)))
+      (should (equal (mapcar #'car parts) '(directory file heading line)))
+      (should (equal (nth 3 parts) '(line 3 "3"))))))
 
 (ert-deftest only-a-link-answers-the-mouse ()
   "A passage is text: selectable, unlit, and click-to-place-point.
@@ -213,12 +237,12 @@ The path is already above them, and only the line has changed."
             (org-semantic-results-tests--hit :startLine 40 :endLine 42
                                              :text "ten\neleven\ntwelve"))
     (goto-char (point-min))
-    (should (re-search-forward "line 4$" nil t))
+    (should (re-search-forward "lines 4–6$" nil t))
     (should (equal (mapcar #'car (org-semantic-results-tests--targets))
-                   '(directory file heading line)))
-    (should (re-search-forward "line 40" nil t))
+                   '(directory file heading line line)))
+    (should (re-search-forward "lines 40–42$" nil t))
     (should (equal (mapcar #'car (org-semantic-results-tests--targets))
-                   '(line)))))
+                   '(line line)))))
 
 (ert-deftest revealing-a-directory-is-the-user-s-to-replace ()
   "A directory is the one target that is not a place in a note.

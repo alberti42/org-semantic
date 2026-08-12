@@ -708,6 +708,8 @@ above them and only the line has changed."
                       'org-semantic-file (org-semantic-results--item-file item)
                       'read-only t))
          (start (org-semantic-results--item-line item))
+         (from (org-semantic-hit-start-line hit))
+         (to (org-semantic-hit-end-line hit))
          (path (or (org-semantic-hit-path hit) ""))
          (directory (directory-file-name (or (file-name-directory path) "")))
          (sections (org-semantic-results--sections hit))
@@ -742,9 +744,28 @@ above them and only the line has changed."
                     sections 'heading props (org-semantic-hit-line hit)
                     "mouse-2: go to this section")))
          (funcall sep " > ")))
-      (org-semantic-results--link
-       (format "line %s" start) 'line props start
-       "mouse-2: go to this passage")
+      ;; **A range, with both ends reachable.**  A passage is lines FROM to
+      ;; TO, and either end is somewhere you might want to be -- the top to
+      ;; read it, the bottom to carry on past it.  One link to the middle of
+      ;; that is a range described and not offered.
+      ;;
+      ;; Only when the span is real: `item-line' is the heading's line for a
+      ;; passage the note has outgrown, so comparing the two is what keeps a
+      ;; stale block from advertising a range it cannot honour.  A one-line
+      ;; passage says "line", since a range of one is not one.
+      (if (and from to (eql start from) (> to from))
+          (concat (funcall plain "lines " 'default)
+                  (org-semantic-results--link
+                   (number-to-string from) 'line props from
+                   "mouse-2: go to where this passage starts")
+                  (funcall sep "–")
+                  (org-semantic-results--link
+                   (number-to-string to) 'line props to
+                   "mouse-2: go to where this passage ends"))
+        (concat (funcall plain "line " 'default)
+                (org-semantic-results--link
+                 (number-to-string start) 'line props start
+                 "mouse-2: go to this passage")))
       ;; One space, as org itself separates a headline from its tags.  The
       ;; middot the header lines use is for holding apart facts that have
       ;; nothing to do with each other; tags follow what they belong to.
