@@ -139,6 +139,44 @@ already been given."
       (should (equal (nth 2 parts) '(heading 12 "Observations")))
       (should (equal (nth 3 parts) '(line 25 "line 25"))))))
 
+(ert-deftest only-a-link-answers-the-mouse ()
+  "A passage is text: selectable, unlit, and click-to-place-point.
+
+Every line a hit was drawn on used to carry `mouse-face',
+`follow-link' and a keymap, which made the whole result one large
+button -- the passage lit up under the pointer and a click jumped
+instead of placing point, so the text could not be selected.  The
+head's own separators and score had them too, promising a middle
+click that went nowhere in particular.
+
+Keyboard navigation is unaffected and deliberately so: RET comes
+from the major mode's map, not from the text, so going to the line
+under point survives having no mouse affordance on it."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit))
+    (goto-char (point-min))
+    (let ((lit 0) (inert 0))
+      (while (not (eobp))
+        (let ((target (get-text-property (point) 'org-semantic-target))
+              (mouse (get-text-property (point) 'mouse-face)))
+          (if target
+              (progn (setq lit (1+ lit))
+                     (should (eq mouse 'highlight))
+                     (should (get-text-property (point) 'follow-link))
+                     (should (get-text-property (point) 'keymap)))
+            (setq inert (1+ inert))
+            ;; Everything that is not a link: the score, the separators,
+            ;; the tags, and every line of the passage itself.
+            (should-not mouse)
+            (should-not (get-text-property (point) 'follow-link))
+            (should-not (get-text-property (point) 'keymap))))
+        (forward-char 1))
+      (should (> lit 0))
+      (should (> inert 0)))
+    ;; And the passage lines still say which note line they are, which is
+    ;; what RET, `n' and `next-error' all read.
+    (should (equal (org-semantic-results-tests--passage-lines) '(4 5 6)))))
+
 (ert-deftest the-note-title-is-not-repeated-beside-its-filename ()
   "The heading begins with the title, which the file already names.
 

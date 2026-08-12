@@ -663,6 +663,15 @@ back off the text, which a closure would not be."
          'face 'org-semantic-results-link
          'org-semantic-target target
          'help-echo (or help "mouse-2: go here")
+         ;; **The mouse affordances live here and nowhere else.**  They were
+         ;; on every line a hit was drawn on, which made the whole result one
+         ;; large button: the passage lit up under the pointer, a click
+         ;; jumped instead of placing point, and the text could not be
+         ;; selected.  Now what looks like a link is what behaves like one,
+         ;; and a passage is text.
+         'mouse-face 'highlight
+         'keymap org-semantic-results-passage-map
+         'follow-link t
          (append (and line (list 'org-semantic-line line)) props)))
 
 (defun org-semantic-results--plain (text props line)
@@ -697,20 +706,18 @@ above them and only the line has changed."
   (let* ((props (list 'org-semantic-item item
                       'org-semantic-hit hit
                       'org-semantic-file (org-semantic-results--item-file item)
-                      'mouse-face 'highlight
-                      'keymap org-semantic-results-passage-map
-                      'follow-link t
                       'read-only t))
          (start (org-semantic-results--item-line item))
          (path (or (org-semantic-hit-path hit) ""))
          (directory (directory-file-name (or (file-name-directory path) "")))
          (sections (org-semantic-results--sections hit))
          (annotation (and first (org-semantic-ui-annotate hit)))
+         ;; No `help-echo' here: nothing outside a link is clickable now, so
+         ;; promising a mouse-2 would be promising something that does not
+         ;; happen.
          (plain (lambda (text face)
                   (org-semantic-results--plain
-                   (propertize text 'face face)
-                   (append (list 'help-echo "mouse-2: go to this passage") props)
-                   start)))
+                   (propertize text 'face face) props start)))
          (sep (lambda (s) (funcall plain s 'org-semantic-results-location))))
     (insert
      (concat
@@ -778,11 +785,7 @@ line and not a rendering of one."
                           ;; text: a wrapped line continues under the
                           ;; gutter rather than under the note's own
                           ;; first column.
-                          'wrap-prefix (make-string (length gutter) ?\s)
-                          'mouse-face 'highlight
-                          'keymap org-semantic-results-passage-map
-                          'follow-link t
-                          'help-echo "mouse-2: go to this line")))
+                          'wrap-prefix (make-string (length gutter) ?\s))))
         (unless mine
           (setq props (append (list 'face 'org-semantic-results-duplicate) props)))
         (when (and limit (>= shown limit))
