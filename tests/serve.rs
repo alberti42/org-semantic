@@ -1055,3 +1055,40 @@ fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
         "a search must leave the model cache exactly as it found it"
     );
 }
+
+/// Where the downloads land is settable, and the variable is the *cache home* —
+/// it stands in for `$XDG_CACHE_HOME`, so the layout under it is the same one.
+///
+/// Driven as a subprocess because that is the only way to set an environment
+/// variable without racing every other test in this file: `std::env::set_var`
+/// is process-global and `cargo test` runs these on threads.
+///
+/// It asserts the **override wins over `XDG_CACHE_HOME`**, since both being set
+/// is the ordinary case — every Linux desktop sets the latter — and a rule that
+/// only holds when the other is absent is not the rule anyone wants.
+#[test]
+fn the_download_directory_can_be_moved_and_the_move_is_visible() {
+    let elsewhere = scratch("cache-elsewhere");
+    let ignored = scratch("cache-ignored");
+    let out = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+        .arg("models")
+        .env("ORG_SEMANTIC_CACHE_HOME", &elsewhere)
+        .env("XDG_CACHE_HOME", &ignored)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(elsewhere.join("fastembed").to_str().unwrap()),
+        "`models` must name the directory the weights actually go to: {said}"
+    );
+    assert!(
+        said.contains(elsewhere.join("org-semantic").to_str().unwrap()),
+        "and the classifier's, which is the other download: {said}"
+    );
+    assert!(
+        !said.contains(ignored.to_str().unwrap()),
+        "ours replaces XDG_CACHE_HOME rather than losing to it: {said}"
+    );
+}

@@ -104,7 +104,8 @@ cargo build --release          # target/release/org-semantic
 
 Requires a Rust toolchain, and nothing else --- no Python, no libraries to install
 system-wide, no package manager. The default embedding model downloads by itself
-the first time you index, into =$XDG_CACHE_HOME/fastembed=.
+the first time you index, into =$XDG_CACHE_HOME/fastembed= --- or wherever
+=ORG_SEMANTIC_CACHE_HOME= points, see [[#what-it-writes][What it writes]].
 
 * Use
 :PROPERTIES:
@@ -1323,7 +1324,8 @@ decides everything else*:
 
 Classification is per note rather than per chunk, since a chunk can be a two-line
 heading. It uses fastText's =lid.176= (938 kB), downloaded to
-=$XDG_CACHE_HOME/org-semantic/= on first use.
+=$XDG_CACHE_HOME/org-semantic/= on first use --- or under
+=ORG_SEMANTIC_CACHE_HOME=, see [[#what-it-writes][What it writes]].
 
 *It is accurate on prose and guesses when there is no prose.* Measured across a
 951-note vault, =auto= placed English, German and Italian correctly; the 0.4% it
@@ -1418,8 +1420,30 @@ The two chunk differently, because they are bounded by different things --- see
 Add =/.org-semantic/= to the vault's =.gitignore=. All of it is derived --- delete
 the directory and =org-semantic index= rebuilds it in one pass.
 
-One thing lives outside the vault: the embedding model, cached once in
-=$XDG_CACHE_HOME/fastembed= (~190 MB) and shared by every vault.
+*Two things live outside the vault*, both downloaded once and shared by every
+vault: the embedding model, in =$XDG_CACHE_HOME/fastembed=, and the language
+classifier, in =$XDG_CACHE_HOME/org-semantic=. =org-semantic models= prints both
+paths. A model is 128 MB for =bge-small-en= and up to 2.24 GB for the large
+multilingual ones; the classifier is 938 kB.
+
+To put them elsewhere --- a small system disk, an external drive, a directory
+shared by several accounts --- set =ORG_SEMANTIC_CACHE_HOME=. It *replaces*
+=$XDG_CACHE_HOME= for this tool alone, and the layout beneath it is the same, so
+moving an existing cache is a =mv= of those two directories:
+
+#+begin_src sh
+mkdir -p /Volumes/data/cache
+mv ~/.cache/fastembed ~/.cache/org-semantic /Volumes/data/cache/
+export ORG_SEMANTIC_CACHE_HOME=/Volumes/data/cache
+#+end_src
+
+*Set it in the environment, not per command.* It has to be the same for every
+invocation --- yours from a shell, the =serve= process your editor spawns, a cron
+job --- and there is deliberately no flag for it: a flag is per-invocation, so
+forgetting it once downloads the model a second time into the default location
+with nothing failing. Put it in your shell profile, and in the =launchd= plist or
+systemd unit if you run Emacs as a daemon, since a daemon inherits the
+environment it was started with and not your shell's.
 
 *Indexing is incremental by default.* A file whose modification time and size
 are unchanged is not even read; one whose timestamp moved is read and hashed, and

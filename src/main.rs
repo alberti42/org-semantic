@@ -2358,10 +2358,31 @@ fn hard_split(para: &Para, measure: &dyn Fn(&str) -> usize, budget: usize) -> Ve
 
 // ----------------------------------------------------------------- embedding
 
+/// Where the two downloaded things live: `fastembed/` for the embedding models,
+/// `org-semantic/` for the language classifier.
+///
+/// **An environment variable and not a flag, deliberately.** This is a
+/// machine-wide constant that must be the same for every invocation — the CLI's,
+/// the editor's server's, a cron job's — and a flag is per-invocation: forget it
+/// once and 2.24 GB is downloaded a second time into the default location, with
+/// nothing failing. An environment variable is set in one place (a shell profile,
+/// a launchd plist, `process-environment`) and cannot be half-applied. It is not
+/// policy either: `Config` is hashed into every manifest, so a cache path there
+/// would demand a reindex the first time someone moved their disk around.
+///
+/// `ORG_SEMANTIC_CACHE_HOME` **replaces `$XDG_CACHE_HOME`** rather than naming
+/// either directory outright, so the layout under it is identical to the default
+/// one and relocating is a `mv` of the two directories plus one `export`. It
+/// exists at all because `$XDG_CACHE_HOME` moves *every* tool's cache, and the
+/// thing a user wants off a small disk is these gigabytes and not their shell's
+/// completion cache.
 fn xdg_cache() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache")
-    })
+    std::env::var("ORG_SEMANTIC_CACHE_HOME")
+        .or_else(|_| std::env::var("XDG_CACHE_HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache")
+        })
 }
 
 fn cache_dir() -> PathBuf {
@@ -5471,6 +5492,16 @@ fn main() -> Result<()> {
                 "\nEach model keeps its own index under .org-semantic/semantic/<model>/, so\n\
                  several can be built side by side and compared without re-embedding.\n\
                  `search --model NAME` picks between them."
+            );
+            // Where the weights are is the one thing about them not visible from
+            // the vault, and it is gigabytes.  Naming the resolved directory also
+            // says which of the two variables won, without explaining the rule.
+            println!(
+                "\nDownloaded to {} (models) and {} (the language classifier).\n\
+                 Set ORG_SEMANTIC_CACHE_HOME to put both somewhere else; it \
+                 replaces $XDG_CACHE_HOME\nfor this tool alone.",
+                cache_dir().display(),
+                xdg_cache().join("org-semantic").display()
             );
             Ok(())
         }
