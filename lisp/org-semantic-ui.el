@@ -210,7 +210,7 @@ nobody parses the prose to find out which call to make."
             ("no-index"
              (append build
                      (unless (equal mode "lexical")
-                       '(("Search by word (lexical)" . lexical)))))
+                       '(("Lexical search (by word)" . lexical)))))
             ;; The index is here and the model that built it is not -- a vault
             ;; copied to another machine, or a cleared cache.  Named as a
             ;; download rather than as a build, because that is the part that
@@ -235,7 +235,7 @@ nobody parses the prose to find out which call to make."
               (unless (org-semantic-true-p (plist-get data :indexing))
                 '(("Download it" . download)))
               (unless (equal mode "lexical")
-                '(("Search by word (lexical)" . lexical)))))
+                '(("Lexical search (by word)" . lexical)))))
             ("config-drift"
              (append '(("Rebuild fully" . index-full)
                        ("Search anyway" . waive))
@@ -259,18 +259,17 @@ nobody parses the prose to find out which call to make."
 
 (defconst org-semantic-ui--offer-keys
   '(("Show what changed" . ?c)
-    ("Search by word (lexical)" . ?w)
+    ("Lexical search (by word)" . ?L)
     ("Rebuild fully" . ?b)
     ("Rebuild from scratch" . ?b))
   "Offers whose key is not the first letter of their label.
 
 Two reasons to be here.  A collision: `config-drift' offers \"Search
 anyway\" beside \"Show what changed\", and both begin with an S.  Or
-the initial names the wrong half of the label: \"Search by word
-\(lexical)\" is answered by `w', since what distinguishes it is the
-*word* index it reads and not that it is a search.  Not `l' for
-lexical, which would be the same letter the results buffer uses for
-the logical connector -- one letter, two jobs, in one package.
+the initial is right but its *case* is not: \"Lexical search (by
+word)\" is answered by `L', matching the key the results buffer uses
+for the same choice, where a bare `l' is the logical connector.  One
+letter, one job, across the whole package.
 
 And a third: **two labels for one action answer to one key.**  A full
 rebuild is offered as \"Rebuild fully\" when a policy has drifted and

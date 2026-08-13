@@ -412,7 +412,7 @@ inside your query:
   the bge-small-en model is not downloaded yet
 
     [d] Download it — fetches the weights and nothing else; minutes
-    [w] Search by word (lexical) — needs no embedding model
+    [L] Lexical search (by word) — needs no embedding model
     [q] leave it
 
   Choice:
@@ -425,7 +425,7 @@ again --- and *only* that: nothing is indexed. Should the index turn out to be
 missing as well, that search says so itself and asks about building it, which is a
 separate question with its own answer.
 
-=w= answers this once by word, and leaves the buffer's own ranking alone; if you
+=L= answers this once by word, and leaves the buffer's own ranking alone; if you
 would rather always search that way, say so in
 ~org-semantic-results-ranking~. =q= or =C-g= declines, which costs nothing: =R=
 indexes the vault whenever you like, and =M-x org-semantic-show-status= says

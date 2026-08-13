@@ -233,7 +233,8 @@ now how org-semantic is meant to be used from Emacs.
   prompt's key for the same choice — though the prompt's version searches by word
   once, where the key is a statement about the buffer.
 - **Keys moved so that no letter does two jobs.** The offer that searches by word
-  is `[w]`, freeing `l` for the logical connector. `retry` lost its second label with it — "Wait for it" is
+  is `[L] Lexical search (by word)`, the same key the results buffer uses for the
+  same choice, leaving a bare `l` for the logical connector. `retry` lost its second label with it — "Wait for it" is
   "Try again" everywhere now, one action with one name. A full rebuild is `[b]`
   like a first build, since no failure ever offers both and `[r]` would have
   implied the letter told them apart.

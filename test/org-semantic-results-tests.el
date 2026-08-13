@@ -1194,7 +1194,7 @@ already dismissed."
     ;; And the question named every offer with the key that answers it.
     (let ((prompt (car org-semantic-results-tests--asked)))
       (should (string-match-p "\\[d\\] Download it" prompt))
-      (should (string-match-p "\\[w\\] Search by word (lexical)" prompt))
+      (should (string-match-p "\\[L\\] Lexical search (by word)" prompt))
       (should (string-match-p "\\[q\\] leave it" prompt))
       ;; Each says what it costs.  A single-letter menu that does not is
       ;; asking the reader to remember which of these takes minutes.
@@ -1222,7 +1222,7 @@ long after the binding is gone."
         (setq org-semantic-results--vault "/vault"
               org-semantic-results--query "q"
               org-semantic-results--mode "semantic")
-        (org-semantic-results-tests--answering ?w
+        (org-semantic-results-tests--answering ?L
           (org-semantic-results--render-error
            '(:message "no semantic index" :data (:kind "no-index" :remedy "index"))))
         ;; Asked by word...
