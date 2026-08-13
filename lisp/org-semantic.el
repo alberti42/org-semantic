@@ -821,7 +821,7 @@ What to show; `org-semantic-hit-file' is what to open."
 (defun org-semantic-hit-title (hit)
   "The name of the note HIT is in.
 
-Its `#+title:\=' when it has one, and otherwise its filename without
+Its `#+title:' when it has one, and otherwise its filename without
 the extension -- the server settles that, since it is the same
 substitution it makes when building the heading breadcrumb.  Empty
 where a note is somehow both untitled and unnamed, so treat it as a

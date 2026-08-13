@@ -107,22 +107,22 @@ nothing."
                  (const :tag "Ask each time" "ask")))
 
 (defcustom org-semantic-results-connector 'and
-  "How the terms of a word search are joined: `and\=' or `or\='.
+  "How the terms of a word search are joined: `and' or `or'.
 
-`and\=' answers with the notes carrying every term, `or\=' with those
-carrying any of them.  It is the *default* for a search; `l\=' in the
-results buffer -- `l\=' for logic -- swaps it for the one in front of
-you, as `r\=' swaps the ranking.
+`and' answers with the notes carrying every term, `or' with those
+carrying any of them.  It is the *default* for a search; `l' in the
+results buffer -- `l' for logic -- swaps it for the one in front of
+you, as `r' swaps the ranking.
 
 A word search only.  An embedding has no terms to join, so the
 semantic ranking ignores this and the key refuses rather than
 pretending to have changed something.
 
 Named for the logic and not for the wire, which spells the same
-thing as a boolean called `any\=' -- that is the server\='s spelling of
+thing as a boolean called `any' -- that is the server's spelling of
 a detail, and there is no reason to make a reader of Emacs learn it.
-`AND\=' and `OR\=' are also writable in the query itself, with
-parentheses and `NOT\=', so this is the default rather than the only
+`AND' and `OR' are also writable in the query itself, with
+parentheses and `NOT', so this is the default rather than the only
 way to say it."
   :type '(choice (const :tag "All terms (AND)" and)
                  (const :tag "Any term (OR)" or)))
@@ -275,10 +275,10 @@ which one the next search will use.")
 
 What it buys is not asking a question that has already been
 answered: a search sent while the fetch is in flight is refused with
-`model-missing\=' all over again, and offering \"try again\" to
+`model-missing' all over again, and offering \"try again\" to
 someone who is already waiting for the thing is a poll loop by hand.
 The buffer says it is waiting instead, which is true and which ends
-by itself, because the download\='s own reply re-runs the search.
+by itself, because the download's own reply re-runs the search.
 
 Only *ours*.  A fetch started by another Emacs or a shell sends us
 nothing when it lands, so there the offer to search again is the
@@ -286,7 +286,7 @@ honest one -- we cannot know when to stop waiting.")
 
 (defvar-local org-semantic-results--connector nil
   "How this buffer joins the terms of a word query, or nil for the default.
-`and\=' or `or\='; see `org-semantic-results-connector\='.")
+`and' or `or'; see `org-semantic-results-connector'.")
 
 (defvar-local org-semantic-results--model nil
   "Which model to search, or nil for `org-semantic-model'.")
@@ -374,12 +374,58 @@ block."
 (define-derived-mode org-semantic-results-mode special-mode "org-semantic"
   "Major mode for a list of org-semantic hits.
 
-\\<org-semantic-results-mode-map>A passage is shown as the note's
-own lines, so \\[org-semantic-results-goto] goes to the line under
-point rather than to the top of the section it belongs to, and
-\\[org-semantic-results-display] shows it without leaving this
-buffer.  \\[revert-buffer] asks again rather than redrawing what
-is here, since the notes may have moved on.
+\\<org-semantic-results-mode-map>Hits are grouped by note, and within
+a note by section.  A passage is shown as the note's own lines, so
+each line here is that line there.
+
+Going to a hit:
+
+\\[org-semantic-results-goto] goes to the line under point --- not to
+the top of the section, which may be hundreds of lines above it.
+\\[org-semantic-results-goto-other-window] does it in another window,
+and \\[org-semantic-results-display] shows it without leaving this
+buffer.  Every part of a hit's address is a link as well: the
+directory opens in Dired, the note opens at its top, the section goes
+to its heading, and the two line numbers go to where the passage
+starts and ends.
+
+Moving about:
+
+\\[org-semantic-results-next] and \\[org-semantic-results-previous]
+step by passage; \\[org-semantic-results-next-note] and
+\\[org-semantic-results-previous-note] by note, skipping the rest of
+this one.  \\[org-semantic-results-toggle-passage] unfolds a passage
+cut short by `org-semantic-results-passage-lines'.
+
+Asking something else:
+
+\\[org-semantic-results-set-query] edits the query.
+\\[org-semantic-results-rank-by-meaning] ranks by meaning and
+\\[org-semantic-results-rank-by-word] by word --- two separate
+indexes, not two orderings of one.
+\\[org-semantic-results-toggle-connector] joins a word query's terms
+with AND or OR.
+
+How much comes back --- two caps, and the header states both:
+
+\\[org-semantic-results-more-notes] and
+\\[org-semantic-results-fewer-notes] double and halve how many
+*notes* may appear, \\[org-semantic-results-set-notes] sets it
+exactly.  \\[org-semantic-results-more-passages] and
+\\[org-semantic-results-fewer-passages] do the same for how many
+*passages* one note may contribute, and
+\\[org-semantic-results-set-passages] sets that.  The first widens
+the list, the second deepens the notes already in it.
+
+Keeping up to date:
+
+\\[org-semantic-results-revert] asks again rather than redrawing, since the notes
+may have moved on --- no note is read or written by it.
+\\[org-semantic-results-reindex] indexes the vault first, which is
+what a stale index needs; two prefix arguments rebuild it from
+scratch.  \\[next-error-follow-minor-mode] follows each passage as
+point reaches it, and `next-error' works from anywhere, so
+\\[next-error] walks these hits from any buffer.
 
 \\{org-semantic-results-mode-map}"
   (setq-local revert-buffer-function #'org-semantic-results--revert)
@@ -563,9 +609,9 @@ still answer by word.  Pressing that must not silently redefine
 every later query in the buffer, which it did, with nothing saying
 why.
 
-What the header shows is `org-semantic-results--asked-mode\=', the
+What the header shows is `org-semantic-results--asked-mode', the
 ranking that produced what is on screen, and not what the buffer
-will ask next.  Binding the buffer\='s own mode around the request
+will ask next.  Binding the buffer's own mode around the request
 instead looked equivalent and was worse: the reply is rendered long
 after the binding is gone, so the header said \"semantic\" over
 results found by word."
@@ -607,7 +653,7 @@ results found by word."
                        (org-semantic-results--params)))
 
 (defun org-semantic-results--joined ()
-  "How this buffer joins the terms of a word query, `and\=' or `or\='."
+  "How this buffer joins the terms of a word query, `and' or `or'."
   (or org-semantic-results--connector org-semantic-results-connector))
 
 (defun org-semantic-results--params ()
@@ -619,7 +665,7 @@ results found by word."
         :merge-by-section org-semantic-results--merge
         :mode org-semantic-results--asked-mode
         :model (or org-semantic-results--model org-semantic-model)
-        ;; `any\=' is the server\='s spelling; this is the one place the two meet.
+        ;; `any' is the server's spelling; this is the one place the two meet.
         :any (eq (org-semantic-results--joined) 'or)
         ;; Absent when waived, and the driver takes that literally --
         ;; which is the whole of how a drifted policy is searched anyway.
@@ -790,7 +836,7 @@ there is no index reads as an answer, and it is not one."
 (defun org-semantic-results--note-name (group)
   "What to call the note GROUP is the hits of.
 
-Its `#+title:\=', or its filename without the extension when it has
+Its `#+title:', or its filename without the extension when it has
 none -- the server has already made that substitution, so this is
 the title it sends, and the fallback here is for a reply that
 somehow carries none.
@@ -1625,12 +1671,12 @@ mean pressing \\`M-n' before every refinement."
 Two keys rather than one that toggles, which is what this was.  A
 toggle cannot be pressed without first knowing which ranking is in
 force, so the same key means two things depending on state the user
-has to go and read; `m\=' and `w\=' each mean one thing and can be
-pressed blind.  `w\=' is also the key the failure prompt uses for the
+has to go and read; `m' and `w' each mean one thing and can be
+pressed blind.  `w' is also the key the failure prompt uses for the
 same choice.
 
 This is not the same as the offer in that prompt, which searches by
-word *once* and leaves the buffer\='s ranking alone: pressing a key
+word *once* and leaves the buffer's ranking alone: pressing a key
 here is a statement about what this buffer is for."
   (interactive nil org-semantic-results-mode)
   (org-semantic-results--rank "lexical"))
@@ -1674,9 +1720,9 @@ look as though it had done something."
 (defun org-semantic-results-set-notes (n)
   "Let at most N notes appear.
 
-The exact value, where `k\=' and `K\=' double and halve it.  A vault
+The exact value, where `k' and `K' double and halve it.  A vault
 kept in a few large files is the case that wants one: raising this
-is what widens the list, and it is the number the header calls `k\='."
+is what widens the list, and it is the number the header calls `k'."
   (interactive
    (list (read-number "Notes at most: " (or org-semantic-results--k 8)))
    org-semantic-results-mode)
@@ -1685,7 +1731,7 @@ is what widens the list, and it is the number the header calls `k\='."
 (defun org-semantic-results-set-passages (n)
   "Let each note contribute at most N passages.
 
-The exact value, where `+\=' and `-\=' double and halve it.  A year of
+The exact value, where `+' and `-' double and halve it.  A year of
 meetings in one file is the case that wants one: every hit comes from
 that file, so this is the only number that deepens the list."
   (interactive
@@ -1706,7 +1752,7 @@ that file, so this is the only number that deepens the list."
 
 Doubles, as the note cap does: one story for both keys rather than
 two conventions to remember.  It is also the size of step this
-number wants -- the manual\='s advice for a year of meetings in one
+number wants -- the manual's advice for a year of meetings in one
 file is 25, which stepping by one does not reach.  An exact value
 comes from the two prefix arguments on a search."
   (interactive nil org-semantic-results-mode)

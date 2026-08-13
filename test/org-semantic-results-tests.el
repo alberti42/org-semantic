@@ -1193,16 +1193,16 @@ already dismissed."
       (should (string-match-p "needs no embedding model" prompt)))))
 
 (ert-deftest answering-by-word-does-not-make-it-the-buffer-s-ranking ()
-  "`l\=' searches by word once; it does not redefine what the buffer wants.
+  "`l' searches by word once; it does not redefine what the buffer wants.
 
 The bug it fixes was reported as \"sticky configuration\": pressing
 it out of a refusal set the buffer to lexical for good, so every
 later query in that buffer was answered by word with nothing saying
 why.  It is an escape from one refusal, not a preference --
-`org-semantic-results-ranking\=' is where a preference goes.
+`org-semantic-results-ranking' is where a preference goes.
 
 And the header must not lie about which of the two answered, which
-is why the mode asked is recorded separately.  Binding the buffer\='s
+is why the mode asked is recorded separately.  Binding the buffer's
 own mode around the request would pass this test and still print
 \"semantic\" over results found by word, since the reply is rendered
 long after the binding is gone."
@@ -1227,7 +1227,7 @@ long after the binding is gone."
         (should (equal (car asked) "semantic"))))))
 
 (ert-deftest answering-with-a-download-fetches-and-indexes-nothing ()
-  "`d\=' fetches the weights the error named, and builds nothing.
+  "`d' fetches the weights the error named, and builds nothing.
 
 The whole point of the method it calls.  Sending an index instead
 was the bug: on a vault whose notes have not changed there is
@@ -1452,6 +1452,37 @@ leave it."
     (should (eq ?b (org-semantic-ui-offer-key '("Rebuild fully" . index-full))))
     (should (eq ?b (org-semantic-ui-offer-key '("Rebuild from scratch" . index-full))))))
 
+
+;;;; The sources themselves
+
+(ert-deftest no-docstring-carries-a-stray-quote-escape ()
+  "`\\=' in a docstring needs two backslashes in the source, not one.
+
+With one, Emacs's reader drops it as an unknown string escape and the
+`=' survives into the text: \"the note\\='s lines\" renders as \"the
+note=’s lines\".  Nothing catches it -- the byte compiler is happy,
+checkdoc is happy, and the docstring merely reads badly, in a place
+nobody looks until they press `h'.
+
+Forty-four of them arrived in one afternoon of scripted edits, which
+is exactly the shape of mistake a gate is for.  The legitimate form,
+two backslashes, is what a *quoted symbol* inside a code example
+needs; this only objects to one."
+  (dolist (file (append (file-expand-wildcards
+                         (expand-file-name "lisp/*.el" org-semantic-tests--root))
+                        (file-expand-wildcards
+                         (expand-file-name "test/*.el" org-semantic-tests--root))))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      ;; A backslash-equals-quote whose backslash is not itself escaped.
+      ;; Spelled out rather than shown: writing the sequence here would trip
+      ;; this very search, which is a fair sign the search works.
+      (should-not
+       (and (re-search-forward "\\(?:^\\|[^\\\\]\\)\\\\='" nil t)
+            (format "%s:%d has a one-backslash quote escape"
+                    (file-name-nondirectory file)
+                    (line-number-at-pos)))))))
 
 ;;;; Settings, and the manual that lists them
 
