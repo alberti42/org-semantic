@@ -1676,11 +1676,17 @@ only in which line it carries."
       (org-semantic-results--visit :select t))))
 
 (defun org-semantic-results-next (&optional n)
-  "Go to the Nth next passage, and show it."
+  "Go to the Nth next passage, and show it.
+
+Says so in the echo area at either end, rather than signalling: the
+end of a list is a fact about the list and not a mistake, and
+`user-error' rings the bell for it.  Walking into the last hit is the
+commonest thing anyone does here."
   (interactive "p" org-semantic-results-mode)
-  (unless (org-semantic-results--move (or n 1))
-    (user-error "No next passage"))
-  (org-semantic-results--visit))
+  (let ((n (or n 1)))
+    (if (org-semantic-results--move n)
+        (org-semantic-results--visit)
+      (message (if (< n 0) "No previous passage" "No next passage")))))
 
 (defun org-semantic-results-previous (&optional n)
   "Go to the Nth previous passage, and show it."

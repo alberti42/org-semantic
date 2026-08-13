@@ -853,6 +853,31 @@ moves too -- so the message names both."
         (should (= org-semantic-results--k 1))
         (should (= asked 8))))))
 
+(ert-deftest the-end-of-the-list-is-said-and-not-signalled ()
+  "Walking off either end is a fact about the list, not a mistake.
+
+`user-error' rings the bell, and reaching the last hit is the
+commonest thing anyone does in this buffer.  It says so in the echo
+area and leaves point where it is.
+
+The test would also fail if it signalled, since the assertion after
+would never run -- which is the half worth keeping if someone puts
+`user-error' back."
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args))))
+              ((symbol-function 'org-semantic-results--visit) #'ignore))
+      (org-semantic-results-tests--drawn
+          (list (org-semantic-results-tests--hit))
+        (org-semantic-results--first-item)
+        (let ((was (point)))
+          (org-semantic-results-next)
+          (should (equal said "No next passage"))
+          (should (= was (point)))
+          (org-semantic-results-previous)
+          (should (equal said "No previous passage"))
+          (should (= was (point))))))))
+
 (ert-deftest each-cap-has-its-own-pair-of-keys ()
   "`k'/`K' the notes, `+'/`-' the passages each note may contribute.
 
