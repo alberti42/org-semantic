@@ -223,6 +223,27 @@ binary is, if it is not already on your =PATH=:
 (setq org-semantic-executable "/path/to/org-semantic")
 #+end_src
 
+Or with =use-package=, which also gives somewhere to put the keys. There are no
+default global bindings and there will not be: =C-c= followed by a plain letter
+is reserved for you rather than for a package, so a recommendation is as far as
+this can go.
+
+#+begin_src emacs-lisp
+(use-package org-semantic-results
+  :load-path "/path/to/org-semantic/lisp"
+  :custom (org-semantic-executable "/path/to/org-semantic")
+  :bind (("C-c n s" . org-semantic-find)
+         ("C-c n S" . org-semantic-find-at-point)
+         ("C-c n R" . org-semantic-reindex)))
+#+end_src
+
+=s= searches, =S= searches for the region or the symbol at point, and =R=
+indexes. The =C-c n= prefix is what org-roam's own manual suggests for its
+commands, and these three compose with it rather than colliding --- org-roam uses
+=f=, =i=, =l=, =g=, =c= and =j=, and none of those. Everything else ---
+~org-semantic-cancel~, ~org-semantic-show-status~, ~org-semantic-show-memory~,
+~org-semantic-restart~, ~org-semantic-quit~ --- is rare enough to leave on =M-x=.
+
 A vault says which directory it is, in its own =.dir-locals.el=, so that it can
 be found before anything has been indexed:
 
