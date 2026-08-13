@@ -244,6 +244,18 @@ commands, and these three compose with it rather than colliding --- org-roam use
 ~org-semantic-cancel~, ~org-semantic-show-status~, ~org-semantic-show-memory~,
 ~org-semantic-restart~, ~org-semantic-quit~ --- is rare enough to leave on =M-x=.
 
+One thing in the results buffer is worth turning on before you meet it. =f= there
+toggles ~next-error-follow-minor-mode~, which previews each passage in its note as
+point reaches it --- moving with =n= and =p= then reads the vault rather than a
+list of it. To have it on from the start:
+
+#+begin_src emacs-lisp
+(add-hook 'org-semantic-results-mode-hook #'next-error-follow-minor-mode)
+#+end_src
+
+It is a minor mode called from a hook, so it *enables* rather than toggling;
+the note is displayed without selecting its window, so point stays in the list.
+
 A vault says which directory it is, in its own =.dir-locals.el=, so that it can
 be found before anything has been indexed:
 

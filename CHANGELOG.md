@@ -184,7 +184,8 @@ now how org-semantic is meant to be used from Emacs.
   the executable bit survives, which a bare release asset does not carry.
 - **`f` follows point**, previewing each passage in its note as you reach it —
   `next-error-follow-minor-mode`, which was reachable only as `C-c C-f` and so
-  went unnoticed. That spelling still works, being the one `occur` and `grep` use.
+  went unnoticed. That spelling still works, being the one `occur` and `grep` use,
+  and `org-semantic-results-mode-hook` turns it on for good.
 - **A pair of keys for each cap**: `k`/`K` for how many notes may appear, `+`/`-`
   for how many passages one note may contribute. `+`/`-` moved off the note cap,
   which had no mnemonic and left the passage cap reachable only by re-running the

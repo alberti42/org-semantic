@@ -448,6 +448,11 @@ without selecting the window -- so the list stays where the typing
 goes.  It answers to the key `occur' and `grep' use for it as well,
 which the table below spells out.
 
+To have it on in every results buffer, put it on this mode's hook:
+
+  (add-hook \\='org-semantic-results-mode-hook
+            \\='next-error-follow-minor-mode)
+
 \\{org-semantic-results-mode-map}"
   (setq-local revert-buffer-function #'org-semantic-results--revert)
   ;; Wrapped rather than truncated, with `wrap-prefix' carrying the
