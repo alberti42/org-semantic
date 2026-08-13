@@ -238,7 +238,7 @@ the length of the list as well:
 
 #+begin_example
 org-semantic: semantic search for "vacuum bakeout procedure"
-~/notes  ·  k=8 notes  ·  per-file=3 passages
+~/notes  ·  k=8 notes  ·  3 passages per note
 6 notes, 11 passages in 0.31 s
 
 Vacuum system  ·  2 passages

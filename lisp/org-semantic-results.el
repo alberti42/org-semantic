@@ -745,7 +745,7 @@ there is no index reads as an answer, and it is not one."
   (let* ((notes (length (org-semantic-results--group hits)))
          (facts (delq nil
                       (list (format "k=%s notes" (or org-semantic-results--k 8))
-                            (format "per-file=%s passages"
+                            (format "%s passages per note"
                                     (or org-semantic-results--per-file 3))
                             (and org-semantic-results--merge "merged by section")
                             (and (equal org-semantic-results--asked-mode "lexical")
