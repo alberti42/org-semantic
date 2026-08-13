@@ -27,6 +27,14 @@
 (require 'org-semantic-results)
 (require 'org-semantic-tests)
 
+;; Loaded here, not lazily as the package does, because these tests `let'-bind
+;; `org-link-descriptive' -- and a `let' on a symbol that is not yet special
+;; binds it *lexically*, so the function under test goes on reading the global
+;; value.  That is what the first draft did, and it failed in the direction that
+;; looks like the code is wrong.
+(require 'org nil t)
+(defvar org-link-descriptive)
+
 (defun org-semantic-results-tests--hit (&rest overrides)
   "A hit as the server sends one, with OVERRIDES applied.
 
@@ -1469,7 +1477,11 @@ are."
   ;; happens or not -- which is what the first draft of this did.
   (let ((text "A *bold* [[https://example.com][word]] and =verbatim=.\nSecond line."))
     (skip-unless (require 'org nil t))
-    (let ((fancy (org-semantic-results--fontified text)))
+    ;; Descriptive links off, so the only properties here are org's own -- what
+    ;; this test is about is that none of them survive.  Hiding a link's
+    ;; brackets is our own `invisible' and has its own test.
+    (let* ((org-link-descriptive nil)
+           (fancy (org-semantic-results--fontified text)))
       ;; Same characters, always.
       (should (equal (substring-no-properties fancy) text))
       ;; Faces arrived.
@@ -1483,6 +1495,44 @@ are."
     ;; Off, it is the string it was handed -- properties and all.
     (let ((org-semantic-results-fontify nil))
       (should (eq text (org-semantic-results--fontified text))))))
+
+(ert-deftest a-link-shows-its-description-when-org-says-so ()
+  "`org-link-descriptive' is honoured, by hiding the brackets ourselves.
+
+Org 9.8 hides links through `org-fold-core', which has to be
+initialised in the buffer doing the hiding; a list of passages should
+not have to become an org buffer for it.  So the brackets get our own
+`invisible', under a spec of our own -- separate from the one `TAB'
+folds a passage's tail with, which must not take a link with it.
+
+The characters are still all there, which is what keeps a line
+addressable: `invisible' hides, it does not delete."
+  (skip-unless (require 'org nil t))
+  (let* ((text "See [[https://example.com][the docs]] now.")
+         (org-link-descriptive t)
+         (out (org-semantic-results--fontified text))
+         (hidden (lambda (i) (eq (get-text-property i 'invisible out)
+                                 'org-semantic-results-link))))
+    (should (equal (substring-no-properties out) text))
+    ;; `[[https://example.com][' is hidden, `the docs' is not, `]]' is.
+    (should (funcall hidden (string-search "[[" out)))
+    (should-not (funcall hidden (string-search "the docs" out)))
+    (should (funcall hidden (- (length out) (length "]] now."))))
+    ;; And nothing outside a link is touched.
+    (should-not (funcall hidden 0)))
+  ;; Off, the brackets stay visible: someone who asked for literal links in org
+  ;; gets literal links here.
+  (let* ((org-link-descriptive nil)
+         (out (org-semantic-results--fontified "See [[https://example.com][the docs]] now.")))
+    (should-not (cl-some (lambda (i) (get-text-property i 'invisible out))
+                         (number-sequence 0 (1- (length out))))))
+  ;; A link across two lines is left alone: each line drawn is a line of the
+  ;; note, and hiding part of one that straddles a newline would leave a line
+  ;; nobody can point at.
+  (let* ((org-link-descriptive t)
+         (out (org-semantic-results--fontified "See [[https://example.com][two\nlines]] now.")))
+    (should-not (cl-some (lambda (i) (get-text-property i 'invisible out))
+                         (number-sequence 0 (1- (length out)))))))
 
 (ert-deftest a-fontifier-that-fails-costs-no-results ()
   "A passage is worth more than its faces.

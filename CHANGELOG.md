@@ -200,8 +200,12 @@ now how org-semantic is meant to be used from Emacs.
 
   **Only faces are copied and no character moves**, so the nth line of a passage
   is still line `startLine` + n of the note: org's `keymap`, `invisible` and
-  `display` are left behind, which is also why a link still shows its brackets.
-  About 0.8 ms a passage.
+  `display` are left behind. About 0.8 ms a passage.
+- **A link shows its description**, brackets hidden, when `org-link-descriptive`
+  is on — the default, and what `org-toggle-link-display` toggles. Hidden by us
+  rather than by org, which does it through `org-fold-core` and would need that
+  initialised in a buffer that is not an org buffer. A link split across two lines
+  is left alone.
 - **`f` follows point**, previewing each passage in its note as you reach it —
   `next-error-follow-minor-mode`, which was reachable only as `C-c C-f` and so
   went unnoticed. That spelling still works, being the one `occur` and `grep` use,

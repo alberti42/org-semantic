@@ -60,6 +60,12 @@
 (require 'org-semantic)
 (require 'org-semantic-ui)
 
+;; Org is loaded on demand -- a passage is fontified with it, and nothing else
+;; here needs it -- so these two are declared rather than required.  A results
+;; buffer must open in an Emacs that has never visited a note.
+(defvar org-link-bracket-re)
+(defvar org-link-descriptive)
+
 
 ;;;; Settings
 
@@ -139,8 +145,13 @@ and copying the faces back out --- the trick `magit' uses for diffs.
 nth line of a passage is line `startLine' + n of the note, which is
 what makes each line addressable and one day writable; a rendering
 that replaced or moved text would end that.  So org's `keymap',
-`invisible' and `display' properties are left behind, which is also
-why a link still shows its brackets.
+`invisible' and `display' properties are left behind.
+
+A link is the exception, and hidden by us rather than by org: when
+`org-link-descriptive' is on -- what `org-toggle-link-display'
+toggles -- the brackets are made invisible under a spec of our own.
+See `org-semantic-results--hide-link-syntax' for why org's own
+mechanism is not borrowed.
 
 Costs about 0.8 ms a passage, against 0.1 ms unfontified, and needs
 org loaded --- which it will be, since you are searching org notes.
@@ -505,6 +516,9 @@ To have it on in every results buffer, put it on this mode's hook:
   ;; the last visible line and says a second time what `⋯ 3 lines' already
   ;; says -- less precisely, and in the wrong place.
   (add-to-invisibility-spec 'org-semantic-results)
+  ;; A second spec, and separate on purpose: `TAB' folds the tail of a passage
+  ;; away and back, and must not take a link's brackets with it.
+  (add-to-invisibility-spec 'org-semantic-results-link)
   (add-hook 'kill-buffer-hook #'org-semantic-results--abandon nil t))
 
 (defun org-semantic-results--abandon ()
@@ -954,21 +968,70 @@ the note's own characters are."
         (setq i next)))
     out))
 
+(defun org-semantic-results--hide-link-syntax (s)
+  "Hide the bracket parts of each link in S, leaving its description.
+
+What `org-link-descriptive' asks for, and what
+`org-toggle-link-display' toggles -- honoured here rather than
+inherited, because org 9.8 hides links through `org-fold-core',
+which has to be initialised in the buffer that does the hiding.  A
+list of passages is not an org buffer and should not have to become
+one for this.  Our own invisibility, our own spec.
+
+Note that org makes `org-link-descriptive' *buffer-local* in every
+org buffer, so toggling it in a note changes that note and nothing
+else; what this reads is the value in force here, which is the
+global one.
+
+**A link spanning two lines is left alone.**  Each line drawn is a
+line of the note, which is what the numbers and every property hang
+on; hiding part of a link that straddles a newline would leave a
+line whose text nobody can point at."
+  (when (and (boundp 'org-link-bracket-re) org-link-bracket-re)
+    (let ((from 0))
+      (while (string-match org-link-bracket-re s from)
+        (let ((mb (match-beginning 0))
+              (me (match-end 0))
+              (desc-b (match-beginning 2))
+              (desc-e (match-end 2)))
+          (unless (string-search "\n" (substring s mb me))
+            (if desc-b
+                (progn
+                  ;; `[[target][' before the description, `]]' after it.
+                  (put-text-property mb desc-b 'invisible 'org-semantic-results-link s)
+                  (put-text-property desc-e me 'invisible 'org-semantic-results-link s))
+              ;; No description: the target is what is shown, so only the
+              ;; brackets go.
+              (put-text-property mb (+ mb 2) 'invisible 'org-semantic-results-link s)
+              (put-text-property (- me 2) me 'invisible 'org-semantic-results-link s)))
+          (setq from me)))))
+  s)
+
 (defun org-semantic-results--fontified (text)
   "TEXT with org's faces on it, or TEXT itself if that cannot be done."
   (if (or (not org-semantic-results-fontify)
           (string-empty-p text)
           (not (require 'org nil t)))
       text
-    (condition-case nil
-        (with-current-buffer (org-semantic-results--fontifier)
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert text)
-            (font-lock-ensure)
-            (org-semantic-results--faces-only (buffer-string))))
-      ;; A fontifier that fails must not cost the search its results.
-      (error text))))
+    ;; Read **here**, and not inside the fontifier: `org-mode' makes
+    ;; `org-link-descriptive' buffer-local in every buffer it starts (org.el
+    ;; 5181), so asking there gets that buffer's own answer -- always t, whatever
+    ;; the reader set.  It passed in isolation and failed in the suite, because
+    ;; in isolation the fontifier was created inside the binding and inherited
+    ;; it.
+    (let ((descriptive (bound-and-true-p org-link-descriptive)))
+      (condition-case nil
+          (with-current-buffer (org-semantic-results--fontifier)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert text)
+              (font-lock-ensure)
+              (let ((out (org-semantic-results--faces-only (buffer-string))))
+                (if descriptive
+                    (org-semantic-results--hide-link-syntax out)
+                  out))))
+        ;; A fontifier that fails must not cost the search its results.
+        (error text)))))
 
 (defun org-semantic-results--block (hit first claimed)
   "Draw HIT as a string, or nil if every line of it was already shown.

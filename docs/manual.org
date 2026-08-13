@@ -266,8 +266,16 @@ passage into a hidden =org-mode= buffer and copying the faces back --- the trick
 passage is line =startLine= + n of the note, which is what makes each line
 addressable and one day writable, so nothing here may replace or move text.
 Org's own =keymap=, =invisible= and =display= properties are therefore left
-behind --- which is why a link still shows its brackets rather than only its
-description.
+behind.
+
+Links are the exception. With =org-link-descriptive= on --- the default, and what
+=M-x org-toggle-link-display= toggles --- a link shows its description and its
+brackets are hidden, as in a note. That hiding is ours rather than org's: org 9.8
+hides links through =org-fold-core=, which has to be initialised in the buffer
+doing the hiding, and a list of passages should not have to become an org buffer
+for it. The characters are all still there, since =invisible= hides rather than
+deletes; a link split across two lines is left alone, because hiding part of one
+would leave a line nobody can point at.
 
 It costs about 0.8 ms a passage against 0.1 ms without, and needs org loaded,
 which it will be. Set the option to nil for plain text.
