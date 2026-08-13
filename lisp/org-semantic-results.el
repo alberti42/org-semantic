@@ -311,12 +311,8 @@ block."
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
   "m"         #'org-semantic-results-toggle-ranking
-  "M"         #'org-semantic-results-toggle-merge
-  "a"         #'org-semantic-results-toggle-any
   "+"         #'org-semantic-results-more-notes
   "-"         #'org-semantic-results-fewer-notes
-  "P"         #'org-semantic-results-set-per-file
-  "="         #'org-semantic-results-describe-hit
   "R"         #'org-semantic-results-reindex
   ;; Shadows `special-mode-map''s `revert-buffer' for one reason: `C-h m' shows
   ;; the *command's* docstring, so an inherited binding described this as
@@ -1536,26 +1532,6 @@ semantic one has not been built."
            (if (equal org-semantic-results--mode "lexical") "word" "meaning"))
   (org-semantic-results--search))
 
-(defun org-semantic-results-toggle-merge ()
-  "Fold a section answering as several passages into one hit, or stop."
-  (interactive nil org-semantic-results-mode)
-  (setq org-semantic-results--merge (not org-semantic-results--merge))
-  (message "org-semantic: %s"
-           (if org-semantic-results--merge
-               "one hit per section, spanning all of its passages"
-             "each passage on its own"))
-  (org-semantic-results--search))
-
-(defun org-semantic-results-toggle-any ()
-  "Match notes carrying any of the query's terms, or all of them."
-  (interactive nil org-semantic-results-mode)
-  (unless (equal org-semantic-results--mode "lexical")
-    (user-error "Only a word search has terms to match any of"))
-  (setq org-semantic-results--any (not org-semantic-results--any))
-  (message "org-semantic: matching %s of the terms"
-           (if org-semantic-results--any "any" "all"))
-  (org-semantic-results--search))
-
 (defun org-semantic-results--set-k (k)
   "Let K notes appear, and say what that means."
   (setq org-semantic-results--k (max 1 k))
@@ -1576,38 +1552,11 @@ semantic one has not been built."
   (interactive nil org-semantic-results-mode)
   (org-semantic-results--set-k (/ (or org-semantic-results--k 8) 2)))
 
-(defun org-semantic-results-set-per-file (n)
-  "Let each note contribute N passages."
-  (interactive
-   (list (read-number "Passages per note at most: "
-                      (or org-semantic-results--per-file 3)))
-   org-semantic-results-mode)
-  (setq org-semantic-results--per-file (max 1 n))
-  (org-semantic-results--search))
-
 (defun org-semantic-results-reindex (&optional arg)
   "Index this buffer's vault and search again.
 ARG is as in `org-semantic-reindex': two prefixes rebuild from scratch."
   (interactive "P" org-semantic-results-mode)
   (org-semantic-results--reindex (cdr (org-semantic--reindex-flags arg))))
-
-(defun org-semantic-results-describe-hit ()
-  "Say everything known about the passage point is in."
-  (interactive nil org-semantic-results-mode)
-  (let ((hit (or (get-text-property (point) 'org-semantic-hit)
-                 (let ((item (org-semantic-results--item-at-point)))
-                   (and item (org-semantic-results--item-hit item))))))
-    (unless hit (user-error "No passage here"))
-    (message "%s  %s:%s  lines %s-%s%s%s"
-             (org-semantic-ui-score hit)
-             (org-semantic-hit-path hit)
-             (org-semantic-hit-line hit)
-             (org-semantic-hit-start-line hit)
-             (org-semantic-hit-end-line hit)
-             (let ((annotation (org-semantic-ui-annotate hit)))
-               (if annotation (concat "  " annotation) ""))
-             (let ((id (plist-get hit :id)))
-               (if id (format "  id:%s" id) "")))))
 
 (provide 'org-semantic-results)
 ;;; org-semantic-results.el ends here

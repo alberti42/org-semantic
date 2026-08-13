@@ -814,22 +814,6 @@ moves too -- so the message names both."
         (should (= org-semantic-results--k 1))
         (should (= asked 8))))))
 
-(ert-deftest matching-any-of-the-words-is-a-question-only-about-words ()
-  "An embedding has no terms to match any of, so the key refuses.
-
-The server ignores `any' on a semantic search rather than
-failing, which would make the key look as though it had worked."
-  (cl-letf (((symbol-function 'org-semantic-ui-ask) #'ignore))
-    (org-semantic-results-tests--drawn
-        (list (org-semantic-results-tests--hit))
-      (setq org-semantic-results--mode "semantic")
-      (should-error (org-semantic-results-toggle-any) :type 'user-error)
-      (should-not org-semantic-results--any)
-      (setq org-semantic-results--mode "lexical")
-      (org-semantic-results-toggle-any)
-      (should org-semantic-results--any))))
-
-
 ;;;; One search in flight
 
 (ert-deftest at-most-one-search-is-ever-in-flight ()
