@@ -146,10 +146,20 @@ Costs about 0.8 ms a passage, against 0.1 ms unfontified, and needs
 org loaded --- which it will be, since you are searching org notes.
 Where it is not, this silently does nothing rather than failing.
 
-A fragment is not a document, and org fontifies it as though it
-were: emphasis that opened before the passage begins, a block whose
-`#+end_src' is out of view, a heading with no parent in sight.  It is
-occasionally wrong for that reason and cannot know it."
+One case is wrong and worth knowing, because it is narrower than it
+sounds.  A block's opening line is not part of a chunk's text while
+its body is, so a passage that begins inside a long block starts at
+the first body line and runs to the `#+end_' -- org then sees an end
+marker with no beginning, and fontifies the body as prose.  Measured
+on a 90-line `#+begin_src': the span came back 6..96 where the marker
+is line 5.
+
+Two things that are *not* problems, though they sound like they should
+be.  Folding away the tail of a passage hides nothing from org: the
+whole passage is fontified first, and `invisible' is added after.  And
+emphasis is never cut, because a paragraph too long for one passage
+gives every piece of itself the whole paragraph's span -- so what is
+shown is always a complete paragraph."
   :type 'boolean)
 
 (defcustom org-semantic-results-display-action
