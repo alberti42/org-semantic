@@ -986,37 +986,116 @@ every keystroke.")
       (when latching (push kind org-semantic-results--latched))
       (erase-buffer)
       (org-semantic-results--insert-header nil nil)
-      (insert (propertize (format "  %s\n\n"
+      (insert (propertize (format "  %s\n"
                                   (org-semantic-ui-remedy-message remedy))
                           'face 'org-semantic-results-stale 'read-only t))
-      (dolist (offer (org-semantic-ui-remedy-offers remedy))
-        (insert "  ")
-        (insert-text-button
-         (format "[%s]" (car offer))
-         'action (org-semantic-results--offer-action (cdr offer) error-object)
-         'follow-link t
-         'help-echo (org-semantic-results--offer-help (cdr offer)))
-        (insert "\n"))
-      (goto-char (point-min)))))
+      (goto-char (point-min))
+      (org-semantic-results--ask remedy error-object))))
 
-(defun org-semantic-results--offer-help (action)
-  "What ACTION would do, in a few words."
-  (pcase action
-    ('index "build the index this search needs")
-    ('index-full "rebuild from scratch, which re-embeds everything")
-    ('lexical "search by word instead, from an index that builds in seconds")
-    ('retry "ask again")
-    ('choose-model "search one of the models that is built")
-    ('waive "search the index as it stands, under the policy it was built with")
-    ('show-changed "list the settings that moved")
-    (_ "")))
+(defun org-semantic-results--ask (remedy error-object)
+  "Ask in the minibuffer what to do about REMEDY, which ERROR-OBJECT carries.
+
+Nothing is drawn in the buffer for this: the buffer states the
+problem and the question is asked once, where a question belongs.
+
+**Not called from the reply callback, and that is the whole of the
+care this needs.**  `read-char-choice' waits for input, and waiting
+for input runs the event loop -- from inside `jsonrpc.el''s process
+filter that means the filter re-entered while it is part-way
+through a message, with a half-read frame on the floor.  So the
+question is handed to a zero-delay timer, which runs it once the
+filter has returned.
+
+An active minibuffer is left alone.  The reply arrives whenever it
+arrives, and the user may be typing something else entirely by
+then -- the hazard that kept this a row of buttons for a while.  A
+prompt cannot be raised over another prompt without eating the
+keystrokes meant for it, so in that case the sentence in the
+buffer is the whole answer and `g' re-runs the search to be asked
+again."
+  (when-let* ((offers (org-semantic-ui-remedy-offers remedy))
+              (keyed (cl-remove-if-not #'org-semantic-ui-offer-key offers)))
+    ;; A named function rather than a closure, so that what is scheduled can be
+    ;; recognised: `jsonrpc.el' puts its own dispatch on `run-at-time 0' too
+    ;; (jsonrpc.el:801,930) and its request timeouts on the same function, so a
+    ;; test that replaced `run-at-time' wholesale fired every timeout at once
+    ;; and every request came back "Timed out".
+    (run-at-time 0 nil #'org-semantic-results--ask-now
+                 (current-buffer) keyed remedy error-object)))
+
+(defun org-semantic-results--ask-now (buffer offers remedy error-object)
+  "Ask in BUFFER about REMEDY, offering OFFERS, and act on the answer.
+
+ERROR-OBJECT is what the offers were derived from, and carries what
+some of them need -- the models to choose between, the settings
+that drifted.  See `org-semantic-results--ask', which schedules
+this and holds the reasoning."
+  (when (and (buffer-live-p buffer) (not (active-minibuffer-window)))
+    (with-current-buffer buffer
+      (let* ((keys (append (mapcar #'org-semantic-ui-offer-key offers) (list ?q)))
+             (prompt (org-semantic-results--ask-prompt remedy offers))
+             ;; `read-char-choice' rings and re-asks on anything else, so C-g is
+             ;; the only way out besides the keys -- and it signals `quit', which
+             ;; reaches a timer as an error and a backtrace.
+             (choice (condition-case nil
+                         (read-char-choice prompt keys)
+                       (quit ?q))))
+        (unless (eq choice ?q)
+          (funcall (org-semantic-results--offer-action
+                    (cdr (cl-find-if (lambda (o)
+                                       (eq (org-semantic-ui-offer-key o) choice))
+                                     offers))
+                    error-object)
+                   nil))))))
+
+(defun org-semantic-results--ask-prompt (remedy offers)
+  "The question to ask about REMEDY, listing OFFERS and what each does.
+
+Laid out over several lines, which the echo area grows to fit, so
+that each offer can say what it costs -- indexing is minutes and
+searching by word is seconds, and a single-letter menu that does
+not say so is asking the user to remember which."
+  (concat
+   (format "%s\n\n" (org-semantic-ui-remedy-message remedy))
+   (mapconcat
+    (lambda (o)
+      (format "  [%c] %s — %s\n"
+              (org-semantic-ui-offer-key o)
+              (car o)
+              (org-semantic-results--offer-help
+               (cdr o) (org-semantic-ui-remedy-kind remedy))))
+    offers
+    "")
+   "  [q] leave it\n\nChoice: "))
+
+(defun org-semantic-results--offer-help (action &optional kind)
+  "What ACTION would do about KIND, in a few words.
+
+KIND is the server's label, because one action is two different
+propositions depending on it: `index' for a vault that has none
+builds one, and `index' for a vault whose weights are absent
+*downloads a model first* -- 128 MB to 2.24 GB of it.  Saying
+\"build the index\" there describes the cheap half of a wait
+measured in minutes, which is the half nobody needs warning about."
+  (if (and (eq action 'index) (equal kind "model-missing"))
+      "the model comes down first, so this is minutes"
+    (pcase action
+      ('index "build the index this search needs")
+      ('index-full "rebuild from scratch, which re-embeds everything")
+      ('lexical "needs no model at all, and builds in seconds")
+      ('retry "search again, once the run already going has finished")
+      ('choose-model "search one of the models that is built")
+      ('waive "search the index as it stands, under the policy it was built with")
+      ('show-changed "list the settings that moved")
+      (_ ""))))
 
 (defun org-semantic-results--offer-action (action error-object)
-  "A button function doing ACTION, which ERROR-OBJECT asked for.
+  "A function doing ACTION, which ERROR-OBJECT asked for.
 
-Offered as a button rather than asked as a question: a reply
-arrives whenever it arrives, and a prompt raised from a callback
-interrupts whatever the user was doing somewhere else."
+Takes one ignored argument, so that it can be a button's `action'
+as well as something `org-semantic-results--ask' calls: the offers
+were a row of buttons before they were a question, and the shape
+costs nothing to keep."
   (let ((os-buffer (current-buffer))
         (os-data (plist-get error-object :data)))
     (lambda (_button)
@@ -1297,7 +1376,17 @@ boundary that is already recorded is work for nothing."
 (defun org-semantic-results--revert (&optional _ignore-auto _noconfirm)
   "Ask again rather than redraw.
 The notes may have moved on since, and what is here is a picture
-of what they said then."
+of what they said then.
+
+**The latch is dropped here, and that is what makes a declined
+offer reachable again.**  `config-drift' and `model-missing' are
+asked about once per buffer so that re-running a search does not
+ask per reply -- but the offer is a question now, and a question
+answered with \\`C-g' leaves nothing to press.  Without this, the
+only way back to it would be a fresh results buffer.  Reverting is
+a deliberate act and not a reply arriving, so it is the one place
+where asking again is what the user just requested."
+  (setq org-semantic-results--latched nil)
   (org-semantic-results--search))
 
 (defun org-semantic-results-set-query (query)

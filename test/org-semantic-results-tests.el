@@ -99,6 +99,50 @@ went to the same place."
       (while (search-forward string nil t) (setq n (1+ n)))
       n)))
 
+(defvar org-semantic-results-tests--asked nil
+  "Every prompt `read-char-choice' was handed, most recent first.")
+
+(defmacro org-semantic-results-tests--answering (key &rest body)
+  "Run BODY with the offer prompt answered by KEY, recording what was asked.
+
+Two things are stood in for, and both are the point rather than
+scaffolding.  `run-at-time' is collapsed to a direct call, because
+the question is deliberately handed to a timer so that it is not
+asked from inside `jsonrpc.el''s process filter -- a test that let
+the timer really wait would assert nothing in batch.  And
+`read-char-choice' is the question itself, so answering it is how a
+keystroke gets made without a terminal.
+
+KEY may be nil, which stands for `C-g': the function signals `quit'
+instead of returning, since that is what a real dismissal does and
+the code has to survive it inside a timer.
+
+What was asked is *reset* rather than rebound, so it outlives BODY
+and a test may assert on it afterwards.  A `let' would unwind on
+the way out and read as \"nothing was asked\", which is a passing
+test for the wrong reason and cost two of these before this comment
+existed.
+
+Only *our* timer is collapsed, matched by name, and everything else
+is delegated to the real `run-at-time'.  Replacing it wholesale
+looks equivalent and is not: `jsonrpc.el' schedules its own dispatch
+on `run-at-time 0' and its request timeouts on the same function, so
+a blanket stub fires every timeout immediately and every request
+fails with \"Timed out\"."
+  (declare (indent 1))
+  `(let ((real (symbol-function 'run-at-time)))
+     (setq org-semantic-results-tests--asked nil)
+     (cl-letf (((symbol-function 'run-at-time)
+                (lambda (time repeat fn &rest args)
+                  (if (eq fn 'org-semantic-results--ask-now)
+                      (progn (apply fn args) nil)
+                    (apply real time repeat fn args))))
+               ((symbol-function 'read-char-choice)
+                (lambda (prompt _chars &optional _inhibit)
+                  (push prompt org-semantic-results-tests--asked)
+                  (if ,key ,key (signal 'quit nil)))))
+       ,@body)))
+
 (defun org-semantic-results-tests--repeated ()
   "The note lines drawn a second time, in the order drawn."
   (let ((out nil))
@@ -957,18 +1001,20 @@ run is already fetching, which is the one error that has to."
 Both of these describe the vault rather than the request, so
 asking again cannot answer differently.  Ten keystrokes would
 otherwise redraw the same prompt ten times."
-  (pcase-dolist (`(,kind ,button) '(("config-drift" "Rebuild fully")
-                                    ("model-missing" "Download it")))
+  (dolist (kind '("config-drift" "model-missing"))
     (let ((error-object (list :message (format "%s happened" kind)
                               :data (list :kind kind :remedy "index"))))
       (with-temp-buffer
         (org-semantic-results-mode)
         (setq org-semantic-results--vault "/vault"
               org-semantic-results--query "q")
-        (dotimes (_ 5) (org-semantic-results--render-error error-object))
+        (org-semantic-results-tests--answering ?q
+          (dotimes (_ 5) (org-semantic-results--render-error error-object)))
         (should (member kind org-semantic-results--latched))
-        ;; Offered once, however many times the condition was met.
-        (should (= 1 (org-semantic-results-tests--occurrences button)))
+        ;; Asked once, however many times the condition was met.  This is
+        ;; what the latch is for now that the offer is a question: five
+        ;; prompts would be five stolen keystrokes.
+        (should (= 1 (length org-semantic-results-tests--asked)))
         ;; And still said each time, as a line -- silence would read as
         ;; the search having quietly worked.
         (should (= 5 (org-semantic-results-tests--occurrences
@@ -995,13 +1041,173 @@ the same question on every keystroke."
       (org-semantic-results-mode)
       (setq org-semantic-results--vault "/vault"
             org-semantic-results--query "q")
-      (org-semantic-results--render-error error-object)
-      (should (member "config-drift" org-semantic-results--latched))
-      (should (= 1 (org-semantic-results-tests--occurrences "Rebuild fully")))
-      (org-semantic-results--render-error error-object)
-      ;; Said again, but as a line rather than as the whole prompt.
-      (should (string-match-p "the policy has changed" (buffer-string)))
-      (should (= 1 (org-semantic-results-tests--occurrences "Rebuild fully"))))))
+      (org-semantic-results-tests--answering ?q
+        (org-semantic-results--render-error error-object)
+        (should (member "config-drift" org-semantic-results--latched))
+        (should (= 1 (length org-semantic-results-tests--asked)))
+        (org-semantic-results--render-error error-object)
+        ;; Said again, but as a line rather than asked again.
+        (should (string-match-p "the policy has changed" (buffer-string)))
+        (should (= 1 (length org-semantic-results-tests--asked)))))))
+
+(ert-deftest an-offer-is-asked-in-the-minibuffer-and-not-drawn ()
+  "The offers are a question now, not a row of buttons in the buffer.
+
+What the buffer keeps is the sentence: a question is asked once and
+then gone, so a buffer that said nothing would leave someone
+looking at an empty list with no account of why.  It must not keep
+the buttons as well -- two ways to answer one question, one of them
+already dismissed."
+  (with-temp-buffer
+    (org-semantic-results-mode)
+    (setq org-semantic-results--vault "/vault"
+          org-semantic-results--query "q"
+          org-semantic-results--mode "semantic")
+    (org-semantic-results-tests--answering ?q
+      (org-semantic-results--render-error
+       '(:message "the e5-small model is not downloaded yet"
+         :data (:kind "model-missing" :model "e5-small" :remedy "index"))))
+    (should (string-match-p "not downloaded yet" (buffer-string)))
+    ;; Nothing to press: no buttons, and no bracketed labels drawn either.
+    (should-not (next-button (point-min)))
+    (should-not (string-match-p "\\[Download it\\]" (buffer-string)))
+    ;; And the question named every offer with the key that answers it.
+    (let ((prompt (car org-semantic-results-tests--asked)))
+      (should (string-match-p "\\[d\\] Download it" prompt))
+      (should (string-match-p "\\[s\\] Search by word" prompt))
+      (should (string-match-p "\\[q\\] leave it" prompt))
+      ;; Each says what it costs.  A single-letter menu that does not is
+      ;; asking the reader to remember which of these takes minutes.
+      (should (string-match-p "builds in seconds" prompt)))))
+
+(ert-deftest answering-the-question-does-what-it-offered ()
+  "The key answers, and the answer is acted on.
+
+`s' is the interesting one: it changes the buffer's ranking as well
+as searching again, so a wrong wiring would search by meaning
+forever while claiming to have switched."
+  (let ((searched 0))
+    (cl-letf (((symbol-function 'org-semantic-results--search)
+               (lambda (&rest _) (setq searched (1+ searched)))))
+      (with-temp-buffer
+        (org-semantic-results-mode)
+        (setq org-semantic-results--vault "/vault"
+              org-semantic-results--query "q"
+              org-semantic-results--mode "semantic")
+        (org-semantic-results-tests--answering ?s
+          (org-semantic-results--render-error
+           '(:message "no index" :data (:kind "no-index" :remedy "index"))))
+        (should (equal org-semantic-results--mode "lexical"))
+        (should (= 1 searched))))))
+
+(ert-deftest dismissing-the-question-does-nothing-at-all ()
+  "Quitting is an answer, and it must not act and must not signal.
+
+The question runs inside a timer, where an unhandled `quit' becomes
+\"Error running timer\" in the echo area for having declined an
+offer.
+
+**The escaping quit is caught here rather than left to ert**, which
+records it as a QUIT result, prints it, and exits 0 -- so the
+neutered version of this test passed the gate.  A gate that cannot
+fail is not a gate."
+  (let ((searched 0))
+    (cl-letf (((symbol-function 'org-semantic-results--search)
+               (lambda (&rest _) (setq searched (1+ searched)))))
+      (with-temp-buffer
+        (org-semantic-results-mode)
+        (setq org-semantic-results--vault "/vault"
+              org-semantic-results--query "q"
+              org-semantic-results--mode "semantic")
+        ;; nil stands for C-g: the stub signals `quit' rather than returning.
+        (should
+         (eq 'returned
+             (org-semantic-results-tests--answering nil
+               (condition-case nil
+                   (progn
+                     (org-semantic-results--render-error
+                      '(:message "no index" :data (:kind "no-index" :remedy "index")))
+                     'returned)
+                 (quit 'quit)))))
+        (should (= 0 searched))
+        (should (equal org-semantic-results--mode "semantic"))
+        (should (string-match-p "no index" (buffer-string)))))))
+
+(ert-deftest reverting-asks-again-after-a-question-was-declined ()
+  "`g' is the way back to an offer that was dismissed with \\`C-g'.
+
+The latch stops a re-run search from asking on every reply, and it
+would also make a declined question unreachable for the life of the
+buffer -- which is the whole cost of asking rather than drawing
+something to press.  Reverting is a deliberate act, not a reply
+arriving, so it drops the latch and the question comes back."
+  (cl-letf (((symbol-function 'org-semantic-results--search) #'ignore))
+    (with-temp-buffer
+      (org-semantic-results-mode)
+      (setq org-semantic-results--vault "/vault"
+            org-semantic-results--query "q"
+            org-semantic-results--mode "semantic")
+      (let ((error-object '(:message "no model"
+                            :data (:kind "model-missing" :remedy "index"))))
+        (org-semantic-results-tests--answering nil
+          (org-semantic-results--render-error error-object)
+          (should (member "model-missing" org-semantic-results--latched))
+          ;; Asking again without reverting is refused, which is the latch.
+          (org-semantic-results--render-error error-object)
+          (should (= 1 (length org-semantic-results-tests--asked)))
+          ;; And `g' brings it back.
+          (org-semantic-results--revert)
+          (should-not org-semantic-results--latched)
+          (org-semantic-results--render-error error-object)
+          (should (= 2 (length org-semantic-results-tests--asked))))))))
+
+(ert-deftest an-error-with-nothing-to-decide-asks-nothing ()
+  "No label means no offers, so there is no question to ask.
+
+The server labels what a client must act on; an unlabelled error is
+to be shown and nothing else.  Asking \"[q] leave it\" about it
+would be a question with one answer."
+  (with-temp-buffer
+    (org-semantic-results-mode)
+    (setq org-semantic-results--vault "/vault" org-semantic-results--query "q")
+    (org-semantic-results-tests--answering ?q
+      (org-semantic-results--render-error '(:message "the vault has vanished")))
+    (should (string-match-p "vanished" (buffer-string)))
+    (should-not org-semantic-results-tests--asked)))
+
+(ert-deftest org-semantic-ui-offer-keys-are-unambiguous ()
+  "A key is a label's own initial, so the collisions are what to check.
+
+`[d] Download it' can be read without being learned, which is why
+the key follows the label -- but `config-drift' offers \"Search
+anyway\" beside \"Show what changed\" and both begin with an S, so
+one of them has to be overridden.  What has to hold, for every
+failure a client can meet and under either ranking: the keys on
+offer are distinct, and none of them is `q', which always means
+leave it."
+  (let ((kinds '("no-index" "model-missing" "config-drift" "index-layout"
+                 "unknown-model" "ambiguous-model" "index-corrupt" "indexing"))
+        (remedies '("index" "reindex-full" "wait")))
+    (dolist (kind kinds)
+      (dolist (mode '("semantic" "lexical"))
+        (dolist (indexing '(t :json-false))
+          (dolist (remedy remedies)
+            (let* ((offers (org-semantic-ui-remedy-offers
+                            (org-semantic-ui-remedy
+                             (list :message "something"
+                                   :data (list :kind kind :remedy remedy
+                                               :indexing indexing))
+                             mode)))
+                   (keys (mapcar #'org-semantic-ui-offer-key offers)))
+              (dolist (key keys)
+                (should key)
+                (should-not (eq key ?q)))
+              (should (equal keys (delete-dups (copy-sequence keys)))))))))
+    ;; And the key really is the label's initial where nothing overrode it,
+    ;; which is the property that makes the prompt readable rather than learnt.
+    (should (eq ?d (org-semantic-ui-offer-key '("Download it" . index))))
+    (should (eq ?b (org-semantic-ui-offer-key '("Build it" . index))))
+    (should (eq ?c (org-semantic-ui-offer-key '("Show what changed" . show-changed))))))
 
 
 ;;;; Settings, and the manual that lists them
@@ -1074,11 +1280,19 @@ Over the word index, which needs no embedding model."
               (should (= (org-semantic-results--line-at-point) 4)))
           (kill-buffer buffer))))))
 
-(ert-deftest a-vault-with-no-index-offers-to-build-one ()
-  "The failure is drawn as something to press, not asked as a question.
+(ert-deftest a-vault-with-no-index-is-asked-about-for-real ()
+  "The one that drives a real refusal all the way to the question.
 
-A reply arrives whenever it arrives, so a prompt raised from its
-callback interrupts whatever the user was typing elsewhere."
+Every other test here fabricates the error plist.  This one has the
+server produce it, so it covers the whole path: an unindexed vault,
+a `no-index' reply, the sentence in the buffer and the question in
+the minibuffer.
+
+It has to answer, and that is worth knowing before writing another
+like it: unstubbed, `read-char-choice' reads stdin, and in batch
+that is an immediate `end-of-file' *inside the timer* -- which ert
+reports as a passing test with a stray error printed beside it.  Any
+test that lets an error render must answer the question."
   (org-semantic-tests--with-server
     (org-semantic-tests--with-vault dir
       (let ((buffer (org-semantic-results--buffer dir)))
@@ -1087,14 +1301,16 @@ callback interrupts whatever the user was typing elsewhere."
               (setq org-semantic-results--vault dir
                     org-semantic-results--query "turbo"
                     org-semantic-results--mode "lexical")
-              (org-semantic-results--search)
-              (should (org-semantic-tests--wait
-                       30 (lambda () (string-match-p "Build it"
-                                                     (buffer-string)))))
-              ;; A button, and nothing was pressed to find that out.
-              (goto-char (point-min))
-              (should (re-search-forward "Build it" nil t))
-              (should (button-at (match-beginning 0))))
+              (org-semantic-results-tests--answering ?q
+                (org-semantic-results--search)
+                (should (org-semantic-tests--wait
+                         30 (lambda () org-semantic-results-tests--asked))))
+              ;; The question the server's own refusal produced.
+              (should (string-match-p "\\[b\\] Build it"
+                                      (car org-semantic-results-tests--asked)))
+              ;; And the buffer holds the account of it, with nothing to press.
+              (should (string-match-p "index" (buffer-string)))
+              (should-not (next-button (point-min))))
           (kill-buffer buffer))))))
 
 (provide 'org-semantic-results-tests)

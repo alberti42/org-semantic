@@ -68,9 +68,16 @@ built. It then publishes a **draft** release for review.
 
 ### Changed
 
+- **A failed search asks what to do in the minibuffer** rather than drawing a row
+  of buttons in the results buffer. One keystroke per offer — each its label's own
+  initial, so `d` for "Download it", `b` for "Build it", `s` for "Search by word",
+  `q` or `C-g` to leave it — and each says what it costs, since one of them is
+  minutes and the other seconds. The buffer keeps the sentence, so there is still
+  an account of the empty list once the question is gone, and `g` searches again
+  to be asked afresh.
 - The message behind a search that has no model reads *"indexing this vault will
   fetch it"* rather than *"index this vault to fetch it"*. It only ever reaches a
-  client, which has a button rather than a command line.
+  client, which has a keystroke rather than a command line.
 
 ## [0.2.0] — 2026-08-12
 

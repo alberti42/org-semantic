@@ -34,12 +34,15 @@
 ;; `org-semantic-ui-score' is the one place that knows this, and both
 ;; interfaces call it rather than formatting a number themselves.
 ;;
-;; A FAILURE IS ANSWERED BY AN OFFER, NOT BY A PROMPT.  Replies arrive
-;; asynchronously, so a `y-or-n-p' raised from a callback interrupts
-;; whatever the user is typing somewhere else entirely.
-;; `org-semantic-ui-remedy' therefore returns what could be offered and
-;; decides nothing; the buffer draws buttons, the minibuffer will say it
-;; in one line, and neither asks a question nobody was expecting.
+;; A FAILURE IS ANSWERED BY AN OFFER, AND WHO ASKS IS NOT DECIDED HERE.
+;; `org-semantic-ui-remedy' says what could be offered and chooses
+;; nothing: it hands back symbols, so a caller arranges what "index this
+;; vault" costs, and a test can assert on the answer where it could not
+;; assert on a closure.  The results buffer asks in the minibuffer with a
+;; key per offer; a narrowing interface will have its own moment to ask.
+;; What both need is that replies arrive asynchronously, so whoever does
+;; ask must not raise a prompt from inside the callback -- see
+;; `org-semantic-results--ask', which is where that care lives.
 
 ;;; Code:
 
@@ -247,6 +250,31 @@ nobody parses the prose to find out which call to make."
 (defun org-semantic-ui-remedy-offers (remedy)
   "What REMEDY could offer to do, as a list of (LABEL . ACTION)."
   (cddr remedy))
+
+(defconst org-semantic-ui--offer-keys
+  '(("Show what changed" . ?c))
+  "Offers whose key is not the first letter of their label.
+
+Only the collisions live here.  `config-drift' offers \"Search
+anyway\" beside \"Show what changed\", and both begin with an S.
+
+Everything else takes its initial, which is the whole point:
+`[d] Download it' can be read without being learned, where a key
+chosen for the *call* rather than for the label gives
+`[i] Download it' and asks the reader to hold the mapping in their
+head.  The cost is that rewording a label moves its key, so keep
+the two in step -- and note that the failure is caught rather than
+silent: `org-semantic-ui-offer-keys-are-unambiguous' walks every
+failure a client can meet and asserts that no two offers in any of
+them answer to the same key.")
+
+(defun org-semantic-ui-offer-key (offer)
+  "The key that answers OFFER, which is one (LABEL . ACTION) pair.
+
+The label's own initial, downcased, unless
+`org-semantic-ui--offer-keys' names another one to break a tie."
+  (or (cdr (assoc (car offer) org-semantic-ui--offer-keys))
+      (downcase (aref (car offer) 0))))
 
 
 ;;;; One search in flight

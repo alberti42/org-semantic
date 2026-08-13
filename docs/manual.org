@@ -343,13 +343,30 @@ inside your query:
 #+begin_example
   the bge-small-en model is not downloaded yet — indexing this vault will fetch it
 
-  [Download it]           index the vault now, fetching the model first
-  [Search by word]        the lexical index needs no model at all
+    [d] Download it — the model comes down first, so this is minutes
+    [s] Search by word — needs no model at all, and builds in seconds
+    [q] leave it
+
+  Choice:
 #+end_example
 
-Pressing it runs the index, which reports the download as it goes and then runs
-your search again by itself. =M-x org-semantic-show-status= says the same thing
-before you ask: a model it lists as not cached is one that would refuse.
+The question is asked in the minibuffer, once, and the results buffer keeps the
+sentence so there is still an account of the empty list after you have answered.
+=d= runs the index, which reports the download as it goes and then runs your
+search again by itself; =q= or =C-g= leaves it, and =g= in the results buffer
+searches again to be asked afresh. =M-x org-semantic-show-status= says the same
+thing before you ask: a model it lists as not cached is one that would refuse.
+
+Each key is its label's own initial, so the menu is read rather than learnt: the
+same call is =d= where it is offered as "Download it" and =b= where it is
+offered as "Build it". A failure with nothing to decide --- one the server sends
+no label with --- is shown and not asked about, since there would be only one
+answer.
+
+Two failures describe the vault rather than the request: a policy that has
+drifted stays drifted, and a model that is absent stays absent. Those are asked
+about *once* per results buffer and afterwards merely restated, which is what
+keeps a search you re-run from asking the same question again on every reply.
 
 ~org-semantic-install-directory~ is where org-semantic keeps a binary of its
 own, under your ~user-emacs-directory~. Unpack a release there --- the file
