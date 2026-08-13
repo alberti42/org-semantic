@@ -127,6 +127,31 @@ way to say it."
   :type '(choice (const :tag "All terms (AND)" and)
                  (const :tag "Any term (OR)" or)))
 
+(defcustom org-semantic-results-fontify t
+  "Whether to show a passage with org's own faces on it.
+
+A passage is org text, and reading it without emphasis, verbatim,
+headings and block markers is reading it worse than the note does.
+It is fontified by inserting it into a hidden buffer in `org-mode'
+and copying the faces back out --- the trick `magit' uses for diffs.
+
+**Only `face' is copied, and the characters are never touched.** The
+nth line of a passage is line `startLine' + n of the note, which is
+what makes each line addressable and one day writable; a rendering
+that replaced or moved text would end that.  So org's `keymap',
+`invisible' and `display' properties are left behind, which is also
+why a link still shows its brackets.
+
+Costs about 0.8 ms a passage, against 0.1 ms unfontified, and needs
+org loaded --- which it will be, since you are searching org notes.
+Where it is not, this silently does nothing rather than failing.
+
+A fragment is not a document, and org fontifies it as though it
+were: emphasis that opened before the passage begins, a block whose
+`#+end_src' is out of view, a heading with no parent in sight.  It is
+occasionally wrong for that reason and cannot know it."
+  :type 'boolean)
+
 (defcustom org-semantic-results-display-action
   '(display-buffer-reuse-mode-window)
   "How the results buffer asks to be shown, as a `display-buffer' ACTION.
@@ -888,6 +913,53 @@ one -- and that is what the address line one line down settles."
            'org-semantic-group 'file
            'read-only t)))
 
+(defvar org-semantic-results--fontifier nil
+  "A hidden `org-mode' buffer, kept because starting one is not free.")
+
+(defun org-semantic-results--fontifier ()
+  "The buffer passages are fontified in, made if there is not one yet."
+  (or (and (buffer-live-p org-semantic-results--fontifier)
+           org-semantic-results--fontifier)
+      (setq org-semantic-results--fontifier
+            (with-current-buffer (generate-new-buffer " *org-semantic-fontify*" t)
+              ;; `delay-mode-hooks', so a user's `org-mode-hook' -- which may
+              ;; start a modeline, a folding scheme, or anything else -- does not
+              ;; run in a buffer that exists to hold six lines of text.
+              (delay-mode-hooks (org-mode))
+              (current-buffer)))))
+
+(defun org-semantic-results--faces-only (s)
+  "S with every text property but `face' removed.
+
+The others are what would break this buffer: org's `keymap' would
+answer keys meant for the list, `invisible' would hide text the line
+numbers still count, and `display' would put something else where
+the note's own characters are."
+  (let ((out (copy-sequence s)) (i 0) (n (length s)))
+    (set-text-properties 0 n nil out)
+    (while (< i n)
+      (let ((next (or (next-single-property-change i 'face s) n))
+            (face (get-text-property i 'face s)))
+        (when face (put-text-property i next 'face face out))
+        (setq i next)))
+    out))
+
+(defun org-semantic-results--fontified (text)
+  "TEXT with org's faces on it, or TEXT itself if that cannot be done."
+  (if (or (not org-semantic-results-fontify)
+          (string-empty-p text)
+          (not (require 'org nil t)))
+      text
+    (condition-case nil
+        (with-current-buffer (org-semantic-results--fontifier)
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert text)
+            (font-lock-ensure)
+            (org-semantic-results--faces-only (buffer-string))))
+      ;; A fontifier that fails must not cost the search its results.
+      (error text))))
+
 (defun org-semantic-results--block (hit first claimed)
   "Draw HIT as a string, or nil if every line of it was already shown.
 
@@ -898,7 +970,7 @@ nothing.  CLAIMED is the claim map, and is added to."
   (let* ((file (org-semantic-hit-file hit))
          (start (org-semantic-hit-start-line hit))
          (end (org-semantic-hit-end-line hit))
-         (text (or (org-semantic-hit-text hit) ""))
+         (text (org-semantic-results--fontified (or (org-semantic-hit-text hit) "")))
          (lines (and (not (string-empty-p text)) (split-string text "\n")))
          (stale (or (null lines)
                     (null start) (null end)

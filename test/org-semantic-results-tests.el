@@ -1453,6 +1453,46 @@ leave it."
     (should (eq ?b (org-semantic-ui-offer-key '("Rebuild from scratch" . index-full))))))
 
 
+(ert-deftest a-passage-is-fontified-without-a-character-moving ()
+  "Org's faces, and nothing else org would have put there.
+
+The whole of what makes this safe: the nth line of a passage is line
+`startLine' + n of the note, so a rendering may add faces and must not
+add anything that replaces or moves text.  `keymap' would answer keys
+meant for the list, `invisible' would hide text the line numbers still
+count, `display' would put something else where the note's characters
+are."
+  ;; A *link*, because that is the case with something to strip: org puts
+  ;; `keymap', `invisible', `mouse-face' and `help-echo' on one, and the first
+  ;; two are exactly the properties that would break this buffer.  Prose alone
+  ;; gets only `face', so a test written on prose passes whether the stripping
+  ;; happens or not -- which is what the first draft of this did.
+  (let ((text "A *bold* [[https://example.com][word]] and =verbatim=.\nSecond line."))
+    (skip-unless (require 'org nil t))
+    (let ((fancy (org-semantic-results--fontified text)))
+      ;; Same characters, always.
+      (should (equal (substring-no-properties fancy) text))
+      ;; Faces arrived.
+      (should (cl-some (lambda (i) (get-text-property i 'face fancy))
+                       (number-sequence 0 (1- (length fancy)))))
+      ;; And nothing else did.
+      (dolist (prop '(keymap invisible display mouse-face help-echo
+                             org-link syntax-table rear-nonsticky))
+        (should-not (cl-some (lambda (i) (get-text-property i prop fancy))
+                             (number-sequence 0 (1- (length fancy)))))))
+    ;; Off, it is the string it was handed -- properties and all.
+    (let ((org-semantic-results-fontify nil))
+      (should (eq text (org-semantic-results--fontified text))))))
+
+(ert-deftest a-fontifier-that-fails-costs-no-results ()
+  "A passage is worth more than its faces.
+
+So the fontifier is wrapped: anything it signals gives the plain text
+back, rather than losing the search to a rendering flourish."
+  (cl-letf (((symbol-function 'font-lock-ensure)
+             (lambda (&rest _) (error "No fontifying today"))))
+    (should (equal (org-semantic-results--fontified "plain *text*") "plain *text*"))))
+
 ;;;; The sources themselves
 
 (ert-deftest no-docstring-carries-a-stray-quote-escape ()

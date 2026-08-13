@@ -256,6 +256,26 @@ the note keeps up. Without =use-package= it is the same one hook:
 Called from a hook a minor mode *enables* rather than toggling, which is why
 this reads as it does and =f= still toggles.
 
+A passage is org text, so it is shown with org's own faces: emphasis, verbatim,
+headings, block markers and links all look as they do in the note. That is
+~org-semantic-results-fontify~, on by default, and it works by inserting the
+passage into a hidden =org-mode= buffer and copying the faces back --- the trick
+=magit= uses for diffs.
+
+*Only faces are copied, and the characters are never touched.* The nth line of a
+passage is line =startLine= + n of the note, which is what makes each line
+addressable and one day writable, so nothing here may replace or move text.
+Org's own =keymap=, =invisible= and =display= properties are therefore left
+behind --- which is why a link still shows its brackets rather than only its
+description.
+
+It costs about 0.8 ms a passage against 0.1 ms without, and needs org loaded,
+which it will be. Two honest limitations: a passage is a *fragment*, and org
+fontifies it as though it were a whole document --- emphasis that opened before
+the passage began, a block whose =#+end_src= lies out of view, a heading with no
+parent in sight --- so it is occasionally wrong and cannot know it. Set the
+option to nil for plain text.
+
 A vault says which directory it is, in its own =.dir-locals.el=, so that it can
 be found before anything has been indexed:
 
@@ -357,6 +377,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
 | ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
 | ~org-semantic-results-connector~     | ='and'=        | join a word query's terms with =and= or =or=                 |
+| ~org-semantic-results-fontify~       | =t=            | show a passage with org's own faces --- below                |
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 | ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |

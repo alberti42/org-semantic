@@ -182,6 +182,15 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
+- **Passages are shown with org's own faces** — emphasis, verbatim, headings,
+  block markers, links — by fontifying each in a hidden `org-mode` buffer and
+  copying the faces back, which is the trick `magit` uses for diffs.
+  `org-semantic-results-fontify` turns it off.
+
+  **Only faces are copied and no character moves**, so the nth line of a passage
+  is still line `startLine` + n of the note: org's `keymap`, `invisible` and
+  `display` are left behind, which is also why a link still shows its brackets.
+  About 0.8 ms a passage.
 - **`f` follows point**, previewing each passage in its note as you reach it —
   `next-error-follow-minor-mode`, which was reachable only as `C-c C-f` and so
   went unnoticed. That spelling still works, being the one `occur` and `grep` use,
