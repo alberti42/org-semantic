@@ -363,6 +363,9 @@ block."
   ;; replacing the buffer's text with a file's -- which is what it does in a
   ;; buffer visiting a file, and nothing like what it does here.
   "g"         #'org-semantic-results-revert
+  "f"         #'next-error-follow-minor-mode
+  ;; And under the name `occur' and `grep' give it, which is muscle memory
+  ;; worth not breaking for anyone arriving from one of those.
   "C-c C-f"   #'next-error-follow-minor-mode)
 
 (defvar org-semantic-results-passage-map
@@ -431,10 +434,19 @@ Keeping up to date:
 
   \\[org-semantic-results-revert]  ask again -- no note is read or written
   \\[org-semantic-results-reindex]  index the vault first, then ask again
-  \\[next-error-follow-minor-mode]  follow each passage as point reaches it
 
 Two prefix arguments rebuild the index from scratch.  And `next-error'
 works from anywhere, so these hits can be walked from any buffer.
+
+Reading without pressing anything:
+
+  \\[next-error-follow-minor-mode]  follow point: preview each passage as you reach it
+
+A minor mode, so it stays on until turned off.  With it, moving by
+passage or by note shows that passage in its note as point arrives,
+without selecting the window -- so the list stays where the typing
+goes.  It answers to the key `occur' and `grep' use for it as well,
+which the table below spells out.
 
 \\{org-semantic-results-mode-map}"
   (setq-local revert-buffer-function #'org-semantic-results--revert)
