@@ -353,6 +353,10 @@ block."
   "K"         #'org-semantic-results-fewer-notes
   "+"         #'org-semantic-results-more-passages
   "-"         #'org-semantic-results-fewer-passages
+  ;; Each cap has a nudge and a set, and the set is the same key: `=' shares
+  ;; its place on the keyboard with `+', and `C-k' its letter with `k'.
+  "C-k"       #'org-semantic-results-set-notes
+  "="         #'org-semantic-results-set-passages
   "R"         #'org-semantic-results-reindex
   ;; Shadows `special-mode-map''s `revert-buffer' for one reason: `C-h m' shows
   ;; the *command's* docstring, so an inherited binding described this as
@@ -1666,6 +1670,29 @@ look as though it had done something."
   "Let fewer notes appear."
   (interactive nil org-semantic-results-mode)
   (org-semantic-results--set-k (/ (or org-semantic-results--k 8) 2)))
+
+(defun org-semantic-results-set-notes (n)
+  "Let at most N notes appear.
+
+The exact value, where `k\=' and `K\=' double and halve it.  A vault
+kept in a few large files is the case that wants one: raising this
+is what widens the list, and it is the number the header calls `k\='."
+  (interactive
+   (list (read-number "Notes at most: " (or org-semantic-results--k 8)))
+   org-semantic-results-mode)
+  (org-semantic-results--set-k n))
+
+(defun org-semantic-results-set-passages (n)
+  "Let each note contribute at most N passages.
+
+The exact value, where `+\=' and `-\=' double and halve it.  A year of
+meetings in one file is the case that wants one: every hit comes from
+that file, so this is the only number that deepens the list."
+  (interactive
+   (list (read-number "Passages per note at most: "
+                      (or org-semantic-results--per-file 3)))
+   org-semantic-results-mode)
+  (org-semantic-results--set-per-file n))
 
 (defun org-semantic-results--set-per-file (n)
   "Let each note contribute N passages, and say what that means."

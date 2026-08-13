@@ -875,7 +875,17 @@ and looks exactly like a query that matched none."
         ;; Every press asked again, with the number it had just set.
         (should (equal (car asked) 1))
         ;; And the note cap is untouched by any of it.
-        (should-not org-semantic-results--k)))))
+        (should-not org-semantic-results--k)
+        ;; The exact value, from the key that shares its place with `+'.
+        (org-semantic-results-set-passages 25)
+        (should (= org-semantic-results--per-file 25))
+        (org-semantic-results-set-notes 40)
+        (should (= org-semantic-results--k 40))
+        ;; Neither exact setter reaches nothing either.
+        (org-semantic-results-set-passages 0)
+        (should (= org-semantic-results--per-file 1))
+        (org-semantic-results-set-notes -3)
+        (should (= org-semantic-results--k 1))))))
 
 (ert-deftest joining-the-terms-is-a-question-only-about-words ()
   "An embedding has no terms to join, so the key refuses.

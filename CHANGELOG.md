@@ -186,7 +186,9 @@ now how org-semantic is meant to be used from Emacs.
   for how many passages one note may contribute. `+`/`-` moved off the note cap,
   which had no mnemonic and left the passage cap reachable only by re-running the
   search. Both double and halve, and both stop at one — a cap of zero answers with
-  an empty list and reads exactly like a query that matched nothing.
+  an empty list and reads exactly like a query that matched nothing. `C-k` and `=`
+  set exact values, each sharing a key with the pair it belongs to — `=` its place
+  with `+`, `C-k` its letter with `k`.
 - **The ranking is chosen, not toggled**: `m` for meaning, `w` for word. A toggle
   could not be pressed without first knowing which ranking was in force, so one key
   meant two things depending on state you had to go and read. `w` is also the
