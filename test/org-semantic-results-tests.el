@@ -931,21 +931,24 @@ The server labels what a client must act on, so an error with no
     (should (rassq 'index-full (org-semantic-ui-remedy-offers remedy)))))
 
 (ert-deftest a-missing-model-is-offered-as-a-download ()
-  "The index is here and the weights are not, so say which part takes time.
+  "The index is here and the weights are not, so the offer fetches weights.
 
-A search refuses this instantly rather than fetching hundreds of
-megabytes inside a query, so the offer is what does the fetching:
-`index', which reports the download and has hours to do it in.
-Labelling it \"Build it\" would describe the cheap half of what is
-about to happen."
+`download' and emphatically not `index'.  It was `index' once, and
+that was a bug rather than a shorthand: an incremental run on a
+vault whose notes have not changed embeds nothing, so it loads no
+model, fetches nothing, and reports success -- after which the
+search refuses in the very same words.  Reproduced end to end
+before this changed."
   (let* ((remedy (org-semantic-ui-remedy
                   '(:message "the bge-small-en model is not downloaded yet"
                     :data (:kind "model-missing" :model "bge-small-en"
-                           :remedy "index"))
+                           :remedy "download"))
                   "semantic"))
          (offers (org-semantic-ui-remedy-offers remedy)))
     (should (equal (org-semantic-ui-remedy-kind remedy) "model-missing"))
-    (should (equal (cdr (assoc "Download it" offers)) 'index))
+    (should (equal (cdr (assoc "Download it" offers)) 'download))
+    (should-not (rassq 'index offers))
+    (should-not (rassq 'index-full offers))
     (should-not (assoc "Build it" offers))
     ;; The word index needs no model at all, so it is worth offering.
     (should (rassq 'lexical offers))))
@@ -962,9 +965,9 @@ run is already fetching, which is the one error that has to."
                  (org-semantic-ui-remedy
                   '(:message "the e5-small model is being downloaded now"
                     :data (:kind "model-missing" :model "e5-small"
-                           :remedy "index" :indexing t))
+                           :remedy "download" :indexing t))
                   "semantic"))))
-    (should-not (rassq 'index offers))
+    (should-not (rassq 'download offers))
     (should (rassq 'retry offers)))
   ;; And `:json-false' is not nil, which is the trap that would make every
   ;; refusal look like a fetch in progress.
@@ -972,9 +975,9 @@ run is already fetching, which is the one error that has to."
                  (org-semantic-ui-remedy
                   '(:message "the e5-small model is not downloaded yet"
                     :data (:kind "model-missing" :model "e5-small"
-                           :remedy "index" :indexing :json-false))
+                           :remedy "download" :indexing :json-false))
                   "semantic"))))
-    (should (rassq 'index offers))
+    (should (rassq 'download offers))
     (should-not (rassq 'retry offers))))
 
 (ert-deftest a-condition-that-holds-is-said-once-however-often-it-is-met ()
@@ -1051,7 +1054,7 @@ already dismissed."
     (org-semantic-results-tests--answering ?q
       (org-semantic-results--render-error
        '(:message "the e5-small model is not downloaded yet"
-         :data (:kind "model-missing" :model "e5-small" :remedy "index"))))
+         :data (:kind "model-missing" :model "e5-small" :remedy "download"))))
     (should (string-match-p "not downloaded yet" (buffer-string)))
     ;; Nothing to press: no buttons, and no bracketed labels drawn either.
     (should-not (next-button (point-min)))
@@ -1059,31 +1062,69 @@ already dismissed."
     ;; And the question named every offer with the key that answers it.
     (let ((prompt (car org-semantic-results-tests--asked)))
       (should (string-match-p "\\[d\\] Download it" prompt))
-      (should (string-match-p "\\[s\\] Search by word" prompt))
+      (should (string-match-p "\\[l\\] Search by word (lexical)" prompt))
       (should (string-match-p "\\[q\\] leave it" prompt))
       ;; Each says what it costs.  A single-letter menu that does not is
       ;; asking the reader to remember which of these takes minutes.
-      (should (string-match-p "builds in seconds" prompt)))))
+      (should (string-match-p "needs no embedding model" prompt)))))
 
-(ert-deftest answering-the-question-does-what-it-offered ()
-  "The key answers, and the answer is acted on.
+(ert-deftest answering-by-word-does-not-make-it-the-buffer-s-ranking ()
+  "`l\=' searches by word once; it does not redefine what the buffer wants.
 
-`s' is the interesting one: it changes the buffer's ranking as well
-as searching again, so a wrong wiring would search by meaning
-forever while claiming to have switched."
-  (let ((searched 0))
-    (cl-letf (((symbol-function 'org-semantic-results--search)
-               (lambda (&rest _) (setq searched (1+ searched)))))
+The bug it fixes was reported as \"sticky configuration\": pressing
+it out of a refusal set the buffer to lexical for good, so every
+later query in that buffer was answered by word with nothing saying
+why.  It is an escape from one refusal, not a preference --
+`org-semantic-results-ranking\=' is where a preference goes.
+
+And the header must not lie about which of the two answered, which
+is why the mode asked is recorded separately.  Binding the buffer\='s
+own mode around the request would pass this test and still print
+\"semantic\" over results found by word, since the reply is rendered
+long after the binding is gone."
+  (let ((asked nil))
+    (cl-letf (((symbol-function 'org-semantic-ui-ask)
+               (lambda (_driver params) (push (plist-get params :mode) asked))))
       (with-temp-buffer
         (org-semantic-results-mode)
         (setq org-semantic-results--vault "/vault"
               org-semantic-results--query "q"
               org-semantic-results--mode "semantic")
-        (org-semantic-results-tests--answering ?s
+        (org-semantic-results-tests--answering ?l
           (org-semantic-results--render-error
-           '(:message "no index" :data (:kind "no-index" :remedy "index"))))
-        (should (equal org-semantic-results--mode "lexical"))
-        (should (= 1 searched))))))
+           '(:message "no semantic index" :data (:kind "no-index" :remedy "index"))))
+        ;; Asked by word...
+        (should (equal asked '("lexical")))
+        (should (equal org-semantic-results--asked-mode "lexical"))
+        ;; ...and the buffer still wants what it wanted.
+        (should (equal org-semantic-results--mode "semantic"))
+        ;; So the next search goes back to it.
+        (org-semantic-results--search)
+        (should (equal (car asked) "semantic"))))))
+
+(ert-deftest answering-with-a-download-fetches-and-indexes-nothing ()
+  "`d\=' fetches the weights the error named, and builds nothing.
+
+The whole point of the method it calls.  Sending an index instead
+was the bug: on a vault whose notes have not changed there is
+nothing to embed, so no model is loaded and nothing is fetched,
+while the run reports success."
+  (let ((fetched nil) (indexed 0))
+    (cl-letf (((symbol-function 'org-semantic-download)
+               (lambda (&rest args) (setq fetched (plist-get args :model))))
+              ((symbol-function 'org-semantic-index)
+               (lambda (&rest _) (setq indexed (1+ indexed)))))
+      (with-temp-buffer
+        (org-semantic-results-mode)
+        (setq org-semantic-results--vault "/vault"
+              org-semantic-results--query "q"
+              org-semantic-results--mode "semantic")
+        (org-semantic-results-tests--answering ?d
+          (org-semantic-results--render-error
+           '(:message "the e5-small model is not downloaded yet"
+             :data (:kind "model-missing" :model "e5-small" :remedy "download"))))
+        (should (equal fetched "e5-small"))
+        (should (= 0 indexed))))))
 
 (ert-deftest dismissing-the-question-does-nothing-at-all ()
   "Quitting is an answer, and it must not act and must not signal.

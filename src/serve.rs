@@ -35,7 +35,7 @@
 
 use crate::*;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response, ResponseError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// How an editor says yes: it has no flags, so it calls `index` with `full`.
@@ -106,6 +106,15 @@ struct Server {
     /// A thread that has finished is reaped here rather than announcing itself:
     /// `JoinHandle::is_finished` is the whole of the bookkeeping.
     run: Mutex<HashMap<PathBuf, Run>>,
+    /// The models being downloaded, by name.
+    ///
+    /// Keyed by model and not by vault, because that is what a download belongs
+    /// to: two vaults on one model share the fetch, and two models fetch side by
+    /// side. Its job is to refuse a *second* fetch of the same model rather than
+    /// let it queue behind hf-hub's blob lock, which is not a wait it survives —
+    /// `model_with` retries five times a second apart and then fails, with no
+    /// label on the error.
+    fetching: Mutex<HashSet<&'static str>>,
 }
 
 /// One indexing run, and the two things needed to reach it from outside.
@@ -204,25 +213,27 @@ impl Server {
             // hundredth and would go on offering to start what is already
             // running. Nothing would break, since a second `index` on one vault
             // is refused in its turn, but the offer would be a lie.
-            let fetching = self.indexing(vault);
+            // True when *anything* that fetches this model is already going: a
+            // `download` of it, or an index of this vault that will load it on
+            // the way. The field's job is to stop a client offering to start what
+            // is already running, so it asks that question rather than naming one
+            // mechanism.
+            let fetching = lock(&self.fetching).contains(m.name) || self.indexing(vault);
             return Err(fault(
                 "model-missing",
                 serde_json::json!({ "target": "semantic", "model": m.name,
-                                    "remedy": "index", "indexing": fetching }),
+                                    "remedy": "download", "indexing": fetching }),
                 if fetching {
                     format!("the {} model is being downloaded now", m.name)
                 } else {
-                    // Declarative, like the sentence above it, and for a reason
-                    // beyond symmetry: the reader asked to *search*, and the only
-                    // caller that can reach this is a `serve` client — the CLI
-                    // downloads rather than refusing. So an imperative would name
-                    // a subcommand they have no command line to type it on, and
-                    // give indexing's purpose in place of their own. What to press
-                    // is `remedy`'s to say; this only has to say what is true.
-                    format!(
-                        "the {} model is not downloaded yet — indexing this vault will fetch it",
-                        m.name
-                    )
+                    // Says what is true and stops there. It used to end "—
+                    // indexing this vault will fetch it", which was accurate only
+                    // while `index` was the one call that could: an incremental
+                    // run on an unchanged vault embeds nothing, so it loaded no
+                    // model, fetched nothing, and reported success — after which
+                    // the next search refused in exactly these words. `download`
+                    // exists because of that, and `remedy` now names it.
+                    format!("the {} model is not downloaded yet", m.name)
                 },
             ));
         }
@@ -570,6 +581,89 @@ impl Server {
         });
         runs.insert(vault, Run { id: req.id.clone(), stop, handle });
         Ok(())
+    }
+
+    /// `download` — fetch a model's weights, and nothing else.
+    ///
+    /// **Its own method because "get me the model" and "index this vault" are two
+    /// requests, and conflating them was a bug rather than a shortcut.**
+    /// `model-missing` used to answer `remedy: "index"`, and an incremental index
+    /// of an unchanged vault has nothing to embed: it loads no model, so it
+    /// fetches nothing, reports success, and the next search refuses in the very
+    /// same words. Reproduced end to end through the Emacs client before this
+    /// existed.
+    ///
+    /// Sending `full` instead would have worked and was the wrong fix: it
+    /// re-embeds a whole corpus — minutes — to obtain a file, and it rebuilds an
+    /// index the user never asked to rebuild. One thing at a time: this fetches,
+    /// the client searches again, and a *missing index* is then reported by that
+    /// search as the ordinary `no-index` it is, with its own offer.
+    ///
+    /// Takes a model name and no vault, because that is what a download belongs
+    /// to. `model-missing` carries the name, so a client never has to work it out.
+    ///
+    /// Not cancellable, and honest about it: a download has no unit boundaries to
+    /// check a flag between, so it is not entered in `run` and `$/cancelRequest`
+    /// does not reach it. It is on a worker, though, so the loop answers
+    /// throughout — which is the part that used to be false when a *search* could
+    /// start one.
+    fn fetch(
+        self: &Arc<Self>,
+        req: &Request,
+        sender: &crossbeam_channel::Sender<Message>,
+    ) -> Result<Option<serde_json::Value>> {
+        let name = req
+            .params
+            .get("model")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("`download` needs a `model` to fetch"))?;
+        let m = model_named(name)?;
+        // Idempotent, and says which it was: a client that offers this per
+        // keystroke must not be able to start a second fetch of a model it
+        // already has, and must not be told it downloaded something it did not.
+        if weights_cached(m) {
+            return Ok(Some(serde_json::json!({ "model": m.name, "downloaded": false })));
+        }
+        {
+            let mut fetching = lock(&self.fetching);
+            if fetching.contains(m.name) {
+                return Err(fault(
+                    "downloading",
+                    serde_json::json!({ "model": m.name, "remedy": "wait" }),
+                    format!("the {} model is being downloaded now", m.name),
+                ));
+            }
+            fetching.insert(m.name);
+        }
+        let mut j = Journal::quiet();
+        let reports = watch(&mut j, sender, &req.id);
+        let me = Arc::clone(self);
+        let sender = sender.clone();
+        let id = req.id.clone();
+        std::thread::spawn(move || {
+            // The same announcement `cmd_index` makes, for the same reason: this
+            // is minutes of network before anything else can happen, so it is
+            // said in advance rather than explained afterwards. `bytes` and no
+            // `total`, since fastembed exposes no increments.
+            let size = download_size(m);
+            j.remark(Remark::new(
+                "model-downloaded",
+                fetching_now(m.name, size, " of weights, plus its tokenizer and config"),
+            ));
+            j.progress(&Progress::new("semantic", "download", "bytes", 0, 0.0).maybe_sized(size));
+            // Loading it is fastembed's only way to fetch it. The ~0.12–0.64 s
+            // that costs is nothing beside the download, and it means a reply of
+            // `downloaded: true` is a model that was read back, not bytes that
+            // landed.
+            let done = model_with(m.which.clone(), None, false)
+                .map(|_| serde_json::json!({ "model": m.name, "downloaded": true }));
+            j.progress_done();
+            lock(&me.fetching).remove(m.name);
+            j.watch = None;
+            let _ = reports.join();
+            let _ = sender.send(replied(id, done, &mut j).into());
+        });
+        Ok(None)
     }
 
     /// The run itself, on the worker.
@@ -966,6 +1060,7 @@ pub fn serve() -> Result<()> {
                     }
                     "close" => server.close(&req.params).map(Some),
                     "index" => server.start(&req, &conn.sender).map(|()| None),
+                    "download" => server.fetch(&req, &conn.sender),
                     _ => Err(anyhow!("unknown method `{}`", req.method)),
                 };
                 match answer {

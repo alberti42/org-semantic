@@ -199,6 +199,7 @@ nobody parses the prose to find out which call to make."
          (build (pcase remedy
                   ("index" '(("Build it" . index)))
                   ("reindex-full" '(("Rebuild from scratch" . index-full)))
+                  ("download" '(("Download it" . download)))
                   ("wait" '(("Try again" . retry)))
                   (_ nil)))
          (offers
@@ -210,7 +211,7 @@ nobody parses the prose to find out which call to make."
             ("no-index"
              (append build
                      (unless (equal mode "lexical")
-                       '(("Search by word" . lexical)))))
+                       '(("Search by word (lexical)" . lexical)))))
             ;; The index is here and the model that built it is not -- a vault
             ;; copied to another machine, or a cleared cache.  Named as a
             ;; download rather than as a build, because that is the part that
@@ -227,9 +228,9 @@ nobody parses the prose to find out which call to make."
               ;; again, and without it the hundredth refusal reads as the first.
               (if (org-semantic-true-p (plist-get data :indexing))
                   '(("Wait for it" . retry))
-                '(("Download it" . index)))
+                '(("Download it" . download)))
               (unless (equal mode "lexical")
-                '(("Search by word" . lexical)))))
+                '(("Search by word (lexical)" . lexical)))))
             ("config-drift"
              (append '(("Rebuild fully" . index-full)
                        ("Search anyway" . waive))
@@ -252,11 +253,15 @@ nobody parses the prose to find out which call to make."
   (cddr remedy))
 
 (defconst org-semantic-ui--offer-keys
-  '(("Show what changed" . ?c))
+  '(("Show what changed" . ?c)
+    ("Search by word (lexical)" . ?l))
   "Offers whose key is not the first letter of their label.
 
-Only the collisions live here.  `config-drift' offers \"Search
-anyway\" beside \"Show what changed\", and both begin with an S.
+Two reasons to be here.  A collision: `config-drift' offers \"Search
+anyway\" beside \"Show what changed\", and both begin with an S.  Or
+the initial names the wrong half of the label: \"Search by word
+\(lexical)\" is answered by `l', since what distinguishes it is the
+index it reads and not that it is a search.
 
 Everything else takes its initial, which is the whole point:
 `[d] Download it' can be read without being learned, where a key

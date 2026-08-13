@@ -1,6 +1,6 @@
 [package]
 name = "org-semantic"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Search a tree of org-mode notes by meaning or by words. One static binary, no database, no Python."
 license = "MIT"

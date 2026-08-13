@@ -58,8 +58,22 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+Needs binary version **0.2.1**: the package calls a `download` method 0.2.0 does
+not have.
+
 ### Fixed
 
+- **Offering to download a missing model downloaded nothing.** The offer ran an
+  index, and an incremental index of a vault whose notes have not changed embeds
+  nothing — so it loaded no model, fetched nothing, reported success, and the next
+  search refused in exactly the same words. There is a `download` method now: it
+  fetches the weights and builds nothing, and the search that follows asks about a
+  missing index separately, as its own question.
+- **Searching by word out of a refusal stuck.** `[l]` set the buffer's ranking for
+  good, so every later query in it was answered by word with nothing saying why.
+  It searches once now and leaves the buffer's own ranking alone —
+  `org-semantic-results-ranking` is where a preference belongs, and it takes
+  `"ask"` if you have no usual answer.
 - **A cold first run could silently ignore a note's `# ltex: language=…`.** The
   language classifier was fetched and loaded by every thread that wanted it at
   once, through one shared staging file, so a note declaring Italian in a German
@@ -70,8 +84,8 @@ built. It then publishes a **draft** release for review.
 
 - **A failed search asks what to do in the minibuffer** rather than drawing a row
   of buttons in the results buffer. One keystroke per offer — each its label's own
-  initial, so `d` for "Download it", `b` for "Build it", `s` for "Search by word",
-  `q` or `C-g` to leave it — and each says what it costs, since one of them is
+  initial, so `d` for "Download it", `b` for "Build it", `l` for "Search by word
+  (lexical)", `q` or `C-g` to leave it — and each says what it costs, since one of them is
   minutes and the other seconds. The buffer keeps the sentence, so there is still
   an account of the empty list once the question is gone. Declining costs nothing:
   `R` indexes the vault whenever you like, which is the same call the offer would

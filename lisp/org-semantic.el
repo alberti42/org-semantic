@@ -61,7 +61,7 @@ anything here ships, including a change to this file alone.  It is
 *not* what the binary reports, and the two are compared through
 `org-semantic-minimum-binary-version' rather than for equality.")
 
-(defconst org-semantic-minimum-binary-version "0.2.0"
+(defconst org-semantic-minimum-binary-version "0.2.1"
   "The oldest binary this package knows how to talk to.
 
 Bump this when the elisp starts needing something the server did
@@ -69,13 +69,16 @@ not have -- a new method, a new field, a changed reply shape -- and
 also when a release *documents* behaviour that only the newer binary
 provides and the older one gets **silently wrong**.
 
-The second half is what 0.2.0 raised it for, and it is worth stating
-because nothing here calls a new method: 0.1.0 has no negated
-predicates at all, so it reads `-dir:archive' as `dir:archive'
-and answers with the opposite of the request.  A user reading the
-0.2.0 notes and keeping the old binary would be quietly served
-wrong results.  The floor exists to prevent silence, not merely to
-gate method calls.
+0.2.1 raised it for the first reason: `org-semantic-download' calls
+a `download' method that 0.2.0 has no answer for at all.
+
+0.2.0 raised it for the second, which is worth keeping as the
+example, because nothing in that release called anything new: 0.1.0
+has no negated predicates, so it reads `-dir:archive' as
+`dir:archive' and answers with the opposite of the request.  A user
+reading those notes and keeping the old binary would be quietly
+served wrong results.  The floor exists to prevent silence, not
+merely to gate method calls.
 
 *Why a minimum and not the release version.* They ship from one
 repository, but they do not change together: an elisp-only release
@@ -920,6 +923,37 @@ them may be dropped."
                       (org-semantic--failed error-object failure))))
     (puthash os-vault os-id org-semantic--runs)
     os-id))
+
+(cl-defun org-semantic-download (&key model success failure progress)
+  "Fetch MODEL's weights, without waiting, and return the request id.
+
+MODEL is a name from `org-semantic-models' and is required: a
+download belongs to a model rather than to a vault, and the
+`model-missing' error that asks for one carries the name in its
+`data'.
+
+SUCCESS is called with `model' and `downloaded' -- the latter nil
+when the weights were already there, so a client can say \"already
+had it\" rather than claiming a download it did not make.  FAILURE
+is called with the error object; PROGRESS with each report, of
+which there is one, announcing the size before the wait.
+
+Nothing else happens: no index is built, no vault is touched.
+Search again afterwards, and a vault whose index is missing will
+say so then, as its own question.
+
+A second fetch of the same model is refused with kind
+`downloading' rather than queued.  And it cannot be cancelled --
+that wait has no unit boundaries to check a flag between -- so
+give it `org-semantic-index-timeout' rather than the ordinary one:
+a large model is minutes."
+  (org-semantic--call-async
+   "download"
+   (org-semantic--params :model (or model (error "Which model to download?")))
+   :timeout org-semantic-index-timeout
+   :progress progress
+   :success success
+   :failure (lambda (error-object) (org-semantic--failed error-object failure))))
 
 (defun org-semantic-indexing-p (&optional vault)
   "The id of the index this client started for VAULT, or nil.

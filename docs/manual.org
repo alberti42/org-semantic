@@ -322,7 +322,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-conserve-memory~       | =nil=          | see [[#during-a-reindex][Searching while it reindexes]]     |
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
-| ~org-semantic-results-ranking~       | ="semantic"=   | which ranking =M-x org-semantic-find= asks for              |
+| ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 | ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |
@@ -341,10 +341,10 @@ says so at once and offers to fetch it, rather than pulling hundreds of megabyte
 inside your query:
 
 #+begin_example
-  the bge-small-en model is not downloaded yet — indexing this vault will fetch it
+  the bge-small-en model is not downloaded yet
 
-    [d] Download it — the model comes down first, so this is minutes
-    [s] Search by word — needs no model at all, and builds in seconds
+    [d] Download it — fetches the weights and nothing else; minutes
+    [l] Search by word (lexical) — needs no embedding model
     [q] leave it
 
   Choice:
@@ -352,11 +352,17 @@ inside your query:
 
 The question is asked in the minibuffer, once, and the results buffer keeps the
 sentence so there is still an account of the empty list after you have answered.
-=d= runs the index, which reports the download as it goes and then runs your
-search again by itself. =q= or =C-g= leaves it, and declining costs nothing:
-=R= indexes the vault whenever you like, which is the same call the offer would
-have made. =M-x org-semantic-show-status= says the same thing before you ask: a
-model it lists as not cached is one that would refuse.
+=d= fetches the weights, reporting the size as it goes, and then runs your search
+again --- and *only* that: nothing is indexed. Should the index turn out to be
+missing as well, that search says so itself and asks about building it, which is a
+separate question with its own answer.
+
+=l= answers this once by word, and leaves the buffer's own ranking alone; if you
+would rather always search that way, say so in
+~org-semantic-results-ranking~. =q= or =C-g= declines, which costs nothing: =R=
+indexes the vault whenever you like, and =M-x org-semantic-show-status= says
+which models are cached before you ask --- one it lists as absent is one that
+would refuse.
 
 Each key is its label's own initial, so the menu is read rather than learnt: the
 same call is =d= where it is offered as "Download it" and =b= where it is

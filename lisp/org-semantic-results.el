@@ -90,11 +90,21 @@ recorded, so this changes what is drawn and nothing else."
 
 \"semantic\" finds notes by meaning and needs the embedding index;
 \"lexical\" finds them by word, from an index that builds in
-seconds.  It is the `mode' the server is asked for, spelled
-`ranking' here so as not to read as a setting for
-`org-semantic-results-mode'."
+seconds.  \"ask\" settles it per search, which is what a single
+prefix argument does anyway -- so set it if you have no usual
+answer, rather than pressing \\[universal-argument] every time.
+
+It is the `mode' the server is asked for, spelled `ranking' here so
+as not to read as a setting for `org-semantic-results-mode'.
+
+Three values rather than two exclusive minor modes, which was
+considered: a minor mode toggles a behaviour, where this is one
+choice out of several, and a pair of them would need hand-written
+exclusivity and would have a fourth state -- both on -- meaning
+nothing."
   :type '(choice (const :tag "By meaning" "semantic")
-                 (const :tag "By word" "lexical")))
+                 (const :tag "By word" "lexical")
+                 (const :tag "Ask each time" "ask")))
 
 (defcustom org-semantic-results-display-action
   '(display-buffer-reuse-mode-window)
@@ -215,7 +225,20 @@ when there are not.")
   "The query the hits on show answered.")
 
 (defvar-local org-semantic-results--mode "semantic"
-  "Which ranking is being asked for, \"semantic\" or \"lexical\".")
+  "Which ranking this buffer will ask for next, \"semantic\" or \"lexical\".
+
+What the buffer *wants*, which `m' changes and a one-off search
+does not.  See `org-semantic-results--asked-mode' for what is on
+screen.")
+
+(defvar-local org-semantic-results--asked-mode nil
+  "The ranking that produced what is drawn, or nil before any reply.
+
+Usually the same as `org-semantic-results--mode', and deliberately
+not always: the offer that answers a refusal by word searches once
+without redefining what the buffer wants, and the header has to say
+which ranking the results in front of you came from rather than
+which one the next search will use.")
 
 (defvar-local org-semantic-results--k nil
   "How many notes may appear, or nil for the server's default.")
@@ -294,6 +317,11 @@ block."
   "P"         #'org-semantic-results-set-per-file
   "="         #'org-semantic-results-describe-hit
   "R"         #'org-semantic-results-reindex
+  ;; Shadows `special-mode-map''s `revert-buffer' for one reason: `C-h m' shows
+  ;; the *command's* docstring, so an inherited binding described this as
+  ;; replacing the buffer's text with a file's -- which is what it does in a
+  ;; buffer visiting a file, and nothing like what it does here.
+  "g"         #'org-semantic-results-revert
   "C-c C-f"   #'next-error-follow-minor-mode)
 
 (defvar org-semantic-results-passage-map
@@ -399,7 +427,11 @@ front-end is free to rebind."
      (if (eq action 'metadata)
          '(metadata (annotation-function . org-semantic--ranking-annotation))
        (complete-with-action action org-semantic--rankings string predicate)))
-   nil t nil nil org-semantic-results-ranking))
+   nil t nil nil
+   ;; Never "ask" itself: it is not one of the rankings, so offering it as
+   ;; the default would put a non-candidate in front of the one key that
+   ;; takes it.
+   (if (equal org-semantic-results-ranking "ask") "semantic" org-semantic-results-ranking)))
 
 ;;;###autoload
 (defun org-semantic-find (query &optional arg)
@@ -421,7 +453,9 @@ them negated with a leading `-' -- with the rest as free text."
          current-prefix-arg))
   (let* ((asks (org-semantic--find-prompts arg))
          (vault (org-semantic-vault-or-error))
-         (mode (if (car asks) (org-semantic--read-ranking) org-semantic-results-ranking))
+         (mode (if (or (car asks) (equal org-semantic-results-ranking "ask"))
+                   (org-semantic--read-ranking)
+                 org-semantic-results-ranking))
          (k (and (cdr asks) (read-number "Notes at most: " 8)))
          (per-file (and (cdr asks) (read-number "Passages per note at most: " 3)))
          (buffer (org-semantic-results--buffer vault)))
@@ -478,8 +512,22 @@ package accumulates, not a setting anyone chooses.")
       (setq default-directory (file-name-as-directory vault))
       buffer)))
 
-(defun org-semantic-results--search ()
-  "Ask again for what this buffer is set to want."
+(defun org-semantic-results--search (&optional mode)
+  "Ask again for what this buffer is set to want.
+
+MODE asks in that ranking *this once*, without making it what the
+buffer wants -- for the offer that gets an answer out of a refusal,
+where a vault missing its semantic index or its model can usually
+still answer by word.  Pressing that must not silently redefine
+every later query in the buffer, which it did, with nothing saying
+why.
+
+What the header shows is `org-semantic-results--asked-mode\=', the
+ranking that produced what is on screen, and not what the buffer
+will ask next.  Binding the buffer\='s own mode around the request
+instead looked equivalent and was worse: the reply is rendered long
+after the binding is gone, so the header said \"semantic\" over
+results found by word."
   (unless org-semantic-results--driver
     (let ((buffer (current-buffer)))
       (setq org-semantic-results--driver
@@ -494,6 +542,7 @@ package accumulates, not a setting anyone chooses.")
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
                    (org-semantic-results--render-error error-object))))))))
+  (setq org-semantic-results--asked-mode (or mode org-semantic-results--mode))
   (setq org-semantic-results--started (float-time))
   (setq mode-line-process " [searching]")
   (force-mode-line-update)
@@ -516,7 +565,7 @@ package accumulates, not a setting anyone chooses.")
         :k org-semantic-results--k
         :per-file org-semantic-results--per-file
         :merge-by-section org-semantic-results--merge
-        :mode org-semantic-results--mode
+        :mode org-semantic-results--asked-mode
         :model (or org-semantic-results--model org-semantic-model)
         :any org-semantic-results--any
         ;; Absent when waived, and the driver takes that literally --
@@ -651,12 +700,13 @@ there is no index reads as an answer, and it is not one."
                             (format "per-file=%s passages"
                                     (or org-semantic-results--per-file 3))
                             (and org-semantic-results--merge "merged by section")
-                            (and (equal org-semantic-results--mode "lexical")
+                            (and (equal org-semantic-results--asked-mode "lexical")
                                  org-semantic-results--any
                                  "any term")))))
     (insert (propertize
              (format "org-semantic  %s  %s\n"
-                     org-semantic-results--mode
+                     (or org-semantic-results--asked-mode
+                         org-semantic-results--mode)
                      (if (and org-semantic-results--query
                               (not (string-empty-p org-semantic-results--query)))
                          (format "%S" org-semantic-results--query)
@@ -1039,32 +1089,27 @@ not say so is asking the user to remember which."
       (format "  [%c] %s — %s\n"
               (org-semantic-ui-offer-key o)
               (car o)
-              (org-semantic-results--offer-help
-               (cdr o) (org-semantic-ui-remedy-kind remedy))))
+              (org-semantic-results--offer-help (cdr o))))
     offers
     "")
    "  [q] leave it\n\nChoice: "))
 
-(defun org-semantic-results--offer-help (action &optional kind)
-  "What ACTION would do about KIND, in a few words.
+(defun org-semantic-results--offer-help (action)
+  "What ACTION would do, in a few words.
 
-KIND is the server's label, because one action is two different
-propositions depending on it: `index' for a vault that has none
-builds one, and `index' for a vault whose weights are absent
-*downloads a model first* -- 128 MB to 2.24 GB of it.  Saying
-\"build the index\" there describes the cheap half of a wait
-measured in minutes, which is the half nobody needs warning about."
-  (if (and (eq action 'index) (equal kind "model-missing"))
-      "the model comes down first, so this is minutes"
-    (pcase action
-      ('index "build the index this search needs")
-      ('index-full "rebuild from scratch, which re-embeds everything")
-      ('lexical "needs no model at all, and builds in seconds")
-      ('retry "search again, once the run already going has finished")
-      ('choose-model "search one of the models that is built")
-      ('waive "search the index as it stands, under the policy it was built with")
-      ('show-changed "list the settings that moved")
-      (_ ""))))
+Each says what it costs, because one of these is minutes and the
+rest are not, and a menu of single letters that does not say so is
+asking the reader to remember which."
+  (pcase action
+    ('download "fetches the weights and nothing else; minutes")
+    ('index "builds the index this search needs, which takes minutes")
+    ('index-full "rebuilds from scratch, re-embedding everything")
+    ('lexical "needs no embedding model")
+    ('retry "search again, once the run already going has finished")
+    ('choose-model "search one of the models that is built")
+    ('waive "search the index as it stands, under the policy it was built with")
+    ('show-changed "list the settings that moved")
+    (_ "")))
 
 (defun org-semantic-results--offer-action (action error-object)
   "A function doing ACTION, which ERROR-OBJECT asked for.
@@ -1078,9 +1123,13 @@ costs nothing to keep."
     (lambda (_button)
       (with-current-buffer os-buffer
         (pcase action
-          ('lexical
-           (setq org-semantic-results--mode "lexical")
-           (org-semantic-results--search))
+          ;; Searches by word *once*, and does not change what this buffer is
+          ;; set to want.  It is an escape from one refusal, not a statement
+          ;; about how the user prefers to search -- and it read as the latter,
+          ;; because the setting stuck and every later query in the buffer was
+          ;; answered by word with nothing saying why.  Someone who does prefer
+          ;; it says so in `org-semantic-results-ranking'.
+          ('lexical (org-semantic-results--search "lexical"))
           ('retry (org-semantic-results--search))
           ('waive
            (setq org-semantic-results--policy nil)
@@ -1097,8 +1146,31 @@ costs nothing to keep."
              (setq org-semantic-results--model
                    (completing-read "Model: " known nil t))
              (org-semantic-results--search)))
+          ('download (org-semantic-results--download (plist-get os-data :model)))
           ((or 'index 'index-full)
            (org-semantic-results--reindex (eq action 'index-full))))))))
+
+(defun org-semantic-results--download (model)
+  "Fetch MODEL, then search again.  Nothing is indexed.
+
+One thing at a time: if the search then finds no index, it says so
+itself and asks about building one -- which is a question the user
+gets to answer rather than minutes of embedding nobody asked for."
+  (let ((os-buffer (current-buffer)))
+    (setq mode-line-process " [downloading]")
+    (force-mode-line-update)
+    (org-semantic-download
+     :model model
+     :progress #'org-semantic-report-message
+     :success (lambda (_result)
+                (when (buffer-live-p os-buffer)
+                  (with-current-buffer os-buffer
+                    (org-semantic-results--search))))
+     :failure (lambda (error-object)
+                (when (buffer-live-p os-buffer)
+                  (with-current-buffer os-buffer
+                    (org-semantic-results--render-error error-object)))))
+    (message "org-semantic: downloading %s..." model)))
 
 (defun org-semantic-results--reindex (full)
   "Index this buffer's vault, then search again.  FULL rebuilds from scratch."
@@ -1251,7 +1323,11 @@ only in which line it carries."
   (org-semantic-results-next (- (or n 1))))
 
 (defun org-semantic-results-next-note (&optional n)
-  "Go to the first passage of the Nth next note."
+  "Go to the first passage of the Nth next note, and show it.
+
+Skips whatever is left of this note -- its remaining sections and
+their passages -- where \\[org-semantic-results-next] would step
+through them one passage at a time."
   (interactive "p" org-semantic-results-mode)
   (dotimes (_ (abs (or n 1)))
     (let ((file (org-semantic-results--file-at-point))
@@ -1261,7 +1337,11 @@ only in which line it carries."
   (org-semantic-results--visit))
 
 (defun org-semantic-results-previous-note (&optional n)
-  "Go to the first passage of the Nth previous note."
+  "Go to the first passage of the Nth previous note, and show it.
+
+Skips whatever is left of this note -- its remaining sections and
+their passages -- where \\[org-semantic-results-previous] would step
+through them one passage at a time."
   (interactive "p" org-semantic-results-mode)
   (org-semantic-results-next-note (- (or n 1))))
 
@@ -1291,7 +1371,11 @@ and puts things back itself."
 ;;;; Folding a long passage
 
 (defun org-semantic-results-toggle-passage ()
-  "Show or fold away the rest of the passage point is in."
+  "Show or fold away the rest of the passage point is in.
+
+Only a long passage has a rest: one running to more than
+`org-semantic-results-passage-lines' lines is cut there, and what is
+left over becomes a marker saying how many lines it stands for."
   (interactive nil org-semantic-results-mode)
   (let ((item (org-semantic-results--item-at-point)))
     (unless (and item (org-semantic-results--item-elided item))
@@ -1350,10 +1434,19 @@ boundary that is already recorded is work for nothing."
 
 ;;;; Asking again, differently
 
+(defun org-semantic-results-revert ()
+  "Run the same search again and redraw the org-semantic results buffer.
+
+No note is opened, read or written: this buffer visits no file, so
+there is nothing on disk to revert."
+  (interactive nil org-semantic-results-mode)
+  (org-semantic-results--search))
+
 (defun org-semantic-results--revert (&optional _ignore-auto _noconfirm)
-  "Ask again rather than redraw.
-The notes may have moved on since, and what is here is a picture
-of what they said then."
+  "Run the same search again, for `revert-buffer-function'.
+`org-semantic-results-revert' is the command; this is the hook, so
+that \\[revert-buffer] and anything calling it programmatically
+agree with `g'."
   (org-semantic-results--search))
 
 (defun org-semantic-results-set-query (query)
@@ -1371,7 +1464,11 @@ mean pressing \\`M-n' before every refinement."
   (org-semantic-results--search))
 
 (defun org-semantic-results-toggle-ranking ()
-  "Swap between ranking by meaning and ranking by word."
+  "Swap the ranking: semantic (by meaning) or lexical (by word).
+
+The two are separate indexes answering the same query differently,
+so this searches again.  The word index also answers when the
+semantic one has not been built."
   (interactive nil org-semantic-results-mode)
   (setq org-semantic-results--mode
         (if (equal org-semantic-results--mode "lexical") "semantic" "lexical"))

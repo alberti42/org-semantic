@@ -974,6 +974,65 @@ fn assert_announced(msgs: &[Value], target: &str, cache: &Path) {
     );
 }
 
+/// `download` fetches a model and does nothing else, which is the whole reason it
+/// exists as its own method.
+///
+/// `model-missing` used to answer `remedy: "index"`, and that was a bug rather
+/// than a shorthand: an incremental index of a vault whose notes have not changed
+/// embeds nothing, so it loads no model, fetches nothing, and reports success —
+/// after which the search refuses in exactly the same words. Found by driving the
+/// Emacs client, not by reading.
+///
+/// Offline, because the two things worth pinning need no network: what it says
+/// when asked for nothing, and what it says when asked for a model that does not
+/// exist. The fetch itself is `--ignored`, below.
+#[test]
+fn a_download_needs_a_model_and_refuses_one_it_does_not_know() {
+    let msgs = talk(
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "download", "params": {} }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "download",
+                    "params": { "model": "e5-enormous" } }),
+        ],
+        None,
+    );
+    let err =
+        |id: i64| msgs.iter().find(|m| m["id"] == id).expect("a reply").clone()["error"].clone();
+    assert!(
+        err(1)["message"].as_str().unwrap().contains("needs a `model`"),
+        "asked for nothing, it says what is missing: {:?}",
+        err(1)
+    );
+    // And an unknown one is the *existing* label, not a new one: a client that
+    // already handles a mistyped `--model` handles this by the same branch.
+    assert_eq!(err(2)["data"]["kind"], "unknown-model");
+    assert!(err(2)["data"]["known"].is_array(), "and lists what there is: {:?}", err(2));
+}
+
+/// The refusal a search gives now names `download`, and carries the model.
+///
+/// Both halves matter to a client: the `remedy` says which call to offer, and
+/// `model` is how it names the thing to fetch without working it out from the
+/// vault.
+#[test]
+fn a_missing_model_sends_the_client_to_download() {
+    let v = vault("missing-model-remedy", 1);
+    let dir = v.join(".org-semantic").join("semantic").join("bge-small-en");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("manifest.json"), "{}").unwrap();
+    let cache = scratch("missing-model-remedy-cache");
+
+    let msgs = talk(
+        &[json!({ "jsonrpc": "2.0", "id": 7, "method": "search",
+                  "params": { "vault": v, "query": "atoms", "mode": "semantic" } })],
+        Some(&cache),
+    );
+    let data = msgs.iter().find(|m| m["id"] == 7).expect("a reply")["error"]["data"].clone();
+    assert_eq!(data["kind"], "model-missing");
+    assert_eq!(data["remedy"], "download", "and not `index`, which fetched nothing");
+    assert_eq!(data["model"], "bge-small-en");
+}
+
 #[test]
 #[ignore = "downloads the 938 kB language classifier"]
 fn a_cold_classifier_is_announced_before_it_is_fetched() {
@@ -1029,6 +1088,36 @@ fn the_download_lands_in_the_directory_the_variable_names() {
     );
 }
 
+/// The fetch itself, and that a second one is refused rather than queued.
+///
+/// hf-hub locks the blob, so a queued second fetch would sit on that lock and
+/// then fail: `model_with` retries five times a second apart and gives up, with
+/// no label on the error. Refusing says so instead, and the client already knows
+/// how to offer waiting.
+#[test]
+#[ignore = "downloads the 133 MB embedding model"]
+fn a_download_fetches_once_and_refuses_a_second_of_the_same_model() {
+    let cache = scratch("download-cache");
+    let msgs = talk(
+        &[
+            // Id 7 because `assert_announced` is written for the request that
+            // does the fetching, whichever method it was.
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "download",
+                    "params": { "model": "bge-small-en" } }),
+            // Sent immediately, so it lands while the first is still going: the
+            // first is answered from a worker, this one on the loop.
+            json!({ "jsonrpc": "2.0", "id": 8, "method": "download",
+                    "params": { "model": "bge-small-en" } }),
+        ],
+        Some(&cache),
+    );
+    let reply = |id: i64| msgs.iter().find(|m| m["id"] == id).expect("a reply").clone();
+    assert_eq!(reply(7)["result"]["downloaded"], true, "it fetched: {:?}", reply(7));
+    assert_eq!(reply(8)["error"]["data"]["kind"], "downloading", "{:?}", reply(8));
+    assert_eq!(reply(8)["error"]["data"]["remedy"], "wait");
+    assert_announced(&msgs, "semantic", &cache);
+}
+
 #[test]
 #[ignore = "downloads the 133 MB embedding model"]
 fn a_cold_embedding_model_is_announced_before_it_is_fetched() {
@@ -1081,7 +1170,7 @@ fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
     let err = reply(2)["error"].clone();
     assert_eq!(err["data"]["kind"], "model-missing", "{err:?}");
     assert_eq!(err["data"]["model"], "bge-small-en");
-    assert_eq!(err["data"]["remedy"], "index", "and says which call fetches it");
+    assert_eq!(err["data"]["remedy"], "download", "and says which call fetches it");
     // No run is fetching it, so offering to start one is honest.  This is the
     // one error carrying `indexing', because it is the one a client repeats:
     // search-as-you-type meets it per keystroke, and without this the
