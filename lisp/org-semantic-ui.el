@@ -265,27 +265,21 @@ nobody parses the prose to find out which call to make."
 
 (defconst org-semantic-ui--offer-keys
   '(("Show what changed" . ?c)
-    ("Lexical search (by word)" . ?L)
     ("Rebuild fully" . ?b)
     ("Rebuild from scratch" . ?b))
   "Offers whose key is not the first letter of their label.
 
 Two reasons to be here.  A collision: `config-drift' offers \"Search
-anyway\" beside \"Show what changed\", and both begin with an S.  Or
-the initial is right but its *case* is not: \"Lexical search (by
-word)\" is answered by `L', matching the key the results buffer uses
-for the same choice, where a bare `l' is the logical connector.  One
-letter, one job, across the whole package.
+anyway\" beside \"Show what changed\", and both begin with an S.
 
-And a third: **two labels for one action answer to one key.**  A full
+And: **two labels for one action answer to one key.**  A full
 rebuild is offered as \"Rebuild fully\" when a policy has drifted and
 as \"Rebuild from scratch\" when a layout is too old to read, and it
 is `b' -- building -- in both, the same letter as \"Build it\".  `r'
 would suggest the letter told a *rebuild* from a *build*, which it
 cannot, because no failure ever offers both: one says there is no
 index, the other that the one there is cannot be used.  An imagined
-distinction is worse than none, and `r' is the results buffer's
-ranking.
+distinction is worse than none.
 
 Everything else takes its initial, which is the whole point:
 `[d] Download it' can be read without being learned, where a key

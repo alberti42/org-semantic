@@ -118,7 +118,7 @@ nothing."
 `and' answers with the notes carrying every term, `or' with those
 carrying any of them.  It is the *default* for a search; `l' in the
 results buffer -- `l' for logic -- swaps it for the one in front of
-you, as `r' swaps the ranking.
+you, as `M-s' and `M-l' choose the ranking.
 
 A word search only.  An embedding has no terms to join, so the
 semantic ranking ignores this and the key refuses rather than
@@ -293,8 +293,8 @@ when there are not.")
 (defvar-local org-semantic-results--mode "semantic"
   "Which ranking this buffer will ask for next, \"semantic\" or \"lexical\".
 
-What the buffer *wants*, which `r' changes and a one-off search
-does not.  See `org-semantic-results--asked-mode' for what is on
+What the buffer *wants*, which `M-s' and `M-l' change and a one-off
+search does not.  See `org-semantic-results--asked-mode' for what is on
 screen.")
 
 (defvar-local org-semantic-results--asked-mode nil
@@ -392,12 +392,16 @@ block."
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
   ;; Named after the rankings themselves, which is what the header says and what
-  ;; the setting takes: `S'emantic and `L'exical.  `m' for meaning and `w' for
+  ;; the setting takes: `s'emantic and `l'exical.  `m' for meaning and `w' for
   ;; word read well and named the *gloss*, leaving the keys and the screen using
-  ;; two vocabularies for one thing.  Upper case because `s' sets the query and
-  ;; `l' joins the terms.
-  "S"         #'org-semantic-results-rank-by-meaning
-  "L"         #'org-semantic-results-rank-by-word
+  ;; two vocabularies for one thing.
+  ;;
+  ;; Meta and not control: these are the same keys the query prompt takes, and
+  ;; `C-s' there is worth more than it is here -- a list of passages is prose
+  ;; somebody may well want to isearch.  What this does shadow is the
+  ;; `search-map' prefix, whose members are of little use in a hit list.
+  "M-s"       #'org-semantic-results-rank-by-meaning
+  "M-l"       #'org-semantic-results-rank-by-word
   "l"         #'org-semantic-results-toggle-connector
   "k"         #'org-semantic-results-more-notes
   "K"         #'org-semantic-results-fewer-notes
@@ -600,13 +604,20 @@ front-end is free to rebind."
    (if (equal org-semantic-results-ranking "ask") "semantic" org-semantic-results-ranking)))
 
 ;;;###autoload
-(defun org-semantic-find (query &optional arg)
+(defun org-semantic-find (query &optional arg mode)
   "Search the current buffer's vault for QUERY and show what comes back.
+
+MODE is the ranking to use, and defaults to
+`org-semantic-results-ranking'.  Called interactively it is whatever
+the query prompt was left on: the prompt names the ranking, and
+\\`M-s' and \\`M-l' change it while the query is being typed.
 
 One ranking is used, never both: `semantic' finds notes by meaning
 and `lexical' by word, and the two are ranked separately because a
-score from one has no meaning beside a score from the other.  `r'
-in the results buffer switches.
+score from one has no meaning beside a score from the other.  The
+prompt names the one in force, and `M-s' and `M-l' change it while
+the query is being typed; `M-s' and `M-l' in the results buffer ask
+the same question again of a list already on screen.
 
 With one prefix ARG, ask which ranking; with two, ask about the
 length of the list as well.  See `org-semantic--find-prompts'.
@@ -615,13 +626,15 @@ A query may carry predicates the server reads out of it --
 `tag:x', `dir:x', `todo:x', `lang:x' for a word search, and any of
 them negated with a leading `-' -- with the rest as free text."
   (interactive
-   (list (read-string "Search notes for: " nil 'org-semantic-search-history)
-         current-prefix-arg))
+   (let* ((asks (org-semantic--find-prompts current-prefix-arg))
+          (start (if (or (car asks) (equal org-semantic-results-ranking "ask"))
+                     (org-semantic--read-ranking)
+                   org-semantic-results-ranking))
+          (asked (org-semantic-results--read-query start)))
+     (list (car asked) current-prefix-arg (cdr asked))))
   (let* ((asks (org-semantic--find-prompts arg))
          (vault (org-semantic-vault-or-error))
-         (mode (if (or (car asks) (equal org-semantic-results-ranking "ask"))
-                   (org-semantic--read-ranking)
-                 org-semantic-results-ranking))
+         (mode (or mode org-semantic-results-ranking))
          (k (and (cdr asks) (read-number "Notes at most: " 8)))
          (per-file (and (cdr asks) (read-number "Passages per note at most: " 3)))
          (buffer (org-semantic-results--buffer vault)))
@@ -647,11 +660,46 @@ them negated with a leading `-' -- with the rest as free text."
          ;; `read-string' says outright that INITIAL-INPUT "has been
          ;; superseded by DEFAULT-VALUE and should normally be nil in new
          ;; code".
-         (query (read-string (if thing
-                                 (format "Search notes for (default %s): " thing)
-                               "Search notes for: ")
-                             nil 'org-semantic-search-history thing)))
-    (org-semantic-find query arg)))
+         (start (if (equal org-semantic-results-ranking "ask")
+                    (org-semantic--read-ranking)
+                  org-semantic-results-ranking))
+         (asked (org-semantic-results--read-query start nil thing)))
+    (org-semantic-find (car asked) arg (cdr asked))))
+
+(defun org-semantic-results--read-query (mode &optional initial default)
+  "Read a query to rank by MODE, and return it as (QUERY . MODE).
+
+The prompt names the ranking, because which index answers is half of
+what a query means and it used to be settled in a second question
+after the first.  \\`M-s' and \\`M-l' change it mid-edit -- semantic
+and lexical, the keys the results buffer uses -- and whatever has been
+typed is carried across, so choosing the ranking never costs the
+query.
+
+INITIAL is text to edit; DEFAULT is offered instead, for
+`org-semantic-find-at-point', where the thing at point is a
+suggestion rather than something the user typed."
+  (let ((switch nil)
+        (map (make-sparse-keymap)))
+    (set-keymap-parent map minibuffer-local-map)
+    (define-key map (kbd "M-s")
+                (lambda () (interactive) (setq switch "semantic") (exit-minibuffer)))
+    (define-key map (kbd "M-l")
+                (lambda () (interactive) (setq switch "lexical") (exit-minibuffer)))
+    (let ((text (read-from-minibuffer
+                 ;; A sentence, and the ranking inside it as an adverb: the
+                 ;; prompt is read while typing a query, so "Search notes
+                 ;; semantically for" says what is about to happen where
+                 ;; "Semantic search for" labels a mode.
+                 (format "Search notes %s for%s: "
+                         (if (equal mode "lexical") "lexically" "semantically")
+                         (if default (format " (default %s)" default) ""))
+                 initial map nil 'org-semantic-search-history default)))
+      (if switch
+          ;; What was typed becomes the text to go on editing: the ranking
+          ;; changed, the query did not.
+          (org-semantic-results--read-query switch text default)
+        (cons text mode)))))
 
 (defvar org-semantic-search-history nil
   "Queries searched for, most recent first.
@@ -1820,18 +1868,20 @@ that \\[revert-buffer] and anything calling it programmatically
 agree with `g'."
   (org-semantic-results--search))
 
-(defun org-semantic-results-set-query (query)
-  "Search this vault for QUERY instead.
+(defun org-semantic-results-set-query (query &optional mode)
+  "Search this vault for QUERY instead, ranked by MODE if it is given.
 
 The one prompt here that keeps INITIAL-INPUT, against
 `read-string''s advice, because this command exists to *edit* the
 query rather than to suggest one: offering it as a default would
 mean pressing \\`M-n' before every refinement."
   (interactive
-   (list (read-string "Search notes for: " org-semantic-results--query
-                      'org-semantic-search-history))
+   (let ((asked (org-semantic-results--read-query
+                 org-semantic-results--mode org-semantic-results--query)))
+     (list (car asked) (cdr asked)))
    org-semantic-results-mode)
   (setq org-semantic-results--query query)
+  (when mode (setq org-semantic-results--mode mode))
   (org-semantic-results--search))
 
 (defun org-semantic-results--rank (mode)
@@ -1852,8 +1902,8 @@ mean pressing \\`M-n' before every refinement."
 Two keys rather than one that toggles, which is what this was.  A
 toggle cannot be pressed without first knowing which ranking is in
 force, so the same key means two things depending on state the user
-has to go and read; `S' and `L' each mean one thing and can be pressed
-blind.  They are named for the rankings as the header names them,
+has to go and read; `M-s' and `M-l' each mean one thing and can be
+pressed blind.  They are named for the rankings as the header names them,
 rather than for the meaning-and-word gloss, so that the keys and the
 screen say the same word.
 

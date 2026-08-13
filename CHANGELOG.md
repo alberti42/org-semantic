@@ -229,22 +229,27 @@ now how org-semantic is meant to be used from Emacs.
   an empty list and reads exactly like a query that matched nothing. `C-k` and `=`
   set exact values, each sharing a key with the pair it belongs to — `=` its place
   with `+`, `C-k` its letter with `k`.
-- **The ranking is chosen, not toggled**: `S` for semantic, `L` for lexical —
-  named as the header and the setting name them, rather than after the
-  by-meaning/by-word gloss, so the keys and the screen say one word for one thing.
-  Upper case because `s` edits the query and `l` joins the terms. A toggle
-  could not be pressed without first knowing which ranking was in force, so one key
-  meant two things depending on state you had to go and read. `w` is also the
-  prompt's key for the same choice — though the prompt's version searches by word
-  once, where the key is a statement about the buffer.
+- **The query prompt names the ranking**, and `M-s` / `M-l` change it while the
+  query is being typed: `Search notes semantically for:` becomes `Search notes
+  lexically for:`, carrying across whatever has been typed. Which index answers is
+  half of what a query means, and it used to be a second question asked before the
+  first — so it was settled blind, or under a prefix argument, or not at all.
+- **The ranking is chosen, not toggled**: `M-s` for semantic, `M-l` for lexical,
+  the same two keys in the results buffer as in the prompt, so the gesture is
+  learned once. Named as the header and the setting name them, rather than after
+  the by-meaning/by-word gloss, so the keys and the screen say one word for one
+  thing. A toggle could not be pressed without first knowing which ranking was in
+  force, so one key meant two things depending on state you had to go and read.
+  Meta rather than control because `C-s` is worth more where it is — a list of
+  passages is prose somebody may want to isearch.
 - **Keys moved so that no letter does two jobs.** The offer that searches by word
-  is `[L] Lexical search (by word)`, the same key the results buffer uses for the
-  same choice, leaving a bare `l` for the logical connector. `retry` lost its second label with it — "Wait for it" is
+  is `[l] Lexical search (by word)` — its own initial, like every other offer.
+  `retry` lost its second label with it — "Wait for it" is
   "Try again" everywhere now, one action with one name. A full rebuild is `[b]`
   like a first build, since no failure ever offers both and `[r]` would have
   implied the letter told them apart.
-- `C-u` asks which ranking and nothing else; `C-u C-u` asks about the length of
-  the list as well. It used to take three answers to change one thing.
+- `C-u` asks which ranking to start from and nothing else; `C-u C-u` asks about
+  the length of the list as well. It used to take three answers to change one thing.
 - Searching for the thing at point offers it as a *default* rather than as text
   already typed, so `RET` takes it and typing replaces it.
 

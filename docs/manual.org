@@ -297,10 +297,13 @@ be found before anything has been indexed:
 #+end_src
 
 Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
-searches the vault that note belongs to and shows what came back. One =C-u=
-asks which ranking to use --- the prompt names the index each one reads, since
-they are two indexes and not two orderings of one --- and two =C-u= ask about
-the length of the list as well:
+searches the vault that note belongs to and shows what came back. The prompt
+says which ranking will answer --- =Search notes semantically for:=, or
+=lexically= --- and =M-s= and =M-l= change it while the query is being typed,
+carrying across whatever has been typed so far. They are the same two keys the
+results buffer takes. One =C-u= asks which ranking to start from --- the prompt
+there names the index each one reads, since they are two indexes and not two
+orderings of one --- and two =C-u= ask about the length of the list as well:
 
 #+begin_example
 org-semantic: semantic search for "vacuum bakeout procedure"
@@ -344,19 +347,20 @@ matters, since a section can run to hundreds of lines. It is wired into
 | =TAB=     | unfold the rest of a long passage                          |
 | =g=       | search again --- the notes may have moved on               |
 | =s=       | search for something else                                  |
-| =m=       | swap between ranking by meaning and by word                |
-| =M=       | fold a divided section into one hit                        |
-| =a=       | match any of the words rather than all of them             |
-| =+= / =-= | let more or fewer notes appear                             |
-| =P=       | how many passages one note may contribute                  |
-| ~=~       | say everything known about this passage                     |
+| =M-s= =M-l= | rank by meaning (semantic), or by word (lexical)          |
+| =l=       | join the words with AND or OR --- a word search only        |
+| =k= / =K= | let more or fewer notes appear                              |
+| =C-k=     | that many notes exactly                                    |
+| =+= / =-= | more or fewer passages from each note                      |
+| ~=~       | that many passages exactly                                 |
 | =R=       | index this vault, then search again                        |
-| =C-c C-f= | follow mode: show each hit as you move                      |
+| =f=       | follow mode: show each hit as you move                     |
 | =q=       | bury the list                                              |
 
-=+= and =-= change how many *notes* may appear, not how many hits. A vault kept
-in a few large files answers a large =k= with very few hits until =P= is raised
-too --- see [[#vaults-kept-in-a-few-large-files][Vaults kept in a few large files]].
+The two pairs are two different questions: =k= and =K= widen the *list*, =+= and
+=-= deepen the notes already in it. A vault kept in a few large files answers a
+large =k= with very few hits until the second is raised too --- see
+[[#vaults-kept-in-a-few-large-files][Vaults kept in a few large files]].
 
 A search sent while an index is running is answered from the version committed
 before it, and the header says so. Nothing is lost; the list is a moment behind.
@@ -412,7 +416,7 @@ inside your query:
   the bge-small-en model is not downloaded yet
 
     [d] Download it — fetches the weights and nothing else; minutes
-    [L] Lexical search (by word) — needs no embedding model
+    [l] Lexical search (by word) — needs no embedding model
     [q] leave it
 
   Choice:
@@ -425,7 +429,7 @@ again --- and *only* that: nothing is indexed. Should the index turn out to be
 missing as well, that search says so itself and asks about building it, which is a
 separate question with its own answer.
 
-=L= answers this once by word, and leaves the buffer's own ranking alone; if you
+=l= answers this once by word, and leaves the buffer's own ranking alone; if you
 would rather always search that way, say so in
 ~org-semantic-results-ranking~. =q= or =C-g= declines, which costs nothing: =R=
 indexes the vault whenever you like, and =M-x org-semantic-show-status= says

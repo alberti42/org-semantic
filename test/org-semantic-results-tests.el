@@ -427,6 +427,49 @@ whichever you already had, never the one you were reaching for."
     (should-not (plist-get seen :initial))
     (should (equal (plist-get seen :default) "semantic"))))
 
+(ert-deftest the-query-prompt-names-the-ranking-and-can-change-it ()
+  "Which index answers is half of what a query means, so the prompt says.
+
+It used to be a separate question, asked before the query and only
+under a prefix argument; the ranking was therefore either settled
+blind or not settled at all.  Naming it in the prompt makes it
+visible while the query is being typed, and changing it there must
+not cost the query -- which is the part worth testing, since the
+obvious spelling reads the minibuffer again from empty.
+
+The keys are the results buffer's own two, so the gesture is learned
+once."
+  (let ((prompts nil) (switched nil))
+    (cl-letf (((symbol-function 'exit-minibuffer) #'ignore)
+              ((symbol-function 'read-from-minibuffer)
+               (lambda (prompt &optional initial keymap &rest _)
+                 (push prompt prompts)
+                 (cond
+                  ;; Press `M-l' once, at the point a user would: with
+                  ;; something already typed.
+                  ((not switched)
+                   (setq switched t)
+                   (funcall (lookup-key keymap (kbd "M-l")))
+                   "vacuum bakeout")
+                  ;; And the second prompt starts from whatever came back,
+                  ;; so a reader that dropped it answers with the marker.
+                  (t (or initial "<lost>"))))))
+      ;; The ranking changed, the query did not.
+      (should (equal (org-semantic-results--read-query "semantic")
+                     '("vacuum bakeout" . "lexical"))))
+    (setq prompts (nreverse prompts))
+    (should (= 2 (length prompts)))
+    ;; Each prompt names one ranking and not the other.
+    (should (string-match-p "semantically" (nth 0 prompts)))
+    (should-not (string-match-p "lexically" (nth 0 prompts)))
+    (should (string-match-p "lexically" (nth 1 prompts)))
+    (should-not (string-match-p "semantically" (nth 1 prompts))))
+  ;; And the same two keys ask the same question of a list already drawn.
+  (should (eq (lookup-key org-semantic-results-mode-map (kbd "M-s"))
+              #'org-semantic-results-rank-by-meaning))
+  (should (eq (lookup-key org-semantic-results-mode-map (kbd "M-l"))
+              #'org-semantic-results-rank-by-word)))
+
 (ert-deftest each-ranking-says-which-index-it-reads ()
   "Two words alone invite the wrong guess: one search, ordered twice.
 
@@ -483,8 +526,8 @@ The three prompts share it because they are the same question
 asked from different places; separate histories would mean `M-p'
 in the results buffer could not reach what was typed to get there."
   (let ((prompts nil))
-    (cl-letf (((symbol-function 'read-string)
-               (lambda (_prompt &optional initial history default &rest _)
+    (cl-letf (((symbol-function 'read-from-minibuffer)
+               (lambda (_prompt &optional initial _keymap _read history default &rest _)
                  (push (list history initial default) prompts)
                  "typed"))
               ((symbol-function 'org-semantic-find) #'ignore)
@@ -1219,7 +1262,7 @@ already dismissed."
     ;; And the question named every offer with the key that answers it.
     (let ((prompt (car org-semantic-results-tests--asked)))
       (should (string-match-p "\\[d\\] Download it" prompt))
-      (should (string-match-p "\\[L\\] Lexical search (by word)" prompt))
+      (should (string-match-p "\\[l\\] Lexical search (by word)" prompt))
       (should (string-match-p "\\[q\\] leave it" prompt))
       ;; Each says what it costs.  A single-letter menu that does not is
       ;; asking the reader to remember which of these takes minutes.
@@ -1247,7 +1290,7 @@ long after the binding is gone."
         (setq org-semantic-results--vault "/vault"
               org-semantic-results--query "q"
               org-semantic-results--mode "semantic")
-        (org-semantic-results-tests--answering ?L
+        (org-semantic-results-tests--answering ?l
           (org-semantic-results--render-error
            '(:message "no semantic index" :data (:kind "no-index" :remedy "index"))))
         ;; Asked by word...
