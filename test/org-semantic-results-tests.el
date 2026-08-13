@@ -1134,13 +1134,15 @@ fail is not a gate."
         (should (string-match-p "no index" (buffer-string)))))))
 
 (ert-deftest reverting-asks-again-after-a-question-was-declined ()
-  "`g' is the way back to an offer that was dismissed with \\`C-g'.
+  "The latch means \"not once per reply\", not \"never again\".
 
-The latch stops a re-run search from asking on every reply, and it
-would also make a declined question unreachable for the life of the
-buffer -- which is the whole cost of asking rather than drawing
-something to press.  Reverting is a deliberate act, not a reply
-arriving, so it drops the latch and the question comes back."
+`g' is `revert-buffer', which here re-runs the search; a deliberate
+act rather than a reply arriving, which is the distinction the latch
+is drawn along, so the question is asked afresh if it fails again.
+
+Note what this is *not* about: recovering from a declined offer.
+`R' indexes the vault directly, which is the same call the offer
+would have made."
   (cl-letf (((symbol-function 'org-semantic-results--search) #'ignore))
     (with-temp-buffer
       (org-semantic-results-mode)

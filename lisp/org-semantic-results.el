@@ -1378,14 +1378,17 @@ boundary that is already recorded is work for nothing."
 The notes may have moved on since, and what is here is a picture
 of what they said then.
 
-**The latch is dropped here, and that is what makes a declined
-offer reachable again.**  `config-drift' and `model-missing' are
-asked about once per buffer so that re-running a search does not
-ask per reply -- but the offer is a question now, and a question
-answered with \\`C-g' leaves nothing to press.  Without this, the
-only way back to it would be a fresh results buffer.  Reverting is
-a deliberate act and not a reply arriving, so it is the one place
-where asking again is what the user just requested."
+**The latch is dropped here, because it means \"not once per
+reply\" and not \"never again\".**  `config-drift' and
+`model-missing' are asked about once per buffer so that a search
+re-run on every keystroke does not ask on every reply.  Reverting
+is a deliberate act rather than a reply arriving, which is the
+distinction the latch is drawn along, so what failed is asked about
+afresh.
+
+This is not the way back from a declined offer, and should not be
+described as one: `org-semantic-results-reindex' makes the same call
+the offer would have made, from `R', whenever the user likes."
   (setq org-semantic-results--latched nil)
   (org-semantic-results--search))
 

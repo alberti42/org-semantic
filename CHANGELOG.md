@@ -73,8 +73,9 @@ built. It then publishes a **draft** release for review.
   initial, so `d` for "Download it", `b` for "Build it", `s` for "Search by word",
   `q` or `C-g` to leave it — and each says what it costs, since one of them is
   minutes and the other seconds. The buffer keeps the sentence, so there is still
-  an account of the empty list once the question is gone, and `g` searches again
-  to be asked afresh.
+  an account of the empty list once the question is gone. Declining costs nothing:
+  `R` indexes the vault whenever you like, which is the same call the offer would
+  have made.
 - The message behind a search that has no model reads *"indexing this vault will
   fetch it"* rather than *"index this vault to fetch it"*. It only ever reaches a
   client, which has a keystroke rather than a command line.

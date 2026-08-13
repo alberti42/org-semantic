@@ -353,9 +353,12 @@ inside your query:
 The question is asked in the minibuffer, once, and the results buffer keeps the
 sentence so there is still an account of the empty list after you have answered.
 =d= runs the index, which reports the download as it goes and then runs your
-search again by itself; =q= or =C-g= leaves it, and =g= in the results buffer
-searches again to be asked afresh. =M-x org-semantic-show-status= says the same
-thing before you ask: a model it lists as not cached is one that would refuse.
+search again by itself. =q= or =C-g= leaves it, and declining costs nothing:
+=R= indexes the vault whenever you like, which is the same call the offer would
+have made. =g= re-runs the search --- worth doing in its own right, since the
+notes may have moved on --- and you are asked afresh if it fails again.
+=M-x org-semantic-show-status= says the same thing before you ask: a model it
+lists as not cached is one that would refuse.
 
 Each key is its label's own initial, so the menu is read rather than learnt: the
 same call is =d= where it is offered as "Download it" and =b= where it is
