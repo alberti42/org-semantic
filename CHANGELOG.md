@@ -182,6 +182,17 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
+- **A kept block's `#+begin_` line is inside the passage's span.** It never was:
+  the marker is not part of a chunk's text while its body is, so a passage
+  beginning inside a long block started at the first line of code and ran to an
+  `#+end_` with no beginning. Read back, that is a block that never opened — org
+  fontified the code as prose and a reader saw a stray end marker. Measured at
+  6..96 on a 90-line block whose marker was line 5; it is 5..96 now.
+
+  Every block kind, since the marker rule does not vary with the policy: `src`,
+  `example`, `quote`, `verse` and anything unrecognised. Needs the semantic or
+  word index rebuilding to take effect on notes already indexed, and costs
+  nothing if you do not.
 - **Passages are shown with org's own faces** — emphasis, verbatim, headings,
   block markers, links — by fontifying each in a hidden `org-mode` buffer and
   copying the faces back, which is the trick `magit` uses for diffs.

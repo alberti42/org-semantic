@@ -1776,6 +1776,17 @@ fn chunk_file(
     let mut in_drawer = false;
     // The block whose body we are inside, and whether to keep it.
     let mut in_block: Option<bool> = None;
+    // Where a kept block's `#+begin_` line is, until its body has claimed it.
+    //
+    // The marker itself is never part of a chunk's *text* — nothing is gained by
+    // embedding or indexing `#+begin_src sh` — but it has to be inside the
+    // **span**, or a passage that begins inside a long block starts at the first
+    // line of code and ends at an `#+end_` with no beginning.  Anything reading
+    // the note back over that span then sees a block that never opened: org
+    // fontifies the code as prose, and a human reads a stray end marker.
+    // Measured before this existed, on a 90-line block whose marker was line 5:
+    // the span came back 6..96.
+    let mut block_opened_at: Option<usize> = None;
     // `#+RESULTS:` and bare `: ` fixed-width lines are literal too, but have no
     // `#+end_`; they run until something that is not one of them.
     let mut literal_run: Option<bool> = None;
@@ -1986,8 +1997,23 @@ fn chunk_file(
                 }
                 stands_for = None;
                 in_block = None;
+                block_opened_at = None;
             } else if keep {
+                let was = paras.len();
                 add_line(&mut paras, &mut open, n, line);
+                // A new paragraph, so this is the block's first body line: give
+                // it the marker.  A paragraph already open swallowed the body
+                // instead, and started before the marker anyway.
+                if let (Some(marker), true) = (block_opened_at, paras.len() > was) {
+                    if let Some(p) = paras.last_mut() {
+                        p.start = marker;
+                    }
+                    // Cleared only once it has been *used*.  Clearing it after
+                    // every line lost the marker for a body whose first line is
+                    // blank -- `add_line` opens no paragraph for one, so there
+                    // was nothing yet to give it to.
+                    block_opened_at = None;
+                }
             } else if let Some(i) = stands_for {
                 // Dropped body: the placeholder standing for it grows instead.
                 paras[i].end = n;
@@ -2003,6 +2029,9 @@ fn chunk_file(
                 Target::Lexical => p.lexical,
                 Target::Semantic => p.semantic == InSemantic::Body(true),
             });
+            // Only for a *kept* body: a dropped one is stood for by a
+            // placeholder added below, which already starts at this line.
+            block_opened_at = in_block.filter(|keep| *keep).map(|_| n);
             stands_for = None;
             if target == Target::Semantic && matches!(p.semantic, InSemantic::Marker(_)) {
                 add_line(&mut paras, &mut open, n, &placeholder(&kind, arg));
@@ -5892,6 +5921,124 @@ mod tests {
         let raw = lines[c.start_line - 1..c.end_line].join("\n");
         assert!(raw.contains("echo hello") && raw.contains("echo world"), "{raw}");
         assert!(!c.text.contains("echo hello"), "the text itself must not carry the code");
+    }
+
+    /// A **kept** body brings its `#+begin_` line into the span with it.
+    ///
+    /// The marker is never part of the text — nothing is gained by indexing
+    /// `#+begin_src sh` — but the span is what a passage is read back over, and
+    /// without the marker a passage that begins inside a long block starts at the
+    /// first line of code and ends at an `#+end_` with no beginning.  Read back,
+    /// that is a block that never opened: org fontifies the code as prose, and a
+    /// human sees a stray end marker.
+    ///
+    /// Found by looking at a rendered passage, not by reading: measured at 6..96
+    /// on a 90-line block whose marker was line 5.
+    #[test]
+    fn a_kept_block_spans_the_line_that_opened_it() {
+        // Every kind, because the *policy* differs per kind while the span rule
+        // does not: `src` and `example` are kept for words and stood for by a
+        // placeholder for meaning, `quote` and `verse` are prose in both, and
+        // anything unrecognised is prose until proven otherwise.  A marker is a
+        // marker in all of them.
+        for kind in ["src sh", "example", "quote", "verse", "aside"] {
+            let opener = format!("#+begin_{kind}");
+            let note = format!(
+                "#+title: T\n* Building\n\n{opener}\nthe body here\nand more\n#+end_{}\n",
+                kind.split_whitespace().next().unwrap()
+            );
+            let lines: Vec<&str> = note.lines().collect();
+            for target in [Target::Lexical, Target::Semantic] {
+                let cfg = LangConfig::parse("en-US");
+                // One call per arm: `speaking!' is a temporary that has to live
+                // exactly as long as the call borrowing it, so it cannot be
+                // handed through an `if'.
+                let c = match target {
+                    Target::Lexical => chunk_file(
+                        Path::new("/v/n.org"),
+                        "n.org",
+                        &note,
+                        speaking!(&cfg),
+                        &Config::default(),
+                        target,
+                        &UNSPLIT,
+                    ),
+                    Target::Semantic => chunk_file(
+                        Path::new("/v/n.org"),
+                        "n.org",
+                        &note,
+                        None,
+                        &Config::default(),
+                        target,
+                        &UNSPLIT,
+                    ),
+                };
+                let block = c
+                    .iter()
+                    .find(|c| {
+                        c.text.contains("the body here")
+                            || c.text.contains("[example]")
+                            || c.text.contains("[src sh]")
+                    })
+                    .unwrap_or_else(|| panic!("{kind} under {target:?} left nothing: {c:?}"));
+                assert_eq!(
+                    lines[block.start_line - 1],
+                    opener,
+                    "{kind} under {target:?}: the span must open on the marker"
+                );
+                // And the marker stays out of the *text*, which is the whole
+                // reason the span has to be wider than it.
+                assert!(!block.text.contains(&opener), "{kind}: {}", block.text);
+            }
+        }
+    }
+
+    /// A body whose first line is blank still brings its marker.
+    ///
+    /// `add_line' opens no paragraph for a blank line, so at that point there is
+    /// nothing to hand the marker to -- and clearing the note of it after every
+    /// line, which the first version did, lost it.  It is cleared when it is
+    /// *used*.
+    #[test]
+    fn a_block_that_opens_on_a_blank_line_keeps_its_marker() {
+        let note = "#+title: T\n* Two\n#+begin_src sh\n\nmvn package\n#+end_src\n";
+        let lines: Vec<&str> = note.lines().collect();
+        let cfg = LangConfig::parse("en-US");
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            note,
+            speaking!(&cfg),
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        let block = c.iter().find(|c| c.text.contains("mvn package")).expect("the body is kept");
+        assert_eq!(lines[block.start_line - 1], "#+begin_src sh");
+    }
+
+    /// A `#+end_` with nothing that opened it extends no span backwards.
+    ///
+    /// The malformed-file case, and it needs no code of its own: the marker is
+    /// remembered only when one is *seen*, so a stray end is ordinary text and
+    /// the paragraph around it keeps its own lines.  Asserted because the
+    /// alternative -- reaching back to some earlier line for a beginning that
+    /// does not exist -- would be silent and wrong.
+    #[test]
+    fn a_stray_end_marker_reaches_back_for_nothing() {
+        let note = "#+title: T\n* One\nProse that stands alone.\n\n#+end_src\n\nMore prose.\n";
+        let cfg = LangConfig::parse("en-US");
+        let c = chunk_file(
+            Path::new("/v/n.org"),
+            "n.org",
+            note,
+            speaking!(&cfg),
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        let hit = c.iter().find(|c| c.text.contains("stands alone")).expect("a chunk");
+        assert_eq!(hit.start_line, 3, "the paragraph starts where it starts");
     }
 
     /// Text above every heading belongs to no section, and points at the top of
