@@ -69,6 +69,12 @@ not have.
   search refused in exactly the same words. There is a `download` method now: it
   fetches the weights and builds nothing, and the search that follows asks about a
   missing index separately, as its own question.
+- **Searching while the model downloaded asked you to try again.** A search sent
+  mid-fetch cannot be answered, so it came back as the same refusal with an offer
+  to retry — a poll loop by hand for someone already waiting. When the fetch is
+  this buffer's own, it now says it is waiting; the download's reply re-runs the
+  search by itself. A fetch started elsewhere still offers the retry, since
+  nothing tells us when that one lands.
 - **Searching by word out of a refusal stuck.** `[l]` set the buffer's ranking for
   good, so every later query in it was answered by word with nothing saying why.
   It searches once now and leaves the buffer's own ranking alone —

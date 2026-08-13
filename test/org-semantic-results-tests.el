@@ -1263,6 +1263,44 @@ be said is the size, and that the results arrive by themselves."
         ;; And the refusal is gone: it is answered, not still being reported.
         (should-not (string-match-p "not downloaded yet" text))))))
 
+(ert-deftest a-refusal-for-the-model-we-are-fetching-is-not-a-question ()
+  "Searching mid-download is refused, and that is the wait, not news.
+
+A search sent while the fetch is in flight cannot be answered, so it
+comes back `model-missing' again -- and offering \"try again\" to
+someone already waiting for the very thing is a poll loop by hand.
+The buffer says it is waiting, which is true and which ends by
+itself, because the download's own reply re-runs the search.
+
+Only for a fetch *this* buffer started: one begun by another Emacs
+or a shell tells us nothing when it lands, so there the offer is the
+honest answer."
+  (with-temp-buffer
+    (org-semantic-results-mode)
+    (setq org-semantic-results--vault "/vault" org-semantic-results--query "q")
+    (let ((refusal '(:message "the e5-small model is not downloaded yet"
+                     :data (:kind "model-missing" :model "e5-small"
+                            :remedy "download" :indexing t))))
+      ;; Ours, and running: no question, and the wait is drawn.
+      (setq org-semantic-results--fetching '("e5-small" . 470300000))
+      (org-semantic-results-tests--answering ?q
+        (org-semantic-results--render-error refusal))
+      (should-not org-semantic-results-tests--asked)
+      (should (string-match-p "please wait" (buffer-string)))
+      (should (string-match-p "470 MB" (buffer-string)))
+      ;; Someone else's: asked, because we cannot know when theirs lands.
+      (setq org-semantic-results--fetching nil
+            org-semantic-results--latched nil)
+      (org-semantic-results-tests--answering ?q
+        (org-semantic-results--render-error refusal))
+      (should org-semantic-results-tests--asked)
+      ;; And a different model of ours is somebody else's problem too.
+      (setq org-semantic-results--fetching '("bge-small-en" . nil)
+            org-semantic-results--latched nil)
+      (org-semantic-results-tests--answering ?q
+        (org-semantic-results--render-error refusal))
+      (should org-semantic-results-tests--asked))))
+
 (ert-deftest an-error-with-nothing-to-decide-asks-nothing ()
   "No label means no offers, so there is no question to ask.
 

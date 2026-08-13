@@ -270,6 +270,20 @@ which one the next search will use.")
 (defvar-local org-semantic-results--merge nil
   "Whether a section divided into several passages answers as one hit.")
 
+(defvar-local org-semantic-results--fetching nil
+  "(MODEL . BYTES) while a download this buffer started is running.
+
+What it buys is not asking a question that has already been
+answered: a search sent while the fetch is in flight is refused with
+`model-missing\=' all over again, and offering \"try again\" to
+someone who is already waiting for the thing is a poll loop by hand.
+The buffer says it is waiting instead, which is true and which ends
+by itself, because the download\='s own reply re-runs the search.
+
+Only *ours*.  A fetch started by another Emacs or a shell sends us
+nothing when it lands, so there the offer to search again is the
+honest one -- we cannot know when to stop waiting.")
+
 (defvar-local org-semantic-results--connector nil
   "How this buffer joins the terms of a word query, or nil for the default.
 `and\=' or `or\='; see `org-semantic-results-connector\='.")
@@ -1056,12 +1070,27 @@ question once and no later search in the buffer offered anything,
 with killing the buffer the only way back.  Reported as sticky, and
 from the outside that is exactly what it is.")
 
-(defun org-semantic-results--render-error (error-object)
+(cl-defun org-semantic-results--render-error (error-object)
   "Draw what ERROR-OBJECT says, and what can be done about it."
   (let* ((inhibit-read-only t)
+         (data (plist-get error-object :data))
          (remedy (org-semantic-ui-remedy error-object org-semantic-results--mode))
          (kind (org-semantic-ui-remedy-kind remedy))
          (latching (member kind org-semantic-results--latching)))
+    ;; A refusal for the very model this buffer is fetching is not news, and
+    ;; not a question: it is the wait, arriving as an error because a search
+    ;; cannot be answered mid-download.
+    ;; `org-semantic-results--fetching' first, and not as a formality: without it
+    ;; a `model-missing' carrying no model at all compares nil against nil and
+    ;; every such refusal is drawn as a wait for a download nobody started.
+    (when (and org-semantic-results--fetching
+               (equal kind "model-missing")
+               (equal (plist-get data :model) (car org-semantic-results--fetching)))
+      (org-semantic-results--waiting (car org-semantic-results--fetching)
+                                     (cdr org-semantic-results--fetching))
+      (setq mode-line-process " [downloading]")
+      (force-mode-line-update)
+      (cl-return-from org-semantic-results--render-error))
     (setq mode-line-process nil)
     (force-mode-line-update)
     (if (and latching (member kind org-semantic-results--latched))
@@ -1218,6 +1247,7 @@ be offered."
   (let ((os-buffer (current-buffer)))
     (setq mode-line-process " [downloading]")
     (force-mode-line-update)
+    (setq org-semantic-results--fetching (cons model nil))
     (org-semantic-results--waiting model nil)
     (org-semantic-download
      :model model
@@ -1229,14 +1259,19 @@ be offered."
                  (when-let* ((bytes (plist-get report :bytes)))
                    (when (buffer-live-p os-buffer)
                      (with-current-buffer os-buffer
+                       (setq org-semantic-results--fetching (cons model bytes))
                        (org-semantic-results--waiting model bytes)))))
      :success (lambda (_result)
                 (when (buffer-live-p os-buffer)
                   (with-current-buffer os-buffer
+                    ;; Cleared first: the search this fires may refuse for some
+                    ;; other reason, and that is a question again.
+                    (setq org-semantic-results--fetching nil)
                     (org-semantic-results--search))))
      :failure (lambda (error-object)
                 (when (buffer-live-p os-buffer)
                   (with-current-buffer os-buffer
+                    (setq org-semantic-results--fetching nil)
                     (org-semantic-results--render-error error-object)))))
     (message "org-semantic: downloading %s..." model)))
 
