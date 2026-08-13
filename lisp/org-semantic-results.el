@@ -349,8 +349,10 @@ block."
   "m"         #'org-semantic-results-rank-by-meaning
   "w"         #'org-semantic-results-rank-by-word
   "l"         #'org-semantic-results-toggle-connector
-  "+"         #'org-semantic-results-more-notes
-  "-"         #'org-semantic-results-fewer-notes
+  "k"         #'org-semantic-results-more-notes
+  "K"         #'org-semantic-results-fewer-notes
+  "+"         #'org-semantic-results-more-passages
+  "-"         #'org-semantic-results-fewer-passages
   "R"         #'org-semantic-results-reindex
   ;; Shadows `special-mode-map''s `revert-buffer' for one reason: `C-h m' shows
   ;; the *command's* docstring, so an inherited binding described this as
@@ -1664,6 +1666,29 @@ look as though it had done something."
   "Let fewer notes appear."
   (interactive nil org-semantic-results-mode)
   (org-semantic-results--set-k (/ (or org-semantic-results--k 8) 2)))
+
+(defun org-semantic-results--set-per-file (n)
+  "Let each note contribute N passages, and say what that means."
+  (setq org-semantic-results--per-file (max 1 n))
+  (message "org-semantic: at most %d passages per note (k = %d notes)"
+           org-semantic-results--per-file (or org-semantic-results--k 8))
+  (org-semantic-results--search))
+
+(defun org-semantic-results-more-passages ()
+  "Let each note contribute more passages.
+
+Doubles, as the note cap does: one story for both keys rather than
+two conventions to remember.  It is also the size of step this
+number wants -- the manual\='s advice for a year of meetings in one
+file is 25, which stepping by one does not reach.  An exact value
+comes from the two prefix arguments on a search."
+  (interactive nil org-semantic-results-mode)
+  (org-semantic-results--set-per-file (* 2 (or org-semantic-results--per-file 3))))
+
+(defun org-semantic-results-fewer-passages ()
+  "Let each note contribute fewer passages."
+  (interactive nil org-semantic-results-mode)
+  (org-semantic-results--set-per-file (/ (or org-semantic-results--per-file 3) 2)))
 
 (defun org-semantic-results-reindex (&optional arg)
   "Index this buffer's vault and search again.

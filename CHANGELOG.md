@@ -182,6 +182,11 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
+- **A pair of keys for each cap**: `k`/`K` for how many notes may appear, `+`/`-`
+  for how many passages one note may contribute. `+`/`-` moved off the note cap,
+  which had no mnemonic and left the passage cap reachable only by re-running the
+  search. Both double and halve, and both stop at one — a cap of zero answers with
+  an empty list and reads exactly like a query that matched nothing.
 - **The ranking is chosen, not toggled**: `m` for meaning, `w` for word. A toggle
   could not be pressed without first knowing which ranking was in force, so one key
   meant two things depending on state you had to go and read. `w` is also the

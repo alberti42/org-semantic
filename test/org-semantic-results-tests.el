@@ -821,7 +821,7 @@ marker has to stop claiming lines are folded once they are not."
         (should (= asked 1))))))
 
 (ert-deftest the-two-limits-say-which-of-them-moved ()
-  "`+' counts notes, not hits, which is the surprising half of the interface.
+  "`k' counts notes, not hits, which is the surprising half of the interface.
 
 A vault kept in a few large files answers a large k with very few
 hits, and no amount of raising it helps until the per-note limit
@@ -844,6 +844,38 @@ moves too -- so the message names both."
         (dotimes (_ 6) (org-semantic-results-fewer-notes))
         (should (= org-semantic-results--k 1))
         (should (= asked 8))))))
+
+(ert-deftest each-cap-has-its-own-pair-of-keys ()
+  "`k'/`K' the notes, `+'/`-' the passages each note may contribute.
+
+Both double and halve, which is one story rather than two
+conventions -- and it is the step this number wants: the manual's
+advice for a year of meetings in one file is 25, which stepping by
+one does not reach.
+
+Neither reaches nothing.  A cap of zero answers with an empty list
+and looks exactly like a query that matched none."
+  (let (asked said)
+    (cl-letf (((symbol-function 'org-semantic-ui-ask)
+               (lambda (_driver params) (push (plist-get params :per-file) asked)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (org-semantic-results-tests--drawn
+          (list (org-semantic-results-tests--hit))
+        (org-semantic-results-more-passages)
+        (should (= org-semantic-results--per-file 6))
+        (should (string-match-p "6 passages per note" said))
+        ;; And it says what the other cap is, since one without the other
+        ;; explains nothing about a short list.
+        (should (string-match-p "8 notes" said))
+        (org-semantic-results-fewer-passages)
+        (should (= org-semantic-results--per-file 3))
+        (dotimes (_ 6) (org-semantic-results-fewer-passages))
+        (should (= org-semantic-results--per-file 1))
+        ;; Every press asked again, with the number it had just set.
+        (should (equal (car asked) 1))
+        ;; And the note cap is untouched by any of it.
+        (should-not org-semantic-results--k)))))
 
 (ert-deftest joining-the-terms-is-a-question-only-about-words ()
   "An embedding has no terms to join, so the key refuses.
