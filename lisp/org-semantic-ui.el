@@ -74,7 +74,13 @@ land, silently, somewhere else."
               (pop-to-buffer buffer)
             (pop-to-buffer-same-window buffer))
           (setq window (selected-window)))
-      (setq window (display-buffer buffer)))
+      ;; **Never in the window we were called from.**  Without
+      ;; `inhibit-same-window', `display-buffer' is free to choose the very
+      ;; window holding the list, and previewing then replaces the list with the
+      ;; note -- so walking down with `n' reached the last hit and the buffer
+      ;; you were walking was gone, which reads as the command having jumped
+      ;; into the note.  A preview must leave its own list on screen.
+      (setq window (display-buffer buffer '(nil (inhibit-same-window . t)))))
     (when window
       (with-selected-window window
         (when (buffer-narrowed-p) (widen))

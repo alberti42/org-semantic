@@ -1534,6 +1534,37 @@ addressable: `invisible' hides, it does not delete."
     (should-not (cl-some (lambda (i) (get-text-property i 'invisible out))
                          (number-sequence 0 (1- (length out)))))))
 
+(ert-deftest a-preview-never-takes-the-window-it-was-called-from ()
+  "Otherwise the list you are walking is replaced by the note.
+
+`display-buffer' may choose the selected window, and the selected
+window is the list -- so `n' reached the last hit and the buffer that
+had been scrolling past was gone, which reads as the command having
+jumped into the note.  Reported that way, and it was.
+
+Asserted on the action passed rather than on the resulting layout: a
+batch Emacs has one window and cannot show the difference, while the
+action is the whole of what asks for it."
+  (let (asked)
+    (cl-letf (((symbol-function 'display-buffer)
+               (lambda (_buffer &optional action &rest _)
+                 (setq asked action)
+                 (selected-window)))
+              ((symbol-function 'find-file-noselect)
+               (lambda (&rest _) (current-buffer))))
+      (org-semantic-ui-visit "/vault/a.org" 3)
+      ;; An action is (FUNCTIONS . ALIST), so the alist is the cdr -- `cadr'
+      ;; reaches the first pair of it and nothing else.
+      (should (equal (cdr (assq 'inhibit-same-window (cdr asked))) t))))
+  ;; And `select' is the other half: RET means take me there, so it may.
+  (let (popped)
+    (cl-letf (((symbol-function 'pop-to-buffer-same-window)
+               (lambda (&rest _) (setq popped t) (selected-window)))
+              ((symbol-function 'find-file-noselect)
+               (lambda (&rest _) (current-buffer))))
+      (org-semantic-ui-visit "/vault/a.org" 3 :select t)
+      (should popped))))
+
 (ert-deftest a-fontifier-that-fails-costs-no-results ()
   "A passage is worth more than its faces.
 

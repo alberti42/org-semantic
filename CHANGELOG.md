@@ -63,6 +63,11 @@ not have.
 
 ### Fixed
 
+- **Previewing a hit could replace the list it came from.** `display-buffer` is
+  free to choose the selected window, and the selected window is the results
+  buffer — so walking down with `n` reached the last hit and the list was gone,
+  with a note in its place. A preview now refuses that window; `RET`, which means
+  take me there, still selects.
 - **Offering to download a missing model downloaded nothing.** The offer ran an
   index, and an incremental index of a vault whose notes have not changed embeds
   nothing — so it loaded no model, fetched nothing, reported success, and the next
