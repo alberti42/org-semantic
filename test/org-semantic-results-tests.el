@@ -1133,36 +1133,6 @@ fail is not a gate."
         (should (equal org-semantic-results--mode "semantic"))
         (should (string-match-p "no index" (buffer-string)))))))
 
-(ert-deftest reverting-asks-again-after-a-question-was-declined ()
-  "The latch means \"not once per reply\", not \"never again\".
-
-`g' is `revert-buffer', which here re-runs the search; a deliberate
-act rather than a reply arriving, which is the distinction the latch
-is drawn along, so the question is asked afresh if it fails again.
-
-Note what this is *not* about: recovering from a declined offer.
-`R' indexes the vault directly, which is the same call the offer
-would have made."
-  (cl-letf (((symbol-function 'org-semantic-results--search) #'ignore))
-    (with-temp-buffer
-      (org-semantic-results-mode)
-      (setq org-semantic-results--vault "/vault"
-            org-semantic-results--query "q"
-            org-semantic-results--mode "semantic")
-      (let ((error-object '(:message "no model"
-                            :data (:kind "model-missing" :remedy "index"))))
-        (org-semantic-results-tests--answering nil
-          (org-semantic-results--render-error error-object)
-          (should (member "model-missing" org-semantic-results--latched))
-          ;; Asking again without reverting is refused, which is the latch.
-          (org-semantic-results--render-error error-object)
-          (should (= 1 (length org-semantic-results-tests--asked)))
-          ;; And `g' brings it back.
-          (org-semantic-results--revert)
-          (should-not org-semantic-results--latched)
-          (org-semantic-results--render-error error-object)
-          (should (= 2 (length org-semantic-results-tests--asked))))))))
-
 (ert-deftest an-error-with-nothing-to-decide-asks-nothing ()
   "No label means no offers, so there is no question to ask.
 

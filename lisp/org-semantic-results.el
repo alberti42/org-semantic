@@ -1376,20 +1376,7 @@ boundary that is already recorded is work for nothing."
 (defun org-semantic-results--revert (&optional _ignore-auto _noconfirm)
   "Ask again rather than redraw.
 The notes may have moved on since, and what is here is a picture
-of what they said then.
-
-**The latch is dropped here, because it means \"not once per
-reply\" and not \"never again\".**  `config-drift' and
-`model-missing' are asked about once per buffer so that a search
-re-run on every keystroke does not ask on every reply.  Reverting
-is a deliberate act rather than a reply arriving, which is the
-distinction the latch is drawn along, so what failed is asked about
-afresh.
-
-This is not the way back from a declined offer, and should not be
-described as one: `org-semantic-results-reindex' makes the same call
-the offer would have made, from `R', whenever the user likes."
-  (setq org-semantic-results--latched nil)
+of what they said then."
   (org-semantic-results--search))
 
 (defun org-semantic-results-set-query (query)
