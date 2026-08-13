@@ -224,7 +224,10 @@ now how org-semantic is meant to be used from Emacs.
   an empty list and reads exactly like a query that matched nothing. `C-k` and `=`
   set exact values, each sharing a key with the pair it belongs to — `=` its place
   with `+`, `C-k` its letter with `k`.
-- **The ranking is chosen, not toggled**: `m` for meaning, `w` for word. A toggle
+- **The ranking is chosen, not toggled**: `S` for semantic, `L` for lexical —
+  named as the header and the setting name them, rather than after the
+  by-meaning/by-word gloss, so the keys and the screen say one word for one thing.
+  Upper case because `s` edits the query and `l` joins the terms. A toggle
   could not be pressed without first knowing which ranking was in force, so one key
   meant two things depending on state you had to go and read. `w` is also the
   prompt's key for the same choice — though the prompt's version searches by word

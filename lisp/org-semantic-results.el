@@ -391,8 +391,13 @@ block."
   "M-p"       #'org-semantic-results-previous-note
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
-  "m"         #'org-semantic-results-rank-by-meaning
-  "w"         #'org-semantic-results-rank-by-word
+  ;; Named after the rankings themselves, which is what the header says and what
+  ;; the setting takes: `S'emantic and `L'exical.  `m' for meaning and `w' for
+  ;; word read well and named the *gloss*, leaving the keys and the screen using
+  ;; two vocabularies for one thing.  Upper case because `s' sets the query and
+  ;; `l' joins the terms.
+  "S"         #'org-semantic-results-rank-by-meaning
+  "L"         #'org-semantic-results-rank-by-word
   "l"         #'org-semantic-results-toggle-connector
   "k"         #'org-semantic-results-more-notes
   "K"         #'org-semantic-results-fewer-notes
@@ -458,8 +463,8 @@ whatever is left of this one, sections and all.
 Asking something else:
 
   \\[org-semantic-results-set-query]  edit the query
-  \\[org-semantic-results-rank-by-meaning]  rank by meaning (semantic)
-  \\[org-semantic-results-rank-by-word]  rank by word (lexical)
+  \\[org-semantic-results-rank-by-meaning]  semantic: rank by meaning
+  \\[org-semantic-results-rank-by-word]  lexical: rank by word
   \\[org-semantic-results-toggle-connector]  join the terms with AND or OR
 
 The two rankings are separate indexes, not two orderings of one.  The
@@ -1841,9 +1846,10 @@ mean pressing \\`M-n' before every refinement."
 Two keys rather than one that toggles, which is what this was.  A
 toggle cannot be pressed without first knowing which ranking is in
 force, so the same key means two things depending on state the user
-has to go and read; `m' and `w' each mean one thing and can be
-pressed blind.  `w' is also the key the failure prompt uses for the
-same choice.
+has to go and read; `S' and `L' each mean one thing and can be pressed
+blind.  They are named for the rankings as the header names them,
+rather than for the meaning-and-word gloss, so that the keys and the
+screen say the same word.
 
 This is not the same as the offer in that prompt, which searches by
 word *once* and leaves the buffer's ranking alone: pressing a key
