@@ -102,6 +102,9 @@ went to the same place."
 (defvar org-semantic-results-tests--asked nil
   "Every prompt `read-char-choice' was handed, most recent first.")
 
+(defvar org-semantic-results-tests--logging :unset
+  "What `message-log-max' was while the last prompt was up.")
+
 (defmacro org-semantic-results-tests--answering (key &rest body)
   "Run BODY with the offer prompt answered by KEY, recording what was asked.
 
@@ -122,6 +125,7 @@ for the wrong reason."
      (cl-letf (((symbol-function 'read-char-choice)
                 (lambda (prompt _chars &optional _inhibit)
                   (push prompt org-semantic-results-tests--asked)
+                  (setq org-semantic-results-tests--logging message-log-max)
                   (if ,key ,key (signal 'quit nil)))))
        ,@body)))
 
@@ -1158,6 +1162,54 @@ fail is not a gate."
         (should (= 0 searched))
         (should (equal org-semantic-results--mode "semantic"))
         (should (string-match-p "no index" (buffer-string)))))))
+
+(ert-deftest a-new-search-is-asked-about-again ()
+  "The latch is per search, not per buffer.
+
+Reported as a sticky setting, and from the outside that is what it
+was: answering the missing-model question once meant no later search
+in the buffer offered anything, and killing it was the only way
+back.  A search the user asked for is a question they are entitled
+to be asked again."
+  (cl-letf (((symbol-function 'org-semantic-ui-ask) #'ignore))
+    (with-temp-buffer
+      (org-semantic-results-mode)
+      (setq org-semantic-results--vault "/vault"
+            org-semantic-results--query "q"
+            org-semantic-results--mode "semantic")
+      (let ((refusal '(:message "the e5-small model is not downloaded yet"
+                       :data (:kind "model-missing" :model "e5-small"
+                              :remedy "download"))))
+        (org-semantic-results-tests--answering ?q
+          ;; First search: asked.
+          (org-semantic-results--search)
+          (org-semantic-results--render-error refusal)
+          (should (= 1 (length org-semantic-results-tests--asked)))
+          ;; A second reply to that same search is not asked about twice.
+          (org-semantic-results--render-error refusal)
+          (should (= 1 (length org-semantic-results-tests--asked)))
+          ;; But the next search is.
+          (org-semantic-results--search)
+          (org-semantic-results--render-error refusal)
+          (should (= 2 (length org-semantic-results-tests--asked))))))))
+
+(ert-deftest the-question-is-not-written-into-the-messages-buffer ()
+  "Six lines of menu must not be logged, and must not be left behind.
+
+On Emacs 29 and later `read-char-choice' reads through a real
+minibuffer, so its prompt is logged like any other message and its
+last line stays in the echo area after the answer -- \"Choice: l\"
+sitting there reads as a question still waiting, and a click on it
+opens a transcript of every question already answered.  Neither is
+of any use, and neither was intended."
+  (with-temp-buffer
+    (org-semantic-results-mode)
+    (setq org-semantic-results--vault "/vault" org-semantic-results--query "q")
+    (setq org-semantic-results-tests--logging :unset)
+    (org-semantic-results-tests--answering ?q
+      (org-semantic-results--render-error
+       '(:message "no index" :data (:kind "no-index" :remedy "index"))))
+    (should-not org-semantic-results-tests--logging)))
 
 (ert-deftest an-error-with-nothing-to-decide-asks-nothing ()
   "No label means no offers, so there is no question to ask.

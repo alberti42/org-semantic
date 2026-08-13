@@ -273,9 +273,10 @@ policy that has since drifted, which is a decision they make once.")
   "Whether the last reply said an index was running.")
 
 (defvar-local org-semantic-results--latched nil
-  "The failure kinds already said in full in this buffer.
-See `org-semantic-results--latching' for which ones those are and
-why they are not said twice.")
+  "The failure kinds already said in full for the search in flight.
+Cleared by `org-semantic-results--search'.  See
+`org-semantic-results--latching' for which kinds these are and why
+they are said once.")
 
 
 ;;;; A drawn unit
@@ -543,6 +544,13 @@ results found by word."
                  (with-current-buffer buffer
                    (org-semantic-results--render-error error-object))))))))
   (setq org-semantic-results--asked-mode (or mode org-semantic-results--mode))
+  ;; **A new search is a new question.**  The latch stops one reply being asked
+  ;; about twice; it is not a decision to stop asking, and left uncleared it was
+  ;; exactly that -- once you had answered a missing model, no later search in
+  ;; this buffer offered anything again, and killing the buffer was the only way
+  ;; back.  Reported as a sticky setting, which is what it looks like from the
+  ;; outside.
+  (setq org-semantic-results--latched nil)
   (setq org-semantic-results--started (float-time))
   (setq mode-line-process " [searching]")
   (force-mode-line-update)
@@ -1007,17 +1015,22 @@ against a span of several lines is this and not a blank line."
 ;;;; Errors
 
 (defconst org-semantic-results--latching '("config-drift" "model-missing")
-  "The failures that hold until the user acts on them.
+  "The failures asked about once per search rather than once per reply.
 
-Said in full once and kept to a line after that.  Both of these
-describe a state of the vault rather than of the request: a policy
-that has drifted stays drifted, and a model that is not downloaded
-stays undownloaded, so asking again cannot answer differently.
-Anything else -- a mistyped model, a vault that vanished -- is
-about the request, and the next one may well be fine.
+Said in full the first time and kept to a line after that.  Both of
+these describe a state of the vault rather than of the request: a
+policy that has drifted stays drifted, and a model that is not
+downloaded stays undownloaded, so a *second reply* to the same
+search cannot answer differently.  Anything else -- a mistyped
+model, a vault that vanished -- is about the request.
 
-This is what stops search-as-you-type raising the same prompt on
-every keystroke.")
+**Per search, and that is the whole of it.**
+`org-semantic-results--search' clears the latch, because a search
+the user asked for is a question they are entitled to be asked
+again.  Without that it read as a setting: answer the missing-model
+question once and no later search in the buffer offered anything,
+with killing the buffer the only way back.  Reported as sticky, and
+from the outside that is exactly what it is.")
 
 (defun org-semantic-results--render-error (error-object)
   "Draw what ERROR-OBJECT says, and what can be done about it."
@@ -1063,10 +1076,21 @@ timer\" for having declined an offer."
                                         (org-semantic-ui-remedy-offers remedy))))
     (unless (active-minibuffer-window)
       (let* ((keys (append (mapcar #'org-semantic-ui-offer-key offers) (list ?q)))
+             ;; Nil, so six lines of menu do not land in `*Messages*'.  On Emacs
+             ;; 29 and later `read-char-choice' reads through a real minibuffer,
+             ;; and every prompt it draws is logged like any other message -- so
+             ;; the buffer fills with a transcript of questions already answered,
+             ;; which is of no use to anybody and is what a click on the echo area
+             ;; opens.
+             (message-log-max nil)
              (choice (condition-case nil
                          (read-char-choice
                           (org-semantic-results--ask-prompt remedy offers) keys)
                        (quit ?q))))
+        ;; And clear what is left of it.  The minibuffer exits on the answer but
+        ;; its last line stays in the echo area -- "Choice: l" sitting there after
+        ;; the question is over reads as a prompt still waiting.
+        (message nil)
         (unless (eq choice ?q)
           (funcall (org-semantic-results--offer-action
                     (cdr (cl-find-if (lambda (o)
