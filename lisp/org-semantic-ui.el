@@ -226,8 +226,12 @@ nobody parses the prose to find out which call to make."
               ;; is the one error that carries `indexing', because it is the one
               ;; a client repeats: every keystroke of a search-as-you-type asks
               ;; again, and without it the hundredth refusal reads as the first.
+              ;; "Try again", the same label the `wait' remedy uses, rather than
+              ;; "Wait for it": one action, one label, and the W is now the word
+              ;; index's.  What it means here -- that something is already
+              ;; fetching -- is in the message and in the help beside the key.
               (if (org-semantic-true-p (plist-get data :indexing))
-                  '(("Wait for it" . retry))
+                  '(("Try again" . retry))
                 '(("Download it" . download)))
               (unless (equal mode "lexical")
                 '(("Search by word (lexical)" . lexical)))))
@@ -254,14 +258,16 @@ nobody parses the prose to find out which call to make."
 
 (defconst org-semantic-ui--offer-keys
   '(("Show what changed" . ?c)
-    ("Search by word (lexical)" . ?l))
+    ("Search by word (lexical)" . ?w))
   "Offers whose key is not the first letter of their label.
 
 Two reasons to be here.  A collision: `config-drift' offers \"Search
 anyway\" beside \"Show what changed\", and both begin with an S.  Or
 the initial names the wrong half of the label: \"Search by word
-\(lexical)\" is answered by `l', since what distinguishes it is the
-index it reads and not that it is a search.
+\(lexical)\" is answered by `w', since what distinguishes it is the
+*word* index it reads and not that it is a search.  Not `l' for
+lexical, which would be the same letter the results buffer uses for
+the logical connector -- one letter, two jobs, in one package.
 
 Everything else takes its initial, which is the whole point:
 `[d] Download it' can be read without being learned, where a key

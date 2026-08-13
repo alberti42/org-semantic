@@ -82,8 +82,8 @@ not have.
 
 ### Added
 
-- **`org-semantic-results-connector`** and `l` in the results buffer: join a word
-  query's terms with `and` or `or`. Named for the logic rather than for the wire,
+- **`org-semantic-results-connector`** and `l` — for logic — in the results buffer:
+  join a word query's terms with `and` or `or`. Named for the logic rather than for the wire,
   which spells it as a boolean called `any` — the server's vocabulary, and no
   reason for a reader of Emacs to learn it. `AND`, `OR`, `NOT` and parentheses are
   writable in the query itself, so this is the default rather than the only way to
@@ -172,6 +172,11 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
+- **Two keys moved so that no letter does two jobs.** The ranking toggle is `r`,
+  for ranking, where it was `m` for a "mode" this package deliberately stopped
+  calling that; and the offer that searches by word is `[w]`, freeing `l` for the
+  logical connector. `retry` lost its second label with it — "Wait for it" is
+  "Try again" everywhere now, one action with one name.
 - `C-u` asks which ranking and nothing else; `C-u C-u` asks about the length of
   the list as well. It used to take three answers to change one thing.
 - Searching for the thing at point offers it as a *default* rather than as text

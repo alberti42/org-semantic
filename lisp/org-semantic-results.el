@@ -111,7 +111,8 @@ nothing."
 
 `and\=' answers with the notes carrying every term, `or\=' with those
 carrying any of them.  It is the *default* for a search; `l\=' in the
-results buffer swaps it for the one in front of you.
+results buffer -- `l\=' for logic -- swaps it for the one in front of
+you, as `r\=' swaps the ranking.
 
 A word search only.  An embedding has no terms to join, so the
 semantic ranking ignores this and the key refuses rather than
@@ -247,7 +248,7 @@ when there are not.")
 (defvar-local org-semantic-results--mode "semantic"
   "Which ranking this buffer will ask for next, \"semantic\" or \"lexical\".
 
-What the buffer *wants*, which `m' changes and a one-off search
+What the buffer *wants*, which `r' changes and a one-off search
 does not.  See `org-semantic-results--asked-mode' for what is on
 screen.")
 
@@ -331,7 +332,7 @@ block."
   "M-p"       #'org-semantic-results-previous-note
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
-  "m"         #'org-semantic-results-toggle-ranking
+  "r"         #'org-semantic-results-toggle-ranking
   "l"         #'org-semantic-results-toggle-connector
   "+"         #'org-semantic-results-more-notes
   "-"         #'org-semantic-results-fewer-notes
@@ -458,7 +459,7 @@ front-end is free to rebind."
 
 One ranking is used, never both: `semantic' finds notes by meaning
 and `lexical' by word, and the two are ranked separately because a
-score from one has no meaning beside a score from the other.  `m'
+score from one has no meaning beside a score from the other.  `r'
 in the results buffer switches.
 
 With one prefix ARG, ask which ranking; with two, ask about the
