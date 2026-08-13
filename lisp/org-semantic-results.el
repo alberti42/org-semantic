@@ -751,13 +751,14 @@ there is no index reads as an answer, and it is not one."
                                  (eq (org-semantic-results--joined) 'or)
                                  "any term (OR)")))))
     (insert (propertize
-             (format "org-semantic  %s  %s\n"
+             (format "org-semantic: %s search%s\n"
                      (or org-semantic-results--asked-mode
                          org-semantic-results--mode)
+                     ;; No dangling "for" when there is nothing to name.
                      (if (and org-semantic-results--query
                               (not (string-empty-p org-semantic-results--query)))
-                         (format "%S" org-semantic-results--query)
-                       "(no query)"))
+                         (format " for %S" org-semantic-results--query)
+                       ""))
              'face 'org-semantic-results-header
              'org-semantic-header t 'read-only t 'front-sticky t))
     (insert (propertize

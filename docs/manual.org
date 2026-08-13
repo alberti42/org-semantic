@@ -237,7 +237,7 @@ they are two indexes and not two orderings of one --- and two =C-u= ask about
 the length of the list as well:
 
 #+begin_example
-org-semantic  semantic  "vacuum bakeout procedure"
+org-semantic: semantic search for "vacuum bakeout procedure"
 ~/notes  ·  k=8 notes  ·  per-file=3 passages
 6 notes, 11 passages in 0.31 s
 
