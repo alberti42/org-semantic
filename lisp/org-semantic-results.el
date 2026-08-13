@@ -157,17 +157,12 @@ Costs about 0.8 ms a passage, against 0.1 ms unfontified, and needs
 org loaded --- which it will be, since you are searching org notes.
 Where it is not, this silently does nothing rather than failing.
 
-One case is wrong, and it is narrow: a kept block with a *blank line*
-in it.  A blank line ends a paragraph, so such a block becomes several,
-and only the first of them takes the block's opening line into its span
--- so a passage made of a later paragraph shows an `#+end_' with
-nothing that opened it, and org fontifies the text as prose.  Measured
-on a 60-line `#+begin_quote' of two paragraphs: the second came back
-35..65, where the marker is line 3.
-
-A block *without* a blank line is whole in every passage of it,
-because the marker is in the span and a paragraph too long for one
-passage gives each of its pieces the whole paragraph.
+A block is always whole here, which took two fixes on the Rust side to
+be true: its `#+begin_' line is inside the span, and a blank line
+inside it does not end a paragraph -- so a block is one paragraph, and
+a paragraph too long for one passage gives each of its pieces the whole
+paragraph.  A passage therefore never shows a marker without its
+partner, and org never has to guess.
 
 Two things that are *not* problems, though they sound like they should
 be.  Folding away the tail of a passage hides nothing from org: the

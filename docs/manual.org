@@ -280,20 +280,14 @@ would leave a line nobody can point at.
 It costs about 0.8 ms a passage against 0.1 ms without, and needs org loaded,
 which it will be. Set the option to nil for plain text.
 
-One case comes out wrong, and it is narrow: a kept block with a *blank line* in
-it. A blank line ends a paragraph, so such a block is several of them, and only
-the first takes the block's opening line into its span --- a passage made of a
-later paragraph therefore shows an =#+end_quote= with nothing that opened it, and
-org paints the text as prose. A block without a blank line is whole in every
-passage of it.
-
-Three things that are *not* problems, though they sound as though they should be.
-Folding: the whole passage is fontified before its tail is hidden, so a hidden
-=#+end_src= still counts. Emphasis: a paragraph too long for one passage gives
-every piece of itself the whole paragraph's span, so what you see is always a
-complete paragraph. And a block's opening line, which is inside the span
-deliberately --- it is not in the index, and it is in the span so that reading the
-note back shows a block that opened.
+A *fragment* of a document is what org is being asked to fontify, and three
+things that might spoil that do not. Folding: the whole passage is fontified
+before its tail is hidden, so a hidden =#+end_src= still counts. Emphasis: a
+paragraph too long for one passage gives every piece of itself the whole
+paragraph's span, so what you see is always a complete paragraph. And blocks: a
+block is one paragraph however many blank lines are in it, and its =#+begin_=
+line is inside the span, so a passage never shows one marker without the other.
+That last one took two fixes to be true.
 
 A vault says which directory it is, in its own =.dir-locals.el=, so that it can
 be found before anything has been indexed:

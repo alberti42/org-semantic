@@ -189,6 +189,13 @@ now how org-semantic is meant to be used from Emacs.
   fontified the code as prose and a reader saw a stray end marker. Measured at
   6..96 on a 90-line block whose marker was line 5; it is 5..96 now.
 
+  And **a blank line inside a block no longer divides it**, which was the other
+  half: a blank line ends a paragraph, so a quote of two paragraphs became two
+  chunks and each kept only the marker on its own side — one opening a block it
+  never closed, the other closing one that never opened. Org treats a block as one
+  element and its blank lines as body; so does this now, which means a block is
+  whole in every passage of it.
+
   Every block kind, since the marker rule does not vary with the policy: `src`,
   `example`, `quote`, `verse` and anything unrecognised. Needs the semantic or
   word index rebuilding to take effect on notes already indexed, and costs

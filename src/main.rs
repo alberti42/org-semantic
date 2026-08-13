@@ -2000,7 +2000,31 @@ fn chunk_file(
                 block_opened_at = None;
             } else if keep {
                 let was = paras.len();
-                add_line(&mut paras, &mut open, n, line);
+                if line.trim().is_empty() {
+                    // **A blank line inside a block is content, not a paragraph
+                    // break.**  Org agrees: a block is one element, and what is
+                    // between its markers is its body.
+                    //
+                    // Letting `add_line` end the paragraph split a block in two,
+                    // and each half then kept only the marker on its own side --
+                    // so a quote of two paragraphs answered as one passage
+                    // opening `#+begin_quote' and never closing it, and another
+                    // closing a block that never opened.  Measured: 3..33 and
+                    // 35..65 on a 60-line quote whose markers are lines 3 and 65.
+                    //
+                    // One paragraph instead, so packing cannot divide it: the
+                    // packers work paragraph by paragraph, and the only thing
+                    // that cuts inside one is `hard_split', whose remnants carry
+                    // the whole paragraph's span and therefore the whole block.
+                    if open {
+                        if let Some(p) = paras.last_mut() {
+                            p.text.push('\n');
+                            p.end = n;
+                        }
+                    }
+                } else {
+                    add_line(&mut paras, &mut open, n, line);
+                }
                 // A new paragraph, so this is the block's first body line: give
                 // it the marker.  A paragraph already open swallowed the body
                 // instead, and started before the marker anyway.
@@ -6015,6 +6039,68 @@ mod tests {
         );
         let block = c.iter().find(|c| c.text.contains("mvn package")).expect("the body is kept");
         assert_eq!(lines[block.start_line - 1], "#+begin_src sh");
+    }
+
+    /// A blank line inside a block does not divide it.
+    ///
+    /// Org treats a block as one element and its blank lines as body, and this
+    /// follows: otherwise a quote of two paragraphs became two chunks, and each
+    /// kept only the marker on its own side -- one opening a block it never
+    /// closed, the other closing one that never opened.  Measured before the
+    /// fix, on a 60-line quote whose markers are lines 3 and 65: 3..33 and
+    /// 35..65.
+    ///
+    /// One paragraph is enough to make it whole everywhere, without widening a
+    /// span or dropping a chunk: the packers work paragraph by paragraph, and
+    /// `hard_split' -- the only thing that cuts inside one -- gives every
+    /// remnant the whole paragraph's span.
+    #[test]
+    fn a_blank_line_inside_a_block_does_not_divide_it() {
+        // Budgeted in words, small enough that two paragraphs cannot share a
+        // chunk -- otherwise the packer puts them back together and the two
+        // behaviours are indistinguishable, which is what the first draft of
+        // this test could not tell apart.
+        let cfg = Config {
+            chunk: Chunking { semantic_tokens: 8, ..Chunking::default() },
+            ..Config::default()
+        };
+        let body = "first half of the quotation\n\nsecond half of the quotation\n";
+        let chunks = |text: String| {
+            chunk_file(Path::new("/v/n.org"), "n.org", &text, None, &cfg, Target::Semantic, &WORDS)
+        };
+        // Bare prose at this budget divides.  That is the control, and without
+        // it this test cannot fail.
+        let plain = chunks(format!("#+title: T\n* Sayings\n{body}"));
+        assert_eq!(plain.len(), 2, "the budget must be small enough to divide: {plain:?}");
+
+        // The same prose inside a quote: one paragraph, so one chunk, whole --
+        // and `quote' is kept for meaning as well as words, being prose someone
+        // set off rather than machine output.
+        let quoted = format!("#+title: T\n* Sayings\n#+begin_quote\n{body}#+end_quote\n");
+        let inside = chunks(quoted.clone());
+        let lines: Vec<&str> = quoted.lines().collect();
+        // It may still be *cut*, since one paragraph can outgrow any budget --
+        // but a `hard_split' remnant carries the whole paragraph's span, so what
+        // matters, and what is asserted, is that every piece of it is read back
+        // as the whole block.  Asserting one chunk instead would be asserting
+        // the budget.
+        for q in &inside {
+            assert_eq!(
+                lines[q.start_line - 1],
+                "#+begin_quote",
+                "every piece opens the block: {q:?}"
+            );
+            assert_eq!(lines[q.end_line - 1], "#+end_quote", "and closes it: {q:?}");
+        }
+        // And between them they still hold all of it.
+        let all: String = inside.iter().map(|c| c.text.as_str()).collect();
+        assert!(all.contains("first half") && all.contains("second half"), "{all:?}");
+        // The control divided into pieces with *different* spans, which is the
+        // thing a block must not do.
+        assert!(
+            plain[0].start_line != plain[1].start_line,
+            "bare prose divides where a block does not: {plain:?}"
+        );
     }
 
     /// A `#+end_` with nothing that opened it extends no span backwards.
