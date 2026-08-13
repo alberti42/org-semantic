@@ -105,39 +105,21 @@ went to the same place."
 (defmacro org-semantic-results-tests--answering (key &rest body)
   "Run BODY with the offer prompt answered by KEY, recording what was asked.
 
-Two things are stood in for, and both are the point rather than
-scaffolding.  `run-at-time' is collapsed to a direct call, because
-the question is deliberately handed to a timer so that it is not
-asked from inside `jsonrpc.el''s process filter -- a test that let
-the timer really wait would assert nothing in batch.  And
-`read-char-choice' is the question itself, so answering it is how a
+`read-char-choice' is the question, so standing in for it is how a
 keystroke gets made without a terminal.
 
-KEY may be nil, which stands for `C-g': the function signals `quit'
+KEY may be nil, which stands for `C-g': the stub signals `quit'
 instead of returning, since that is what a real dismissal does and
-the code has to survive it inside a timer.
+the code has to survive it.
 
 What was asked is *reset* rather than rebound, so it outlives BODY
-and a test may assert on it afterwards.  A `let' would unwind on
-the way out and read as \"nothing was asked\", which is a passing
-test for the wrong reason and cost two of these before this comment
-existed.
-
-Only *our* timer is collapsed, matched by name, and everything else
-is delegated to the real `run-at-time'.  Replacing it wholesale
-looks equivalent and is not: `jsonrpc.el' schedules its own dispatch
-on `run-at-time 0' and its request timeouts on the same function, so
-a blanket stub fires every timeout immediately and every request
-fails with \"Timed out\"."
+and a test may assert on it afterwards.  A `let' would unwind on the
+way out and read as \"nothing was asked\", which is a passing test
+for the wrong reason."
   (declare (indent 1))
-  `(let ((real (symbol-function 'run-at-time)))
+  `(progn
      (setq org-semantic-results-tests--asked nil)
-     (cl-letf (((symbol-function 'run-at-time)
-                (lambda (time repeat fn &rest args)
-                  (if (eq fn 'org-semantic-results--ask-now)
-                      (progn (apply fn args) nil)
-                    (apply real time repeat fn args))))
-               ((symbol-function 'read-char-choice)
+     (cl-letf (((symbol-function 'read-char-choice)
                 (lambda (prompt _chars &optional _inhibit)
                   (push prompt org-semantic-results-tests--asked)
                   (if ,key ,key (signal 'quit nil)))))
@@ -1024,10 +1006,13 @@ otherwise redraw the same prompt ten times."
   (with-temp-buffer
     (org-semantic-results-mode)
     (setq org-semantic-results--vault "/vault" org-semantic-results--query "q")
-    (dotimes (_ 3)
-      (org-semantic-results--render-error
-       '(:message "no such model" :data (:kind "unknown-model" :known ["a"]))))
-    (should-not org-semantic-results--latched)))
+    (org-semantic-results-tests--answering ?q
+      (dotimes (_ 3)
+        (org-semantic-results--render-error
+         '(:message "no such model" :data (:kind "unknown-model" :known ["a"]))))
+      (should-not org-semantic-results--latched)
+      ;; Asked all three times, since the next request really may differ.
+      (should (= 3 (length org-semantic-results-tests--asked))))))
 
 (ert-deftest the-drift-prompt-is-raised-once ()
   "A drifted policy holds until the user acts, so it is said once.

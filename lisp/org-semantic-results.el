@@ -998,47 +998,24 @@ every keystroke.")
 Nothing is drawn in the buffer for this: the buffer states the
 problem and the question is asked once, where a question belongs.
 
-**Not called from the reply callback, and that is the whole of the
-care this needs.**  `read-char-choice' waits for input, and waiting
-for input runs the event loop -- from inside `jsonrpc.el''s process
-filter that means the filter re-entered while it is part-way
-through a message, with a half-read frame on the floor.  So the
-question is handed to a zero-delay timer, which runs it once the
-filter has returned.
-
 An active minibuffer is left alone.  The reply arrives whenever it
 arrives, and the user may be typing something else entirely by
-then -- the hazard that kept this a row of buttons for a while.  A
-prompt cannot be raised over another prompt without eating the
-keystrokes meant for it, so in that case the sentence in the
-buffer is the whole answer and `g' re-runs the search to be asked
-again."
-  (when-let* ((offers (org-semantic-ui-remedy-offers remedy))
-              (keyed (cl-remove-if-not #'org-semantic-ui-offer-key offers)))
-    ;; A named function rather than a closure, so that what is scheduled can be
-    ;; recognised: `jsonrpc.el' puts its own dispatch on `run-at-time 0' too
-    ;; (jsonrpc.el:801,930) and its request timeouts on the same function, so a
-    ;; test that replaced `run-at-time' wholesale fired every timeout at once
-    ;; and every request came back "Timed out".
-    (run-at-time 0 nil #'org-semantic-results--ask-now
-                 (current-buffer) keyed remedy error-object)))
+then; a prompt cannot be raised over another prompt without eating
+the keystrokes meant for it.  The sentence in the buffer is then the
+whole answer, and nothing is lost -- `org-semantic-results-reindex'
+makes the same call the offer would have made.
 
-(defun org-semantic-results--ask-now (buffer offers remedy error-object)
-  "Ask in BUFFER about REMEDY, offering OFFERS, and act on the answer.
-
-ERROR-OBJECT is what the offers were derived from, and carries what
-some of them need -- the models to choose between, the settings
-that drifted.  See `org-semantic-results--ask', which schedules
-this and holds the reasoning."
-  (when (and (buffer-live-p buffer) (not (active-minibuffer-window)))
-    (with-current-buffer buffer
+`quit' is caught because this runs from a timer: `jsonrpc.el'
+dispatches each message from one of its own rather than from the
+process filter, so an escaping \\`C-g' would be \"Error running
+timer\" for having declined an offer."
+  (when-let* ((offers (cl-remove-if-not #'org-semantic-ui-offer-key
+                                        (org-semantic-ui-remedy-offers remedy))))
+    (unless (active-minibuffer-window)
       (let* ((keys (append (mapcar #'org-semantic-ui-offer-key offers) (list ?q)))
-             (prompt (org-semantic-results--ask-prompt remedy offers))
-             ;; `read-char-choice' rings and re-asks on anything else, so C-g is
-             ;; the only way out besides the keys -- and it signals `quit', which
-             ;; reaches a timer as an error and a backtrace.
              (choice (condition-case nil
-                         (read-char-choice prompt keys)
+                         (read-char-choice
+                          (org-semantic-results--ask-prompt remedy offers) keys)
                        (quit ?q))))
         (unless (eq choice ?q)
           (funcall (org-semantic-results--offer-action
