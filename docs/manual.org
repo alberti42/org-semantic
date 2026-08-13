@@ -323,6 +323,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
 | ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
+| ~org-semantic-results-connector~     | ='and'=        | join a word query's terms with =and= or =or=                 |
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 | ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |

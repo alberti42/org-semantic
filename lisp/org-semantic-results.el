@@ -106,6 +106,26 @@ nothing."
                  (const :tag "By word" "lexical")
                  (const :tag "Ask each time" "ask")))
 
+(defcustom org-semantic-results-connector 'and
+  "How the terms of a word search are joined: `and\=' or `or\='.
+
+`and\=' answers with the notes carrying every term, `or\=' with those
+carrying any of them.  It is the *default* for a search; `l\=' in the
+results buffer swaps it for the one in front of you.
+
+A word search only.  An embedding has no terms to join, so the
+semantic ranking ignores this and the key refuses rather than
+pretending to have changed something.
+
+Named for the logic and not for the wire, which spells the same
+thing as a boolean called `any\=' -- that is the server\='s spelling of
+a detail, and there is no reason to make a reader of Emacs learn it.
+`AND\=' and `OR\=' are also writable in the query itself, with
+parentheses and `NOT\=', so this is the default rather than the only
+way to say it."
+  :type '(choice (const :tag "All terms (AND)" and)
+                 (const :tag "Any term (OR)" or)))
+
 (defcustom org-semantic-results-display-action
   '(display-buffer-reuse-mode-window)
   "How the results buffer asks to be shown, as a `display-buffer' ACTION.
@@ -249,8 +269,9 @@ which one the next search will use.")
 (defvar-local org-semantic-results--merge nil
   "Whether a section divided into several passages answers as one hit.")
 
-(defvar-local org-semantic-results--any nil
-  "Whether a word query matches notes carrying any of its terms.")
+(defvar-local org-semantic-results--connector nil
+  "How this buffer joins the terms of a word query, or nil for the default.
+`and\=' or `or\='; see `org-semantic-results-connector\='.")
 
 (defvar-local org-semantic-results--model nil
   "Which model to search, or nil for `org-semantic-model'.")
@@ -311,6 +332,7 @@ block."
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
   "m"         #'org-semantic-results-toggle-ranking
+  "l"         #'org-semantic-results-toggle-connector
   "+"         #'org-semantic-results-more-notes
   "-"         #'org-semantic-results-fewer-notes
   "R"         #'org-semantic-results-reindex
@@ -562,6 +584,10 @@ results found by word."
   (org-semantic-ui-ask org-semantic-results--driver
                        (org-semantic-results--params)))
 
+(defun org-semantic-results--joined ()
+  "How this buffer joins the terms of a word query, `and\=' or `or\='."
+  (or org-semantic-results--connector org-semantic-results-connector))
+
 (defun org-semantic-results--params ()
   "What this buffer wants, as parameters for a search."
   (list :query (or org-semantic-results--query "")
@@ -571,7 +597,8 @@ results found by word."
         :merge-by-section org-semantic-results--merge
         :mode org-semantic-results--asked-mode
         :model (or org-semantic-results--model org-semantic-model)
-        :any org-semantic-results--any
+        ;; `any\=' is the server\='s spelling; this is the one place the two meet.
+        :any (eq (org-semantic-results--joined) 'or)
         ;; Absent when waived, and the driver takes that literally --
         ;; which is the whole of how a drifted policy is searched anyway.
         :config (and org-semantic-results--policy org-semantic-config)))
@@ -705,8 +732,8 @@ there is no index reads as an answer, and it is not one."
                                     (or org-semantic-results--per-file 3))
                             (and org-semantic-results--merge "merged by section")
                             (and (equal org-semantic-results--asked-mode "lexical")
-                                 org-semantic-results--any
-                                 "any term")))))
+                                 (eq (org-semantic-results--joined) 'or)
+                                 "any term (OR)")))))
     (insert (propertize
              (format "org-semantic  %s  %s\n"
                      (or org-semantic-results--asked-mode
@@ -1530,6 +1557,22 @@ semantic one has not been built."
         (if (equal org-semantic-results--mode "lexical") "semantic" "lexical"))
   (message "org-semantic: ranking by %s"
            (if (equal org-semantic-results--mode "lexical") "word" "meaning"))
+  (org-semantic-results--search))
+
+(defun org-semantic-results-toggle-connector ()
+  "Swap how the terms of this word search are joined: AND or OR.
+
+Refuses on a semantic search rather than appearing to work: an
+embedding has no terms to join, and the server ignores the parameter
+there instead of failing, so a key that quietly flipped it would
+look as though it had done something."
+  (interactive nil org-semantic-results-mode)
+  (unless (equal org-semantic-results--mode "lexical")
+    (user-error "Only a word search has terms to join"))
+  (setq org-semantic-results--connector
+        (if (eq (org-semantic-results--joined) 'or) 'and 'or))
+  (message "org-semantic: joining the terms with %s"
+           (upcase (symbol-name org-semantic-results--connector)))
   (org-semantic-results--search))
 
 (defun org-semantic-results--set-k (k)

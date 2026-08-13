@@ -814,6 +814,45 @@ moves too -- so the message names both."
         (should (= org-semantic-results--k 1))
         (should (= asked 8))))))
 
+(ert-deftest joining-the-terms-is-a-question-only-about-words ()
+  "An embedding has no terms to join, so the key refuses.
+
+The server ignores the parameter on a semantic search rather than
+failing, so a key that flipped it quietly would look as though it
+had worked."
+  (cl-letf (((symbol-function 'org-semantic-ui-ask) #'ignore))
+    (org-semantic-results-tests--drawn
+        (list (org-semantic-results-tests--hit))
+      (setq org-semantic-results--mode "semantic")
+      (should-error (org-semantic-results-toggle-connector) :type 'user-error)
+      (should-not org-semantic-results--connector)
+      (setq org-semantic-results--mode "lexical")
+      (org-semantic-results-toggle-connector)
+      (should (eq 'or (org-semantic-results--joined)))
+      ;; And back, from wherever the default happened to be.
+      (org-semantic-results-toggle-connector)
+      (should (eq 'and (org-semantic-results--joined))))))
+
+(ert-deftest the-connector-reaches-the-wire-as-the-boolean-it-is ()
+  "`and'/`or' here, `any' on the wire, and one place where they meet.
+
+The server's spelling is a boolean called `any', which is a detail
+of its own vocabulary; naming the setting after the logic keeps that
+out of the user's way.  What must not drift is the mapping."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit))
+    (let ((org-semantic-results-connector 'and))
+      (setq org-semantic-results--connector nil)
+      (should-not (plist-get (org-semantic-results--params) :any))
+      ;; The buffer's own choice wins over the default...
+      (setq org-semantic-results--connector 'or)
+      (should (eq t (plist-get (org-semantic-results--params) :any))))
+    ;; ...and with no choice made, the default decides.
+    (let ((org-semantic-results-connector 'or))
+      (setq org-semantic-results--connector nil)
+      (should (eq t (plist-get (org-semantic-results--params) :any))))))
+
+
 ;;;; One search in flight
 
 (ert-deftest at-most-one-search-is-ever-in-flight ()

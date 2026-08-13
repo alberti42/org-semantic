@@ -80,10 +80,20 @@ not have.
   vault could come back as German. One loader at a time now, and the staging file
   carries the process id, which also covers two vaults indexing at once.
 
+### Added
+
+- **`org-semantic-results-connector`** and `l` in the results buffer: join a word
+  query's terms with `and` or `or`. Named for the logic rather than for the wire,
+  which spells it as a boolean called `any` — the server's vocabulary, and no
+  reason for a reader of Emacs to learn it. `AND`, `OR`, `NOT` and parentheses are
+  writable in the query itself, so this is the default rather than the only way to
+  say it.
+
 ### Removed
 
 - **Four keys in the results buffer**: `=` (describe the hit), `P` (per-file cap),
-  `a` (any-term word search) and `M` (fold a split section into one hit). Each
+  `a` (the same question, in the wire's vocabulary) and `M` (fold a split section
+  into one hit). Each
   turned a command-line flag into a keystroke because the flag existed. `=` in
   particular reported the heading's line, the tags and the `:ID:` to the echo
   area, where the first two are already in the block's head.
