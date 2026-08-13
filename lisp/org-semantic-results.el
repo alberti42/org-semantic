@@ -465,7 +465,7 @@ Asking something else:
   \\[org-semantic-results-set-query]  edit the query
   \\[org-semantic-results-rank-by-meaning]  semantic: rank by meaning
   \\[org-semantic-results-rank-by-word]  lexical: rank by word
-  \\[org-semantic-results-toggle-connector]  join the terms with AND or OR
+  \\[org-semantic-results-toggle-connector]  toggle the logical connector between AND and OR
 
 The two rankings are separate indexes, not two orderings of one.  The
 connector is a word search only, so it refuses on the other.
@@ -1858,7 +1858,7 @@ here is a statement about what this buffer is for."
   (org-semantic-results--rank "lexical"))
 
 (defun org-semantic-results-toggle-connector ()
-  "Swap how the terms of this word search are joined: AND or OR.
+  "Toggle the logical connector between AND and OR.
 
 Refuses on a semantic search rather than appearing to work: an
 embedding has no terms to join, and the server ignores the parameter
