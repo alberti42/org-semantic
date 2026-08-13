@@ -459,11 +459,12 @@ once."
                      '("vacuum bakeout" . "lexical"))))
     (setq prompts (nreverse prompts))
     (should (= 2 (length prompts)))
-    ;; Each prompt names one ranking and not the other.
-    (should (string-match-p "semantically" (nth 0 prompts)))
-    (should-not (string-match-p "lexically" (nth 0 prompts)))
-    (should (string-match-p "lexically" (nth 1 prompts)))
-    (should-not (string-match-p "semantically" (nth 1 prompts))))
+    ;; Each prompt names one ranking and not the other, in the words the
+    ;; header and the setting use -- not a gloss of them.
+    (should (string-match-p "\\`Semantic search" (nth 0 prompts)))
+    (should-not (string-match-p "exical" (nth 0 prompts)))
+    (should (string-match-p "\\`Lexical search" (nth 1 prompts)))
+    (should-not (string-match-p "emantic" (nth 1 prompts))))
   ;; And the same two keys ask the same question of a list already drawn.
   (should (eq (lookup-key org-semantic-results-mode-map (kbd "M-s"))
               #'org-semantic-results-rank-by-meaning))

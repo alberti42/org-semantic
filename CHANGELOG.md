@@ -90,6 +90,25 @@ not have.
   vault could come back as German. One loader at a time now, and the staging file
   carries the process id, which also covers two vaults indexing at once.
 
+- **A kept block's `#+begin_` line is inside the passage's span.** It never was:
+  the marker is not part of a chunk's text while its body is, so a passage
+  beginning inside a long block started at the first line of code and ran to an
+  `#+end_` with no beginning. Read back, that is a block that never opened — org
+  fontified the code as prose and a reader saw a stray end marker. Measured at
+  6..96 on a 90-line block whose marker was line 5; it is 5..96 now.
+
+  And **a blank line inside a block no longer divides it**, which was the other
+  half: a blank line ends a paragraph, so a quote of two paragraphs became two
+  chunks and each kept only the marker on its own side — one opening a block it
+  never closed, the other closing one that never opened. Org treats a block as one
+  element and its blank lines as body; so does this now, which means a block is
+  whole in every passage of it.
+
+  Every block kind, since the marker rule does not vary with the policy: `src`,
+  `example`, `quote`, `verse` and anything unrecognised. Needs the semantic or
+  word index rebuilding to take effect on notes already indexed, and costs
+  nothing if you do not.
+
 ### Added
 
 - **`org-semantic-results-connector`** and `l` — for logic — in the results buffer:
@@ -98,6 +117,30 @@ not have.
   reason for a reader of Emacs to learn it. `AND`, `OR`, `NOT` and parentheses are
   writable in the query itself, so this is the default rather than the only way to
   say it.
+- **Passages are shown with org's own faces** — emphasis, verbatim, headings,
+  block markers, links — by fontifying each in a hidden `org-mode` buffer and
+  copying the faces back, which is the trick `magit` uses for diffs.
+  `org-semantic-results-fontify` turns it off.
+
+  **Only faces are copied and no character moves**, so the nth line of a passage
+  is still line `startLine` + n of the note: org's `keymap`, `invisible` and
+  `display` are left behind. About 0.8 ms a passage.
+- **A link shows its description**, brackets hidden, when `org-link-descriptive`
+  is on — the default, and what `org-toggle-link-display` toggles. Hidden by us
+  rather than by org, which does it through `org-fold-core` and would need that
+  initialised in a buffer that is not an org buffer. A link split across two lines
+  is left alone.
+- **`f` follows point**, previewing each passage in its note as you reach it —
+  `next-error-follow-minor-mode`, which was reachable only as `C-c C-f` and so
+  went unnoticed. That spelling still works, being the one `occur` and `grep` use,
+  and `org-semantic-results-mode-hook` turns it on for good.
+- **A pair of keys for each cap**: `k`/`K` for how many notes may appear, `+`/`-`
+  for how many passages one note may contribute. `+`/`-` moved off the note cap,
+  which had no mnemonic and left the passage cap reachable only by re-running the
+  search. Both double and halve, and both stop at one — a cap of zero answers with
+  an empty list and reads exactly like a query that matched nothing. `C-k` and `=`
+  set exact values, each sharing a key with the pair it belongs to — `=` its place
+  with `+`, `C-k` its letter with `k`.
 
 ### Removed
 
@@ -129,6 +172,24 @@ not have.
 - The message behind a search that has no model reads *"indexing this vault will
   fetch it"* rather than *"index this vault to fetch it"*. It only ever reaches a
   client, which has a keystroke rather than a command line.
+- **The query prompt names the ranking**: `Semantic search for:` or `Lexical
+  search for:`, with `M-s` and `M-l` changing it while the query is being typed,
+  carrying across whatever has been typed. Which index answers is half of what a
+  query means, and it used to be a second question — asked before the query and
+  only under a prefix argument, so it was settled blind or not at all. `C-u` still
+  asks, now for the ranking to start from.
+- **The ranking is chosen, not toggled**: `M-s` for semantic, `M-l` for lexical,
+  the same two keys in the results buffer as in the prompt, so the gesture is
+  learned once. Named as the header and the setting name them, rather than after
+  the by-meaning/by-word gloss, so the keys and the screen say one word for one
+  thing. A toggle could not be pressed without first knowing which ranking was in
+  force, so one key meant two things depending on state you had to go and read.
+  Meta rather than control because `C-s` is worth more where it is — a list of
+  passages is prose somebody may want to isearch.
+- **No letter does two jobs**, in the buffer or in a question. A full rebuild is
+  `[b]` whether it is offered as "Rebuild fully" or "Rebuild from scratch", since
+  no failure ever offers both and `[r]` would have implied the letter told them
+  apart.
 
 ## [0.2.0] — 2026-08-12
 
@@ -187,69 +248,8 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
-- **A kept block's `#+begin_` line is inside the passage's span.** It never was:
-  the marker is not part of a chunk's text while its body is, so a passage
-  beginning inside a long block started at the first line of code and ran to an
-  `#+end_` with no beginning. Read back, that is a block that never opened — org
-  fontified the code as prose and a reader saw a stray end marker. Measured at
-  6..96 on a 90-line block whose marker was line 5; it is 5..96 now.
-
-  And **a blank line inside a block no longer divides it**, which was the other
-  half: a blank line ends a paragraph, so a quote of two paragraphs became two
-  chunks and each kept only the marker on its own side — one opening a block it
-  never closed, the other closing one that never opened. Org treats a block as one
-  element and its blank lines as body; so does this now, which means a block is
-  whole in every passage of it.
-
-  Every block kind, since the marker rule does not vary with the policy: `src`,
-  `example`, `quote`, `verse` and anything unrecognised. Needs the semantic or
-  word index rebuilding to take effect on notes already indexed, and costs
-  nothing if you do not.
-- **Passages are shown with org's own faces** — emphasis, verbatim, headings,
-  block markers, links — by fontifying each in a hidden `org-mode` buffer and
-  copying the faces back, which is the trick `magit` uses for diffs.
-  `org-semantic-results-fontify` turns it off.
-
-  **Only faces are copied and no character moves**, so the nth line of a passage
-  is still line `startLine` + n of the note: org's `keymap`, `invisible` and
-  `display` are left behind. About 0.8 ms a passage.
-- **A link shows its description**, brackets hidden, when `org-link-descriptive`
-  is on — the default, and what `org-toggle-link-display` toggles. Hidden by us
-  rather than by org, which does it through `org-fold-core` and would need that
-  initialised in a buffer that is not an org buffer. A link split across two lines
-  is left alone.
-- **`f` follows point**, previewing each passage in its note as you reach it —
-  `next-error-follow-minor-mode`, which was reachable only as `C-c C-f` and so
-  went unnoticed. That spelling still works, being the one `occur` and `grep` use,
-  and `org-semantic-results-mode-hook` turns it on for good.
-- **A pair of keys for each cap**: `k`/`K` for how many notes may appear, `+`/`-`
-  for how many passages one note may contribute. `+`/`-` moved off the note cap,
-  which had no mnemonic and left the passage cap reachable only by re-running the
-  search. Both double and halve, and both stop at one — a cap of zero answers with
-  an empty list and reads exactly like a query that matched nothing. `C-k` and `=`
-  set exact values, each sharing a key with the pair it belongs to — `=` its place
-  with `+`, `C-k` its letter with `k`.
-- **The query prompt names the ranking**, and `M-s` / `M-l` change it while the
-  query is being typed: `Search notes semantically for:` becomes `Search notes
-  lexically for:`, carrying across whatever has been typed. Which index answers is
-  half of what a query means, and it used to be a second question asked before the
-  first — so it was settled blind, or under a prefix argument, or not at all.
-- **The ranking is chosen, not toggled**: `M-s` for semantic, `M-l` for lexical,
-  the same two keys in the results buffer as in the prompt, so the gesture is
-  learned once. Named as the header and the setting name them, rather than after
-  the by-meaning/by-word gloss, so the keys and the screen say one word for one
-  thing. A toggle could not be pressed without first knowing which ranking was in
-  force, so one key meant two things depending on state you had to go and read.
-  Meta rather than control because `C-s` is worth more where it is — a list of
-  passages is prose somebody may want to isearch.
-- **Keys moved so that no letter does two jobs.** The offer that searches by word
-  is `[l] Lexical search (by word)` — its own initial, like every other offer.
-  `retry` lost its second label with it — "Wait for it" is
-  "Try again" everywhere now, one action with one name. A full rebuild is `[b]`
-  like a first build, since no failure ever offers both and `[r]` would have
-  implied the letter told them apart.
-- `C-u` asks which ranking to start from and nothing else; `C-u C-u` asks about
-  the length of the list as well. It used to take three answers to change one thing.
+- `C-u` asks which ranking and nothing else; `C-u C-u` asks about the length of
+  the list as well. It used to take three answers to change one thing.
 - Searching for the thing at point offers it as a *default* rather than as text
   already typed, so `RET` takes it and typing replaces it.
 

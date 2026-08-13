@@ -298,8 +298,8 @@ be found before anything has been indexed:
 
 Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
 searches the vault that note belongs to and shows what came back. The prompt
-says which ranking will answer --- =Search notes semantically for:=, or
-=lexically= --- and =M-s= and =M-l= change it while the query is being typed,
+says which ranking will answer --- =Semantic search for:= or =Lexical search
+for:= --- and =M-s= and =M-l= change it while the query is being typed,
 carrying across whatever has been typed so far. They are the same two keys the
 results buffer takes. One =C-u= asks which ranking to start from --- the prompt
 there names the index each one reads, since they are two indexes and not two

@@ -687,12 +687,13 @@ suggestion rather than something the user typed."
     (define-key map (kbd "M-l")
                 (lambda () (interactive) (setq switch "lexical") (exit-minibuffer)))
     (let ((text (read-from-minibuffer
-                 ;; A sentence, and the ranking inside it as an adverb: the
-                 ;; prompt is read while typing a query, so "Search notes
-                 ;; semantically for" says what is about to happen where
-                 ;; "Semantic search for" labels a mode.
-                 (format "Search notes %s for%s: "
-                         (if (equal mode "lexical") "lexically" "semantically")
+                 ;; The ranking's own name, which is what the header, the
+                 ;; setting and the keys say.  "Search notes semantically
+                 ;; for" reads more like a sentence and was tried; it puts a
+                 ;; second word to each of the two things, and one word per
+                 ;; thing is worth more than the grammar.
+                 (format "%s search for%s: "
+                         (capitalize mode)
                          (if default (format " (default %s)" default) ""))
                  initial map nil 'org-semantic-search-history default)))
       (if switch
