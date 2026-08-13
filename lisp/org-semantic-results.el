@@ -720,7 +720,8 @@ reconciled later."
                   (push block blocks))))))
         (when blocks
           (setq blocks (nreverse blocks))
-          (org-semantic-results--insert-file (car file) (length blocks))
+          (org-semantic-results--insert-file
+           (car file) (org-semantic-results--note-name file) (length blocks))
           (dolist (block blocks) (insert block)))))
     (setq org-semantic-results--hits (nreverse drawn))
     (when (> dropped 0)
@@ -780,11 +781,29 @@ there is no index reads as an answer, and it is not one."
                  'org-semantic-header t 'read-only t))
       (insert (propertize "\n" 'org-semantic-header t 'read-only t)))))
 
-(defun org-semantic-results--insert-file (file passages)
-  "Insert the line naming FILE, which contributed PASSAGES of them."
+(defun org-semantic-results--note-name (group)
+  "What to call the note GROUP is the hits of.
+
+Its `#+title:\=', or its filename without the extension when it has
+none -- the server has already made that substitution, so this is
+the title it sends, and the fallback here is for a reply that
+somehow carries none.
+
+**The path is not repeated here.**  It used to be, and the address
+line under it names the directory and the file as separate links, so
+the same string was drawn twice in three lines.  A title is not
+unique where a path is -- two notes in different folders can share
+one -- and that is what the address line one line down settles."
+  (let ((title (org-semantic-hit-title (cadr (cadr group)))))
+    (if (and title (not (string-empty-p title)))
+        title
+      (file-name-base (car group)))))
+
+(defun org-semantic-results--insert-file (file name passages)
+  "Insert the line naming FILE as NAME, which contributed PASSAGES of them."
   (insert (propertize
            (format "%s  ·  %d passage%s\n"
-                   (file-relative-name file org-semantic-results--vault)
+                   name
                    passages (if (= passages 1) "" "s"))
            'face 'org-semantic-results-file
            'org-semantic-file file

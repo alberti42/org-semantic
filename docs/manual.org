@@ -241,7 +241,7 @@ org-semantic: semantic search for "vacuum bakeout procedure"
 ~/notes  ·  k=8 notes  ·  per-file=3 passages
 6 notes, 11 passages in 0.31 s
 
-lab/vacuum.org  ·  2 passages
+Vacuum system  ·  2 passages
   0.780 (+2.4σ)  lab / vacuum.org > Bakeout > Turbo pump > lines 142–144 :lab:vac:
     The turbo pump was baked out at 120 °C for 48 h before the
     chamber was vented.  Pressure after the bake settled at

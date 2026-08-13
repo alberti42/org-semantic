@@ -302,6 +302,37 @@ are rare -- 3 of 88 hits on the vault this was measured against."
   (should-not (org-semantic-results--sections '(:heading "Note title")))
   (should-not (org-semantic-results--sections '(:heading nil))))
 
+(ert-deftest a-note-is-named-by-its-title-and-not-by-its-path ()
+  "The path is already in the address line, twice over as two links.
+
+So the line grouping a note's passages says what the note is
+called: its `#+title:', which the server substitutes the filename
+for when there is none.  The fallback here is for a reply that
+somehow carries neither."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "04 Computer related/2026/2026-04-16 Compiling ltex.org"
+             :file "/vault/04 Computer related/2026/2026-04-16 Compiling ltex.org"
+             :title "Compiling ltex-ls-plus"
+             :heading "Compiling ltex-ls-plus > Building"))
+    (goto-char (point-min))
+    (should (re-search-forward "^Compiling ltex-ls-plus  ·  1 passage$" nil t))
+    ;; And the path is not repeated on that line.
+    (goto-char (point-min))
+    (should-not (re-search-forward "^04 Computer related" nil t)))
+  ;; No title: the filename, without its extension.
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "lab/vacuum.org" :file "/vault/lab/vacuum.org" :title nil))
+    (goto-char (point-min))
+    (should (re-search-forward "^vacuum  ·  1 passage$" nil t)))
+  ;; Empty is the same case, and is what an untitled, unnamed note gives.
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "lab/vacuum.org" :file "/vault/lab/vacuum.org" :title ""))
+    (goto-char (point-min))
+    (should (re-search-forward "^vacuum  ·  1 passage$" nil t))))
+
 (ert-deftest a-note-at-the-vault-root-has-no-directory-part ()
   "And no separator introducing one that is not there."
   (org-semantic-results-tests--drawn

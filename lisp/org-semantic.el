@@ -818,6 +818,16 @@ notes every hit may carry the same one."
 What to show; `org-semantic-hit-file' is what to open."
   (plist-get hit :path))
 
+(defun org-semantic-hit-title (hit)
+  "The name of the note HIT is in.
+
+Its `#+title:\=' when it has one, and otherwise its filename without
+the extension -- the server settles that, since it is the same
+substitution it makes when building the heading breadcrumb.  Empty
+where a note is somehow both untitled and unnamed, so treat it as a
+string that may be blank rather than as one that is always there."
+  (plist-get hit :title))
+
 (defun org-semantic-hit-start-line (hit)
   "The first line of the passage HIT matched on."
   (plist-get hit :startLine))
