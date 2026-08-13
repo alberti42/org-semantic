@@ -371,61 +371,70 @@ block."
     map)
   "Keymap put on every line a hit was drawn on.")
 
+;; Keys are named by command in the docstring below, so they render as the key
+;; itself and cannot go stale when one is rebound -- but **only inside the
+;; lists**.  A form 40 characters wide that renders as one character wraps the
+;; source at a width the reader never sees, and a paragraph written that way
+;; comes out ragged in a way that looks like a mistake, because it is one.  The
+;; flowing paragraphs therefore name no keys at all.
+;;
+;; `\<...>' sits on the line between the summary and the body: it renders as
+;; nothing, so that line becomes the blank one that belongs there anyway.
 (define-derived-mode org-semantic-results-mode special-mode "org-semantic"
   "Major mode for a list of org-semantic hits.
-
-\\<org-semantic-results-mode-map>Hits are grouped by note, and within
-a note by section.  A passage is shown as the note's own lines, so
-each line here is that line there.
+\\<org-semantic-results-mode-map>
+Hits are grouped by note, and within a note by section.  A passage is
+shown as the note's own lines, so each line here is that line there.
 
 Going to a hit:
 
-\\[org-semantic-results-goto] goes to the line under point --- not to
-the top of the section, which may be hundreds of lines above it.
-\\[org-semantic-results-goto-other-window] does it in another window,
-and \\[org-semantic-results-display] shows it without leaving this
-buffer.  Every part of a hit's address is a link as well: the
-directory opens in Dired, the note opens at its top, the section goes
-to its heading, and the two line numbers go to where the passage
-starts and ends.
+  \\[org-semantic-results-goto]  the line under point, in its note
+  \\[org-semantic-results-goto-other-window]  the same, in another window
+  \\[org-semantic-results-display]  show it without leaving this buffer
+
+Point lands on the line you were reading rather than at the top of its
+section, which may be hundreds of lines above.  Every part of a hit's
+address is a link too: the directory opens in Dired, the note at its
+top, the section at its heading, and each line number where it says.
 
 Moving about:
 
-\\[org-semantic-results-next] and \\[org-semantic-results-previous]
-step by passage; \\[org-semantic-results-next-note] and
-\\[org-semantic-results-previous-note] by note, skipping the rest of
-this one.  \\[org-semantic-results-toggle-passage] unfolds a passage
-cut short by `org-semantic-results-passage-lines'.
+  \\[org-semantic-results-next] \\[org-semantic-results-previous]  passage by passage
+  \\[org-semantic-results-next-note] \\[org-semantic-results-previous-note]  note by note
+  \\[org-semantic-results-toggle-passage]  unfold a passage that was cut short
+
+A passage runs to the length of its section and is cut at
+`org-semantic-results-passage-lines' lines.  Moving by note skips
+whatever is left of this one, sections and all.
 
 Asking something else:
 
-\\[org-semantic-results-set-query] edits the query.
-\\[org-semantic-results-rank-by-meaning] ranks by meaning and
-\\[org-semantic-results-rank-by-word] by word --- two separate
-indexes, not two orderings of one.
-\\[org-semantic-results-toggle-connector] joins a word query's terms
-with AND or OR.
+  \\[org-semantic-results-set-query]  edit the query
+  \\[org-semantic-results-rank-by-meaning]  rank by meaning (semantic)
+  \\[org-semantic-results-rank-by-word]  rank by word (lexical)
+  \\[org-semantic-results-toggle-connector]  join the terms with AND or OR
 
-How much comes back --- two caps, and the header states both:
+The two rankings are separate indexes, not two orderings of one.  The
+connector is a word search only, so it refuses on the other.
 
-\\[org-semantic-results-more-notes] and
-\\[org-semantic-results-fewer-notes] double and halve how many
-*notes* may appear, \\[org-semantic-results-set-notes] sets it
-exactly.  \\[org-semantic-results-more-passages] and
-\\[org-semantic-results-fewer-passages] do the same for how many
-*passages* one note may contribute, and
-\\[org-semantic-results-set-passages] sets that.  The first widens
-the list, the second deepens the notes already in it.
+How much comes back:
+
+  \\[org-semantic-results-more-notes] \\[org-semantic-results-fewer-notes]  more, fewer notes
+  \\[org-semantic-results-set-notes]  that many notes exactly
+  \\[org-semantic-results-more-passages] \\[org-semantic-results-fewer-passages]  more, fewer passages per note
+  \\[org-semantic-results-set-passages]  that many passages exactly
+
+The first pair widens the list, the second deepens the notes already in
+it.  The header states both, and neither reaches nothing.
 
 Keeping up to date:
 
-\\[org-semantic-results-revert] asks again rather than redrawing, since the notes
-may have moved on --- no note is read or written by it.
-\\[org-semantic-results-reindex] indexes the vault first, which is
-what a stale index needs; two prefix arguments rebuild it from
-scratch.  \\[next-error-follow-minor-mode] follows each passage as
-point reaches it, and `next-error' works from anywhere, so
-\\[next-error] walks these hits from any buffer.
+  \\[org-semantic-results-revert]  ask again -- no note is read or written
+  \\[org-semantic-results-reindex]  index the vault first, then ask again
+  \\[next-error-follow-minor-mode]  follow each passage as point reaches it
+
+Two prefix arguments rebuild the index from scratch.  And `next-error'
+works from anywhere, so these hits can be walked from any buffer.
 
 \\{org-semantic-results-mode-map}"
   (setq-local revert-buffer-function #'org-semantic-results--revert)
