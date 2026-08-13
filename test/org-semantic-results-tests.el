@@ -1309,7 +1309,13 @@ leave it."
     ;; which is the property that makes the prompt readable rather than learnt.
     (should (eq ?d (org-semantic-ui-offer-key '("Download it" . index))))
     (should (eq ?b (org-semantic-ui-offer-key '("Build it" . index))))
-    (should (eq ?c (org-semantic-ui-offer-key '("Show what changed" . show-changed))))))
+    (should (eq ?c (org-semantic-ui-offer-key '("Show what changed" . show-changed))))
+    ;; And one action answers to one key however it is labelled: a full rebuild
+    ;; is `b' whether it is offered as fully or from scratch, because no failure
+    ;; ever offers a build beside a rebuild -- so `r' would tell them apart for
+    ;; a reader who never sees them together, and `r' is the buffer's ranking.
+    (should (eq ?b (org-semantic-ui-offer-key '("Rebuild fully" . index-full))))
+    (should (eq ?b (org-semantic-ui-offer-key '("Rebuild from scratch" . index-full))))))
 
 
 ;;;; Settings, and the manual that lists them

@@ -258,7 +258,9 @@ nobody parses the prose to find out which call to make."
 
 (defconst org-semantic-ui--offer-keys
   '(("Show what changed" . ?c)
-    ("Search by word (lexical)" . ?w))
+    ("Search by word (lexical)" . ?w)
+    ("Rebuild fully" . ?b)
+    ("Rebuild from scratch" . ?b))
   "Offers whose key is not the first letter of their label.
 
 Two reasons to be here.  A collision: `config-drift' offers \"Search
@@ -268,6 +270,16 @@ the initial names the wrong half of the label: \"Search by word
 *word* index it reads and not that it is a search.  Not `l' for
 lexical, which would be the same letter the results buffer uses for
 the logical connector -- one letter, two jobs, in one package.
+
+And a third: **two labels for one action answer to one key.**  A full
+rebuild is offered as \"Rebuild fully\" when a policy has drifted and
+as \"Rebuild from scratch\" when a layout is too old to read, and it
+is `b' -- building -- in both, the same letter as \"Build it\".  `r'
+would suggest the letter told a *rebuild* from a *build*, which it
+cannot, because no failure ever offers both: one says there is no
+index, the other that the one there is cannot be used.  An imagined
+distinction is worse than none, and `r' is the results buffer's
+ranking.
 
 Everything else takes its initial, which is the whole point:
 `[d] Download it' can be read without being learned, where a key

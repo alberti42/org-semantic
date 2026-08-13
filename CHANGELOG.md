@@ -176,7 +176,9 @@ now how org-semantic is meant to be used from Emacs.
   for ranking, where it was `m` for a "mode" this package deliberately stopped
   calling that; and the offer that searches by word is `[w]`, freeing `l` for the
   logical connector. `retry` lost its second label with it — "Wait for it" is
-  "Try again" everywhere now, one action with one name.
+  "Try again" everywhere now, one action with one name. A full rebuild is `[b]`
+  like a first build, since no failure ever offers both and `[r]` would have
+  implied the letter told them apart.
 - `C-u` asks which ranking and nothing else; `C-u C-u` asks about the length of
   the list as well. It used to take three answers to change one thing.
 - Searching for the thing at point offers it as a *default* rather than as text
