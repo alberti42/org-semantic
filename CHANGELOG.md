@@ -73,8 +73,7 @@ not have.
   mid-fetch cannot be answered, so it came back as the same refusal with an offer
   to retry — a poll loop by hand for someone already waiting. When the fetch is
   this buffer's own, it now says it is waiting; the download's reply re-runs the
-  search by itself. A fetch started elsewhere still offers the retry, since
-  nothing tells us when that one lands.
+  search by itself.
 - **Searching by word out of a refusal stuck.** `[l]` set the buffer's ranking for
   good, so every later query in it was answered by word with nothing saying why.
   It searches once now and leaves the buffer's own ranking alone —
@@ -97,6 +96,11 @@ not have.
 
 ### Removed
 
+- **The "Try again" offer**, which only re-ran the search — something `g` and any
+  new search already do, so it was a manual poll offered as a decision. A refusal
+  that says a download is already running now offers the word index and nothing
+  else, and the `indexing` refusal asks nothing at all: its message is the whole of
+  what is known.
 - **Four keys in the results buffer**: `=` (describe the hit), `P` (per-file cap),
   `a` (the same question, in the wire's vocabulary) and `M` (fold a split section
   into one hit). Each

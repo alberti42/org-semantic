@@ -1182,7 +1182,6 @@ asking the reader to remember which."
     ('index "builds the index this search needs, which takes minutes")
     ('index-full "rebuilds from scratch, re-embedding everything")
     ('lexical "needs no embedding model")
-    ('retry "search again, once the run already going has finished")
     ('choose-model "search one of the models that is built")
     ('waive "search the index as it stands, under the policy it was built with")
     ('show-changed "list the settings that moved")
@@ -1207,7 +1206,6 @@ costs nothing to keep."
           ;; answered by word with nothing saying why.  Someone who does prefer
           ;; it says so in `org-semantic-results-ranking'.
           ('lexical (org-semantic-results--search "lexical"))
-          ('retry (org-semantic-results--search))
           ('waive
            (setq org-semantic-results--policy nil)
            (org-semantic-results--search))

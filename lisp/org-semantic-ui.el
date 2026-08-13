@@ -179,7 +179,7 @@ failed, \"semantic\" or \"lexical\", which decides one offer.
 Returns (KIND MESSAGE . OFFERS).  KIND is the server's label or
 nil, MESSAGE is the sentence to show, and OFFERS is a list of
 \(LABEL . ACTION) where ACTION is one of the symbols `index',
-`index-full', `lexical', `retry', `choose-model', `waive' and
+`index-full', `lexical', `choose-model', `waive' and
 `show-changed'.  Symbols rather than functions: what \"index this
 vault\" costs is the caller's to arrange, and a symbol can be
 asserted in a test where a closure cannot.
@@ -200,7 +200,6 @@ nobody parses the prose to find out which call to make."
                   ("index" '(("Build it" . index)))
                   ("reindex-full" '(("Rebuild from scratch" . index-full)))
                   ("download" '(("Download it" . download)))
-                  ("wait" '(("Try again" . retry)))
                   (_ nil)))
          (offers
           (pcase kind
@@ -226,12 +225,14 @@ nobody parses the prose to find out which call to make."
               ;; is the one error that carries `indexing', because it is the one
               ;; a client repeats: every keystroke of a search-as-you-type asks
               ;; again, and without it the hundredth refusal reads as the first.
-              ;; "Try again", the same label the `wait' remedy uses, rather than
-              ;; "Wait for it": one action, one label, and the W is now the word
-              ;; index's.  What it means here -- that something is already
-              ;; fetching -- is in the message and in the help beside the key.
-              (if (org-semantic-true-p (plist-get data :indexing))
-                  '(("Try again" . retry))
+              ;; And nothing is offered in its place.  "Try again" was, and it
+              ;; only re-ran the search -- which `g' does, and which any new
+              ;; search does, so it was a manual poll wearing the clothes of a
+              ;; decision.  For a fetch this client started there is a reply to
+              ;; wait for; for anyone else's there is nothing we could offer that
+              ;; the user cannot already do.  The message says a download is
+              ;; running, which is the whole of what is known.
+              (unless (org-semantic-true-p (plist-get data :indexing))
                 '(("Download it" . download)))
               (unless (equal mode "lexical")
                 '(("Search by word (lexical)" . lexical)))))

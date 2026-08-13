@@ -995,7 +995,10 @@ run is already fetching, which is the one error that has to."
                            :remedy "download" :indexing t))
                   "semantic"))))
     (should-not (rassq 'download offers))
-    (should (rassq 'retry offers)))
+    ;; And nothing in its place: "try again" only re-ran the search, which `g'
+    ;; already does, so it was a manual poll offered as a decision.
+    (should-not (rassq 'retry offers))
+    (should (equal (mapcar #'cdr offers) '(lexical))))
   ;; And `:json-false' is not nil, which is the trap that would make every
   ;; refusal look like a fetch in progress.
   (let ((offers (org-semantic-ui-remedy-offers
@@ -1004,8 +1007,7 @@ run is already fetching, which is the one error that has to."
                     :data (:kind "model-missing" :model "e5-small"
                            :remedy "download" :indexing :json-false))
                   "semantic"))))
-    (should (rassq 'download offers))
-    (should-not (rassq 'retry offers))))
+    (should (rassq 'download offers))))
 
 (ert-deftest a-condition-that-holds-is-said-once-however-often-it-is-met ()
   "The point of the latch, and the reason live search needs one.
