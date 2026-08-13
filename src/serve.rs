@@ -212,8 +212,15 @@ impl Server {
                 if fetching {
                     format!("the {} model is being downloaded now", m.name)
                 } else {
+                    // Declarative, like the sentence above it, and for a reason
+                    // beyond symmetry: the reader asked to *search*, and the only
+                    // caller that can reach this is a `serve` client — the CLI
+                    // downloads rather than refusing. So an imperative would name
+                    // a subcommand they have no command line to type it on, and
+                    // give indexing's purpose in place of their own. What to press
+                    // is `remedy`'s to say; this only has to say what is true.
                     format!(
-                        "the {} model is not downloaded yet — index this vault to fetch it",
+                        "the {} model is not downloaded yet — indexing this vault will fetch it",
                         m.name
                     )
                 },

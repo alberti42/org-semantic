@@ -58,6 +58,20 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cold first run could silently ignore a note's `# ltex: language=…`.** The
+  language classifier was fetched and loaded by every thread that wanted it at
+  once, through one shared staging file, so a note declaring Italian in a German
+  vault could come back as German. One loader at a time now, and the staging file
+  carries the process id, which also covers two vaults indexing at once.
+
+### Changed
+
+- The message behind a search that has no model reads *"indexing this vault will
+  fetch it"* rather than *"index this vault to fetch it"*. It only ever reaches a
+  client, which has a button rather than a command line.
+
 ## [0.2.0] — 2026-08-12
 
 Binary version 0.2.0. Update the binary as well as the package: 0.1.0 reads

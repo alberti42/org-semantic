@@ -341,7 +341,7 @@ says so at once and offers to fetch it, rather than pulling hundreds of megabyte
 inside your query:
 
 #+begin_example
-  the bge-small-en model is not downloaded yet — index this vault to fetch it
+  the bge-small-en model is not downloaded yet — indexing this vault will fetch it
 
   [Download it]           index the vault now, fetching the model first
   [Search by word]        the lexical index needs no model at all

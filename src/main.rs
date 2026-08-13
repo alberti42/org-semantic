@@ -803,6 +803,26 @@ fn classifier() -> Result<&'static Lid> {
     if let Some(l) = LID.get() {
         return Ok(l);
     }
+    // **One loader at a time, and the `get` repeated inside it.** Every thread
+    // that missed above would otherwise fetch and load its own copy, and the
+    // losers' work is thrown away by `LID.set` — so the cost is pure, and it
+    // was not only cost. Measured with the classifier deleted first: **nine of
+    // ten runs of the unit suite failed**, a declared `it-IT` coming back as the
+    // vault's default, because the download's staging file was shared (see
+    // below) and a thread could load one mid-write. `accept_declared` reports
+    // that as "no such language" — `is_ok_and` keeps no error — so a cold first
+    // run silently ignored some notes' `# ltex:` declarations.
+    //
+    // Not `get_or_init`: its closure cannot fail, and the alternative —
+    // `OnceLock<Result<..>>` — would cache a transient network error for the
+    // life of the process, which under `serve` means until the editor exits.
+    // The double check is the same shape `Server::semantic` uses, and `lock`
+    // recovers from poisoning rather than making one failed load permanent.
+    static LOADING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = lock(&LOADING);
+    if let Some(l) = LID.get() {
+        return Ok(l);
+    }
     let path = lid_path();
     if !path.exists() {
         let dir = path.parent().expect("joined path has a parent");
@@ -813,7 +833,14 @@ fn classifier() -> Result<&'static Lid> {
         let bytes = ureq::get(LID_URL).call()?.body_mut().read_to_vec()?;
         // Write beside the target and rename, so an interrupted download does
         // not leave a truncated file that later runs would happily load.
-        let tmp = path.with_extension("part");
+        //
+        // **The staging name carries the pid, and that is load-bearing across
+        // processes** — the lock above only orders threads within one. Two
+        // vaults indexing at once is deliberately uncapped, and on a cold cache
+        // that is two writers: `fs::write` truncates, so a shared name lets one
+        // rename the other's half-written file into place, and the loser's
+        // `rename` then fails for a file that is no longer there.
+        let tmp = path.with_extension(format!("part.{}", std::process::id()));
         fs::write(&tmp, &bytes)?;
         fs::rename(&tmp, &path)?;
     }
@@ -6611,6 +6638,32 @@ mod tests {
         assert_eq!(cfg, Config::default());
     }
 
+    /// **A scratch name is a lock on a directory, and two tests may not share
+    /// one.** `scratch` opens with `remove_dir_all`, so a shared name means
+    /// whichever test starts second deletes the other's vault mid-run — and the
+    /// panic then lands wherever that test next touches the directory, which is
+    /// nowhere near the cause. Two tests did share `restamp`, and it cost a
+    /// puzzled look twice: once recorded in the guide as an unexplained flake,
+    /// once here.
+    ///
+    /// Reading our own source is the only way to check this. The alternative —
+    /// a registry every test must remember to use — is one more thing to forget,
+    /// and forgetting it would restore exactly this failure.
+    #[test]
+    fn no_two_tests_share_a_scratch_directory() {
+        let src = include_str!("main.rs");
+        let mut names: Vec<&str> = src
+            .split("scratch(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"').map(|(name, _)| name))
+            .collect();
+        assert!(names.len() > 20, "the call sites must have been found at all: {names:?}");
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "two tests share a scratch directory and will race");
+    }
+
     #[test]
     fn a_policy_is_compared_by_meaning_not_by_bytes() {
         let a: Config =
@@ -7426,7 +7479,16 @@ mod tests {
     /// bytes are identical must be restamped and reused, never re-embedded.
     #[test]
     fn a_touched_note_is_restamped_without_re_embedding() {
-        let v = scratch("restamp");
+        // Its own directory, and not the one
+        // `a_stamp_that_moved_without_its_note_is_written_back` takes: `scratch`
+        // begins with `remove_dir_all`, so whichever of the two started second
+        // deleted the other's vault out from under it. Two failures in sixteen
+        // runs, in whichever test lost, reported at whichever line next touched
+        // the directory — `fs::write` of a note, or `loaded` finding no index.
+        // That reads as a bug in the code under test rather than in the fixture,
+        // which is why it went unexplained for a while.
+        // `no_two_tests_share_a_scratch_directory` now holds it.
+        let v = scratch("restamp-semantic");
         let a = note(&v, "alpha");
         seed(&v, &[a.as_str()]);
         let before = fs::read(sem(&v).join("vectors.f32")).unwrap();
