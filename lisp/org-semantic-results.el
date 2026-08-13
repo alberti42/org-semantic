@@ -157,13 +157,17 @@ Costs about 0.8 ms a passage, against 0.1 ms unfontified, and needs
 org loaded --- which it will be, since you are searching org notes.
 Where it is not, this silently does nothing rather than failing.
 
-One case is wrong and worth knowing, because it is narrower than it
-sounds.  A block's opening line is not part of a chunk's text while
-its body is, so a passage that begins inside a long block starts at
-the first body line and runs to the `#+end_' -- org then sees an end
-marker with no beginning, and fontifies the body as prose.  Measured
-on a 90-line `#+begin_src': the span came back 6..96 where the marker
-is line 5.
+One case is wrong, and it is narrow: a kept block with a *blank line*
+in it.  A blank line ends a paragraph, so such a block becomes several,
+and only the first of them takes the block's opening line into its span
+-- so a passage made of a later paragraph shows an `#+end_' with
+nothing that opened it, and org fontifies the text as prose.  Measured
+on a 60-line `#+begin_quote' of two paragraphs: the second came back
+35..65, where the marker is line 3.
+
+A block *without* a blank line is whole in every passage of it,
+because the marker is in the span and a paragraph too long for one
+passage gives each of its pieces the whole paragraph.
 
 Two things that are *not* problems, though they sound like they should
 be.  Folding away the tail of a passage hides nothing from org: the
