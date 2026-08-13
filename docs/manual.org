@@ -1279,6 +1279,33 @@ Two numbers bound the list, because two different things can crowd it out:
 | =k= (positional) | how many *notes* may appear --- default 8 |
 | =--per-file N=   | how many *passages* any one note may contribute --- default 3 |
 
+Both are applied to one list ranked by score, walked from the top. A note joins
+the list the moment its *best* passage comes up, so the =k= notes you get are the
+=k= notes with the highest-scoring single passage --- nothing that was left out
+has a passage better than the best of one that got in. The passage cap then
+counts what has been taken from that note *across all of its sections*: three is
+three whether they come from one section or three, and a note with five sections
+each holding a hit shows its best three.
+
+The consequence is worth knowing, because it is the one thing here that is not
+obvious: *the list is not the best passages in the vault.* A note already on the
+list may contribute a second or third passage that scores below the best passage
+of a note that was shut out. With =k= 2:
+
+#+begin_example
+  0.91  note A, passage 1     A joins the list
+  0.88  note B, passage 1     B joins the list
+  0.72  note A, passage 2     taken --- A has room
+  0.70  note A, passage 3     taken --- A is now full
+  0.69  note C, passage 1     dropped --- no room for a third note
+#+end_example
+
+That 0.69 loses to a 0.70 from a note you can already see, and that is the point
+of having two caps rather than one: without the note cap, three large files
+answer =k 50= with everything they have and you never reach the fourth note.
+Raise =k= to see more *places*; raise the passage cap to go deeper into the
+places you already have.
+
 The defaults suit a vault of one note per file, where a note matching in five
 places would otherwise spend the whole list on itself. Keep your year of
 meetings in a single file and that same cap becomes the thing in your way: every
