@@ -1211,6 +1211,35 @@ of any use, and neither was intended."
        '(:message "no index" :data (:kind "no-index" :remedy "index"))))
     (should-not org-semantic-results-tests--logging)))
 
+(ert-deftest a-download-says-it-is-waiting-instead-of-the-refusal ()
+  "The page must not go on saying the model is missing while fetching it.
+
+It did, for the length of the fetch -- minutes for a large model --
+so a buffer that had just been told to download went on reporting
+that nothing had been downloaded.  There is no progress to show
+inside it, since fastembed exposes no increments: what can honestly
+be said is the size, and that the results arrive by themselves."
+  (cl-letf (((symbol-function 'org-semantic-download)
+             (lambda (&rest args)
+               ;; The one report a fetch makes, as the server sends it.
+               (funcall (plist-get args :progress)
+                        '(:target "semantic" :phase "download" :bytes 470300000)))))
+    (with-temp-buffer
+      (org-semantic-results-mode)
+      (setq org-semantic-results--vault "/vault"
+            org-semantic-results--query "q"
+            org-semantic-results--mode "semantic")
+      (org-semantic-results-tests--answering ?d
+        (org-semantic-results--render-error
+         '(:message "the e5-small model is not downloaded yet"
+           :data (:kind "model-missing" :model "e5-small" :remedy "download"))))
+      (let ((text (buffer-string)))
+        (should (string-match-p "please wait" text))
+        (should (string-match-p "e5-small model (470 MB)" text))
+        (should (string-match-p "appear here by themselves" text))
+        ;; And the refusal is gone: it is answered, not still being reported.
+        (should-not (string-match-p "not downloaded yet" text))))))
+
 (ert-deftest an-error-with-nothing-to-decide-asks-nothing ()
   "No label means no offers, so there is no question to ask.
 

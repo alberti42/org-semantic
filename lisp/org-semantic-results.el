@@ -1179,13 +1179,33 @@ costs nothing to keep."
 
 One thing at a time: if the search then finds no index, it says so
 itself and asks about building one -- which is a question the user
-gets to answer rather than minutes of embedding nobody asked for."
+gets to answer rather than minutes of embedding nobody asked for.
+
+**The buffer says it is waiting, and is replaced when it is not.**
+It kept the refusal up instead -- \"the e5-small model is not
+downloaded yet\" -- for the length of the fetch, so a page that had
+been told to fetch went on reporting that nothing had been fetched,
+with only the mode line and one echo-area line saying otherwise.  A
+model is minutes and there is no progress to show inside it:
+fastembed exposes no increments, so the announcement carries a size
+and nothing that counts up to it.  Saying which size, and that the
+results will arrive by themselves, is the whole of what can honestly
+be offered."
   (let ((os-buffer (current-buffer)))
     (setq mode-line-process " [downloading]")
     (force-mode-line-update)
+    (org-semantic-results--waiting model nil)
     (org-semantic-download
      :model model
-     :progress #'org-semantic-report-message
+     :progress (lambda (report)
+                 (org-semantic-report-message report)
+                 ;; The size arrives in the one report the fetch makes, a moment
+                 ;; after the request.  Until then the line stands without it,
+                 ;; rather than there being no line at all.
+                 (when-let* ((bytes (plist-get report :bytes)))
+                   (when (buffer-live-p os-buffer)
+                     (with-current-buffer os-buffer
+                       (org-semantic-results--waiting model bytes)))))
      :success (lambda (_result)
                 (when (buffer-live-p os-buffer)
                   (with-current-buffer os-buffer
@@ -1195,6 +1215,22 @@ gets to answer rather than minutes of embedding nobody asked for."
                   (with-current-buffer os-buffer
                     (org-semantic-results--render-error error-object)))))
     (message "org-semantic: downloading %s..." model)))
+
+(defun org-semantic-results--waiting (model bytes)
+  "Say that MODEL is being fetched, and how large it is if BYTES is known."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (org-semantic-results--insert-header nil nil)
+    (insert (propertize
+             (format "  please wait: the %s model%s is downloading.\n  \
+The search results will appear here by themselves when downloading has finished.\n"
+                     model
+                     (if bytes
+                         (format " (%s)" (file-size-human-readable bytes 'si " " "B"))
+                       ""))
+             'face 'org-semantic-results-location
+             'read-only t))
+    (goto-char (point-min))))
 
 (defun org-semantic-results--reindex (full)
   "Index this buffer's vault, then search again.  FULL rebuilds from scratch."
