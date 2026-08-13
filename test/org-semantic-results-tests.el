@@ -853,6 +853,28 @@ out of the user's way.  What must not drift is the mapping."
       (should (eq t (plist-get (org-semantic-results--params) :any))))))
 
 
+(ert-deftest choosing-a-ranking-is-idempotent-where-a-toggle-was-not ()
+  "`m' means meaning and `w' means word, however often they are pressed.
+
+The point of replacing the toggle: it could not be pressed without
+first knowing which ranking was in force, so one key meant two
+things depending on state the reader had to go and look up.  These
+can be pressed blind, and twice."
+  (let (asked)
+    (cl-letf (((symbol-function 'org-semantic-ui-ask)
+               (lambda (_driver params) (push (plist-get params :mode) asked))))
+      (org-semantic-results-tests--drawn
+          (list (org-semantic-results-tests--hit))
+        (org-semantic-results-rank-by-word)
+        (org-semantic-results-rank-by-word)
+        (should (equal org-semantic-results--mode "lexical"))
+        (org-semantic-results-rank-by-meaning)
+        (org-semantic-results-rank-by-meaning)
+        (should (equal org-semantic-results--mode "semantic"))
+        ;; Each press asked, in the ranking it names.
+        (should (equal (nreverse asked)
+                       '("lexical" "lexical" "semantic" "semantic")))))))
+
 ;;;; One search in flight
 
 (ert-deftest at-most-one-search-is-ever-in-flight ()

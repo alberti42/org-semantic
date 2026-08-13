@@ -182,10 +182,13 @@ now how org-semantic is meant to be used from Emacs.
 
 - **Prebuilt binaries ship as compressed archives** — 13 MB rather than 40, and
   the executable bit survives, which a bare release asset does not carry.
-- **Two keys moved so that no letter does two jobs.** The ranking toggle is `r`,
-  for ranking, where it was `m` for a "mode" this package deliberately stopped
-  calling that; and the offer that searches by word is `[w]`, freeing `l` for the
-  logical connector. `retry` lost its second label with it — "Wait for it" is
+- **The ranking is chosen, not toggled**: `m` for meaning, `w` for word. A toggle
+  could not be pressed without first knowing which ranking was in force, so one key
+  meant two things depending on state you had to go and read. `w` is also the
+  prompt's key for the same choice — though the prompt's version searches by word
+  once, where the key is a statement about the buffer.
+- **Keys moved so that no letter does two jobs.** The offer that searches by word
+  is `[w]`, freeing `l` for the logical connector. `retry` lost its second label with it — "Wait for it" is
   "Try again" everywhere now, one action with one name. A full rebuild is `[b]`
   like a first build, since no failure ever offers both and `[r]` would have
   implied the letter told them apart.

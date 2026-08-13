@@ -346,7 +346,8 @@ block."
   "M-p"       #'org-semantic-results-previous-note
   "TAB"       #'org-semantic-results-toggle-passage
   "s"         #'org-semantic-results-set-query
-  "r"         #'org-semantic-results-toggle-ranking
+  "m"         #'org-semantic-results-rank-by-meaning
+  "w"         #'org-semantic-results-rank-by-word
   "l"         #'org-semantic-results-toggle-connector
   "+"         #'org-semantic-results-more-notes
   "-"         #'org-semantic-results-fewer-notes
@@ -1580,18 +1581,33 @@ mean pressing \\`M-n' before every refinement."
   (setq org-semantic-results--query query)
   (org-semantic-results--search))
 
-(defun org-semantic-results-toggle-ranking ()
-  "Swap the ranking: semantic (by meaning) or lexical (by word).
-
-The two are separate indexes answering the same query differently,
-so this searches again.  The word index also answers when the
-semantic one has not been built."
-  (interactive nil org-semantic-results-mode)
-  (setq org-semantic-results--mode
-        (if (equal org-semantic-results--mode "lexical") "semantic" "lexical"))
+(defun org-semantic-results--rank (mode)
+  "Rank by MODE from now on in this buffer, and search again."
+  (setq org-semantic-results--mode mode)
   (message "org-semantic: ranking by %s"
-           (if (equal org-semantic-results--mode "lexical") "word" "meaning"))
+           (if (equal mode "lexical") "word (lexical)" "meaning (semantic)"))
   (org-semantic-results--search))
+
+(defun org-semantic-results-rank-by-meaning ()
+  "Rank by meaning -- the semantic index -- and search again."
+  (interactive nil org-semantic-results-mode)
+  (org-semantic-results--rank "semantic"))
+
+(defun org-semantic-results-rank-by-word ()
+  "Rank by word -- the lexical index -- and search again.
+
+Two keys rather than one that toggles, which is what this was.  A
+toggle cannot be pressed without first knowing which ranking is in
+force, so the same key means two things depending on state the user
+has to go and read; `m\=' and `w\=' each mean one thing and can be
+pressed blind.  `w\=' is also the key the failure prompt uses for the
+same choice.
+
+This is not the same as the offer in that prompt, which searches by
+word *once* and leaves the buffer\='s ranking alone: pressing a key
+here is a statement about what this buffer is for."
+  (interactive nil org-semantic-results-mode)
+  (org-semantic-results--rank "lexical"))
 
 (defun org-semantic-results-toggle-connector ()
   "Swap how the terms of this word search are joined: AND or OR.
