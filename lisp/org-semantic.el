@@ -1306,9 +1306,11 @@ What it will not do is build an index that does not exist -- that is
 minutes of embedding, and a decision, so it says once which vault
 needs `org-semantic-reindex' and leaves it there.  Notes changed
 outside Emacs are not seen either: a sync, a `git pull', a rename in
-Dired.  `org-semantic-reindex' is what catches up with those, and
-nothing is lost by being behind, since a search says when an index
-is a version old."
+Dired -- nothing here watches the filesystem, only saves made in this
+Emacs.  Something that does watch it can say so with
+`org-semantic-auto-reindex-touch', and failing that
+`org-semantic-reindex' catches up; nothing is lost by being behind,
+since a search says when an index is a version old."
   :global t
   :group 'org-semantic
   (clrhash org-semantic-auto-reindex--said)
@@ -1318,6 +1320,36 @@ is a version old."
     (maphash (lambda (_vault timer) (when (timerp timer) (cancel-timer timer)))
              org-semantic-auto-reindex--timers)
     (clrhash org-semantic-auto-reindex--timers)))
+
+;;;###autoload
+(defun org-semantic-auto-reindex-touch (&optional vault)
+  "Arm a reindex of VAULT, as saving one of its notes would.
+
+For the changes a save cannot report: a note renamed or deleted in
+Dired, a `git pull', a folder arriving from a sync.  Something else
+is watching the tree -- a file watcher, a version control command,
+another package's index -- and this is how it says so.
+
+WHICH file changed is deliberately not asked for.  A run is a
+vault-wide incremental scan, so it needs to know that something
+changed and not what: a rename is caught by the arrival of the new
+name alone, since the same scan finds the old one gone.  That also
+makes this cheap to over-call -- fifty touches inside
+`org-semantic-auto-reindex-delay' are one run, the same way fifty
+saves are.
+
+VAULT is a vault root spelled as `org-semantic-vault' spells it, and
+defaults to the one the current buffer is in -- which is rarely what
+a caller wants here, since a watcher's callback runs in whatever
+buffer happened to be current.  Nil, and no vault, is a silent no-op.
+
+Does nothing while `org-semantic-auto-reindex-mode' is off: the mode
+is the one place that says whether this Emacs keeps an index up to
+date by itself, and a caller that reindexed anyway would make turning
+it off mean nothing."
+  (when org-semantic-auto-reindex-mode
+    (when-let* ((vault (or vault (org-semantic-vault))))
+      (org-semantic-auto-reindex--arm vault))))
 
 ;;;; What the server holds
 

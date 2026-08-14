@@ -774,6 +774,67 @@ index up to date looks exactly like one that is working."
         (should (= 1 (length org-semantic-tests--cancelled)))
         (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))))))
 
+(ert-deftest something-else-watching-the-tree-can-arm-a-run ()
+  "A save is not the only way a note changes, and `touch' is the other way in.
+
+A rename in Dired, a `git pull', a folder arriving from a sync: no
+`after-save-hook' runs for any of them, and nothing here watches the
+filesystem.  What this must get right is that it takes a *vault* --
+never a file -- since a run is a vault-wide incremental scan, and
+that it goes through the same debounce a save does, so a watcher
+firing per file costs one run."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic-canonical-vault dir)))
+      (org-semantic-tests--saving
+        (let ((org-semantic-auto-reindex-mode t))
+          (dotimes (_ 3) (org-semantic-auto-reindex-touch vault)))
+        (should (= 3 (length org-semantic-tests--armed)))
+        ;; The debounce is the save's own, not a second one: two of the three
+        ;; were cancelled by the touch that followed.
+        (should (= 2 (length org-semantic-tests--cancelled)))
+        (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
+        ;; Keyed on the vault it was handed, and the run will be given that
+        ;; same string -- a file name here would reach the server as a vault.
+        (should (timerp (gethash vault org-semantic-auto-reindex--timers)))
+        (should (equal (list vault)
+                       (nth 2 (gethash vault org-semantic-auto-reindex--timers))))))))
+
+(ert-deftest a-touch-does-nothing-while-the-mode-is-off ()
+  "The mode is the one place that says whether this Emacs indexes by itself.
+
+A caller that reindexed anyway would make turning it off mean
+nothing, and the caller is by definition something watching the tree
+for its own reasons -- so the decision cannot be left to it."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic-canonical-vault dir)))
+      (org-semantic-tests--saving
+        (let ((org-semantic-auto-reindex-mode nil))
+          (org-semantic-auto-reindex-touch vault))
+        (should-not org-semantic-tests--armed)
+        (should-not org-semantic-tests--said)
+        (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))
+        ;; And the same call with the mode on does arm, or the assertions
+        ;; above would pass for a function that never works at all.
+        (let ((org-semantic-auto-reindex-mode t))
+          (org-semantic-auto-reindex-touch vault))
+        (should (= 1 (length org-semantic-tests--armed)))))))
+
+(ert-deftest a-touch-that-names-no-vault-is-a-silent-no-op ()
+  "It falls back to the current buffer, which is rarely a watcher's own.
+
+A file notification callback runs in whatever buffer happened to be
+current, so the fallback answers nil about as often as it answers
+usefully.  Nil is nothing to reindex -- not an error to raise inside
+somebody else's callback, and not a message to say about a vault
+nobody named."
+  (org-semantic-tests--saving
+    (with-temp-buffer
+      (let ((org-semantic-auto-reindex-mode t)
+            (org-semantic-vault-root nil))
+        (should-not (org-semantic-auto-reindex-touch))))
+    (should-not org-semantic-tests--armed)
+    (should-not org-semantic-tests--said)))
+
 ;;;; Errors carry a label, and the label is what to branch on
 
 (ert-deftest a-failure-worth-acting-on-arrives-labelled ()

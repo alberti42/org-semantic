@@ -280,8 +280,27 @@ Two things it deliberately will not do. It will not **build** an index that does
 not exist: that is minutes of embedding and a decision, so a vault with nothing
 built is named once, with =M-x org-semantic-reindex= as the thing to press. And
 it does not see notes that changed outside Emacs --- a sync, a =git pull=, a
-rename in Dired --- which is what =M-x org-semantic-reindex= remains for. Being
-behind costs nothing: a search says so when the index is a version old.
+rename in Dired --- because a save is all it hears about.
+
+Something else in your configuration may hear about those: a file watcher, or
+another package indexing the same notes and watching them for its own reasons.
+It can pass that on with ~org-semantic-auto-reindex-touch~, and the change is
+then picked up as a save would be:
+
+#+begin_src emacs-lisp
+(org-semantic-auto-reindex-touch "/Users/you/notes")
+#+end_src
+
+It takes a *vault* and not a file, because a run is a vault-wide incremental
+scan: it needs to know that something changed and not what --- which is also why
+a rename is caught by the arrival of the new name alone, the same scan finding
+the old one gone. Called with no argument it asks the current buffer, which is
+rarely what a watcher's callback wants. It does nothing while the mode is off,
+and is as cheap to over-call as a save: fifty touches inside the debounce are one
+run.
+
+Failing both, =M-x org-semantic-reindex= remains what catches up. Being behind
+costs nothing: a search says so when the index is a version old.
 
 A passage is org text, so it is shown with org's own faces: emphasis, verbatim,
 headings, block markers and links all look as they do in the note. That is

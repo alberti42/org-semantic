@@ -147,7 +147,18 @@ not have.
   `M-x org-semantic-reindex` as the thing to press. Successes are silent
   (`org-semantic-auto-reindex-quietly`); failures are said once per vault, because
   an automatic feature that has stopped working looks exactly like one that is
-  working. Notes changed outside Emacs are still `org-semantic-reindex`'s to catch.
+  working.
+
+  It hears about a note through `after-save-hook`, which is every change made by
+  editing and none of the others: a rename or a delete in Dired, a `git pull`, a
+  folder arriving from a sync. Something that *does* watch the tree — a file
+  watcher, another package's index of the same notes — can say so with
+  **`org-semantic-auto-reindex-touch`**, and the change is then picked up like a
+  save. It takes a vault and not a file, because a run is a vault-wide
+  incremental scan: a rename is caught by the arrival of the new name alone,
+  since the same scan finds the old one gone. Failing both,
+  `org-semantic-reindex` still catches up, and being behind costs nothing — a
+  search says so when the index is a version old.
 - **`org-semantic-results-connector`** and `l` — for logic — in the results buffer:
   join a word query's terms with `and` or `or`. Named for the logic rather than for the wire,
   which spells it as a boolean called `any` — the server's vocabulary, and no
