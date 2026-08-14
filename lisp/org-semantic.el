@@ -308,12 +308,12 @@ not evidence."
              (home (locate-dominating-file dir ".dir-locals.el")))
         (cond
          ((stringp declared)
-          (org-semantic--canonical (expand-file-name declared (or home dir))))
+          (org-semantic-canonical-vault (expand-file-name declared (or home dir))))
          ;; t can mean nothing else, so with no file to have said it
          ;; there is no vault to name.
-         (home (org-semantic--canonical home)))))
+         (home (org-semantic-canonical-vault home)))))
      ((stringp org-semantic-vault-root)
-      (org-semantic--canonical (expand-file-name org-semantic-vault-root))))))
+      (org-semantic-canonical-vault (expand-file-name org-semantic-vault-root))))))
 
 (defun org-semantic-notes-root (vault)
   "Where VAULT's notes are: VAULT itself, or what its `vault.json' says.
@@ -342,7 +342,7 @@ Nothing here decides what is indexed.  It decides what we ask about."
                       ;; `expand-file-name' against the vault covers all three
                       ;; forms the server accepts: absolute, `~/...', and
                       ;; relative to the vault.
-                      (org-semantic--canonical (expand-file-name notes vault))))))
+                      (org-semantic-canonical-vault (expand-file-name notes vault))))))
         vault)))
 
 (defun org-semantic-vault-or-error (&optional buffer)
@@ -356,14 +356,25 @@ BUFFER is as in `org-semantic-vault'."
                "or declare it in the vault's .dir-locals.el")
        (buffer-name (or buffer (current-buffer))))))
 
-(defun org-semantic--canonical (dir)
+(defun org-semantic-canonical-vault (dir)
   "Return DIR as the server will be asked about it.
 
 Resolved through `file-truename' and left without a trailing
 slash, so that one vault reached two ways -- through a symlink,
 say, or as /tmp against /private/tmp -- is one key rather than
-two."
+two.
+
+Public because an integration needs it: the server keys everything
+it holds by the string it was given, so `org-semantic-close' and
+`org-semantic-status' find a vault only when it is spelled the way
+`org-semantic-vault' spelled it.  A caller naming a vault of its own
+-- from a project root, a bookmark, or a vault some other package
+knows about -- has to agree with that, and the only alternative to
+this function is a second copy of it that can fall out of step."
   (directory-file-name (file-truename (expand-file-name dir))))
+
+(define-obsolete-function-alias 'org-semantic--canonical
+  'org-semantic-canonical-vault "0.3.0")
 
 
 ;;;; Errors

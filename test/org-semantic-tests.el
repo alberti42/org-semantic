@@ -322,7 +322,7 @@ every vault starts."
       (unwind-protect
           (with-current-buffer buffer
             (should (local-variable-p 'org-semantic-vault-root))
-            (should (equal (org-semantic-vault) (org-semantic--canonical dir))))
+            (should (equal (org-semantic-vault) (org-semantic-canonical-vault dir))))
         (kill-buffer buffer)))))
 
 (ert-deftest a-declaration-may-name-a-directory-under-the-project ()
@@ -335,7 +335,7 @@ every vault starts."
       (unwind-protect
           (with-current-buffer buffer
             (should (equal (org-semantic-vault)
-                           (org-semantic--canonical
+                           (org-semantic-canonical-vault
                             (expand-file-name "notes" dir)))))
         (kill-buffer buffer)))))
 
@@ -349,7 +349,7 @@ without this a search from one has no vault at all."
     (let ((org-semantic-vault-root dir))
       (with-temp-buffer
         (setq default-directory temporary-file-directory)
-        (should (equal (org-semantic-vault) (org-semantic--canonical dir)))))))
+        (should (equal (org-semantic-vault) (org-semantic-canonical-vault dir)))))))
 
 (ert-deftest only-a-declaration-carries-a-declaration-s-meaning ()
   "A value of t means \"the directory that said so\", and globally nothing did.
@@ -409,13 +409,36 @@ answering with the default vault instead of with none."
         (should-not (org-semantic-vault))
         (should-error (org-semantic-vault-or-error) :type 'user-error)))))
 
+(ert-deftest the-spelling-of-a-vault-is-a-public-question ()
+  "An integration naming a vault of its own has to spell it as we do.
+
+The server keys everything it holds by the string it was given, so a
+`close' or a `status' for the same vault spelled another way finds
+nothing and says so cheerfully -- zero entries dropped, no index here.
+This was a private function, and the one integration that needed it
+(vulpea, closing the vault being switched away from) had to carry a copy
+that would fall out of step the moment ours changed."
+  (should (fboundp 'org-semantic-canonical-vault))
+  (org-semantic-tests--with-vault dir
+    (let ((canonical (org-semantic-canonical-vault dir)))
+      ;; What `org-semantic-vault' answers is what this answers.
+      (let ((org-semantic-vault-root dir))
+        (with-temp-buffer
+          (setq default-directory temporary-file-directory)
+          (should (equal (org-semantic-vault) canonical))))
+      ;; No trailing slash, and a truename: the two ways of reaching one
+      ;; directory are one key.
+      (should (equal canonical (org-semantic-canonical-vault
+                                (file-name-as-directory dir))))
+      (should-not (string-suffix-p "/" canonical)))))
+
 (ert-deftest a-vault-is-spelled-one-way-however-it-was-reached ()
   "The server keys what it holds on this string, so `close' has to match."
   (org-semantic-tests--with-vault dir
-    (let ((canonical (org-semantic--canonical dir)))
-      (should (equal canonical (org-semantic--canonical
+    (let ((canonical (org-semantic-canonical-vault dir)))
+      (should (equal canonical (org-semantic-canonical-vault
                                 (file-name-as-directory dir))))
-      (should (equal canonical (org-semantic--canonical
+      (should (equal canonical (org-semantic-canonical-vault
                                 (expand-file-name "sub/.." dir))))
       (should-not (string-suffix-p "/" canonical)))))
 
@@ -481,7 +504,7 @@ after another by a server that runs one per vault."
         ;; run is pending -- and it is the last one armed.
         (should (= 2 (length org-semantic-tests--cancelled)))
         (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
-        (should (equal (gethash (org-semantic--canonical dir)
+        (should (equal (gethash (org-semantic-canonical-vault dir)
                                 org-semantic-auto-reindex--timers)
                        (car org-semantic-tests--armed)))))))
 
@@ -505,7 +528,7 @@ org file saved anywhere."
             (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
               (insert (json-serialize `(:version 1 :notes ,notes))))
             (should (equal (org-semantic-notes-root state)
-                           (org-semantic--canonical notes)))
+                           (org-semantic-canonical-vault notes)))
             ;; Anything absent, unreadable or silent is the vault itself.
             (should (equal (org-semantic-notes-root notes)
                            notes))
@@ -532,7 +555,7 @@ org file saved anywhere."
                         (org-semantic-auto-reindex--on-save))
                     (kill-buffer buffer)))
                 (should (= 1 (length org-semantic-tests--armed)))
-                (should (gethash (org-semantic--canonical state)
+                (should (gethash (org-semantic-canonical-vault state)
                                  org-semantic-auto-reindex--timers)))))
         (delete-directory state t)))))
 
@@ -609,7 +632,7 @@ So the run is narrowed to what the vault already has, and a vault
 with nothing built is told about `org-semantic-reindex' instead."
   (org-semantic-tests--with-vault dir
     (let ((org-semantic-index-mode "both")
-          (vault (org-semantic--canonical dir)))
+          (vault (org-semantic-canonical-vault dir)))
       ;; The word index alone: refresh that, and say nothing.
       (org-semantic-tests--saving
         (cl-letf (((symbol-function 'org-semantic-status)
@@ -643,7 +666,7 @@ So a save landing during a run must not send one: it re-arms, which
 also folds every save made while that run was going into the single
 run that follows it."
   (org-semantic-tests--with-vault dir
-    (let ((vault (org-semantic--canonical dir)))
+    (let ((vault (org-semantic-canonical-vault dir)))
       (org-semantic-tests--saving
         (cl-letf (((symbol-function 'org-semantic-indexing-p) (lambda (&rest _) "id"))
                   ((symbol-function 'org-semantic-status)
@@ -660,7 +683,7 @@ that is working, and there is no keystroke that came back empty to
 make anybody suspicious -- so a failure is said, and latched, since
 the condition holds until somebody acts on it."
   (org-semantic-tests--with-vault dir
-    (let* ((vault (org-semantic--canonical dir))
+    (let* ((vault (org-semantic-canonical-vault dir))
            (fail (lambda (&rest args)
                    (funcall (plist-get args :failure)
                             '(:message "the policy has changed"))
@@ -700,7 +723,7 @@ would also stop later saves from trying.  Said once per vault instead
 -- never silently, since a mode that has quietly stopped keeping the
 index up to date looks exactly like one that is working."
   (org-semantic-tests--with-vault dir
-    (let ((vault (org-semantic--canonical dir)))
+    (let ((vault (org-semantic-canonical-vault dir)))
       (org-semantic-tests--saving
         (cl-letf (((symbol-function 'org-semantic-status)
                    (lambda (&rest _) (error "No such file or directory: org-semantic"))))
@@ -719,7 +742,7 @@ index up to date looks exactly like one that is working."
   (org-semantic-tests--with-vault dir
     (let ((org-semantic-vault-root dir))
       (org-semantic-tests--saving
-        (org-semantic-auto-reindex--arm (org-semantic--canonical dir))
+        (org-semantic-auto-reindex--arm (org-semantic-canonical-vault dir))
         (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
         (org-semantic-auto-reindex-mode 1)
         (should (memq #'org-semantic-auto-reindex--on-save after-save-hook))

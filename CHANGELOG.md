@@ -221,6 +221,12 @@ not have.
   an account of the empty list once the question is gone. Declining costs nothing:
   `R` indexes the vault whenever you like, which is the same call the offer would
   have made.
+- **`org-semantic-canonical-vault` is public**, because an integration naming a
+  vault of its own needs it: the server keys everything it holds by the string it
+  was given, so a `close` or a `status` spelled another way — a trailing slash, a
+  symlinked path — finds nothing and says so cheerfully. It was private, and the
+  one integration that needed it carried a copy that would have fallen out of step
+  the moment ours changed. `org-semantic--canonical` remains as an obsolete alias.
 - **`org-semantic-close` says nothing unless it is called as a command**, and
   returns how many entries were dropped. The caller with a reason to send it is
   one that knows a vault has been left — a vault switch, the last buffer of one
