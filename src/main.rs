@@ -3495,6 +3495,143 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
+/// What `.org-semantic/vault.json` may say about the vault it sits in.
+///
+/// Every field optional and merged over the defaults, so `{}` is legal and a
+/// vault that says nothing is the ordinary case: the notes are the directory the
+/// index sits in. Refusing unknown keys for the reason `Config` refuses them — a
+/// misspelt setting that is silently ignored is worse than one that fails.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct VaultFile {
+    /// The schema this was written for, so a newer one is refused by name rather
+    /// than read as though every key it does not have were a default.
+    version: Option<u32>,
+    /// Where the notes are, if not here. Absolute, or relative to the vault.
+    notes: Option<String>,
+}
+
+const VAULT_FILE: &str = "vault.json";
+const VAULT_VERSION: u32 = 1;
+
+/// Say when a vault has no notes, rather than writing an index of nothing.
+///
+/// Loud because it is otherwise invisible: the run succeeds, every search
+/// answers with nothing, and nothing says why.  The case that makes it worth
+/// having is a detached vault whose `vault.json` went with the rest of
+/// `.org-semantic` — the defaults then say the notes are the placeholder
+/// directory, which is empty, and "my vault went blank" is what that looks like
+/// from outside.
+fn report_empty(notes: &Path, files: &[PathBuf], target: &'static str, j: &mut Journal) {
+    if files.is_empty() {
+        let mut r = Remark::new("no-notes", format!("no .org files under {}", notes.display()));
+        r.target = Some(target);
+        j.remark(r);
+    }
+}
+
+/// Say when notes have been left in a vault whose notes are elsewhere.
+///
+/// Silent otherwise, and it looks exactly like a chunking bug: the file is there,
+/// it is never in a result, and nothing about the run mentions it.  Only the top
+/// level, since a placeholder directory is allowed to hold whatever else its
+/// owner keeps there — this is about the one mistake, which is putting a note
+/// beside the index instead of in the notes.
+fn report_stranded(vault: &Path, notes: &Path, target: &'static str, j: &mut Journal) {
+    if notes == vault {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(vault) else { return };
+    let stranded =
+        entries.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "org")).count();
+    if stranded > 0 {
+        let mut r = Remark::new(
+            "notes-elsewhere",
+            format!(
+                "{stranded} .org file(s) in {} are not indexed: this vault's notes are {}",
+                vault.display(),
+                notes.display()
+            ),
+        );
+        r.target = Some(target);
+        j.remark(r);
+    }
+}
+
+/// Where a vault's notes are: here, or wherever `vault.json` says.
+///
+/// **This is the only place that answers it**, and the split it describes is the
+/// whole of the feature: a vault directory is where its *index* lives, and the
+/// notes are inside it unless `.org-semantic/vault.json` names somewhere else.
+/// So an index can sit outside a synced folder — or several can sit side by side
+/// under one cache directory — while the vault stays the single path every
+/// command already takes and the server already keys its caches by.
+///
+/// Nothing else about the format moves: `Chunk::path` and the manifest's stamps
+/// stay relative to *this* answer, so an existing index is still read by the
+/// binary that gains this and there is no version to bump.
+///
+/// A placeholder is not followed twice. Notes that are themselves a placeholder
+/// would be a chain nobody asked for, and a cycle if the two named each other —
+/// so it is an error, said in one sentence, rather than a loop.
+fn notes_root(vault: &Path) -> Result<PathBuf> {
+    let said = state_dir(vault).join(VAULT_FILE);
+    let Ok(bytes) = fs::read(&said) else { return Ok(vault.to_path_buf()) };
+    let file: VaultFile =
+        serde_json::from_slice(&bytes).with_context(|| format!("reading {}", said.display()))?;
+    if let Some(v) = file.version {
+        if v > VAULT_VERSION {
+            return Err(anyhow!(
+                "{} is version {v} and this org-semantic knows version {VAULT_VERSION} — \
+                 update the binary, or say which keys it should read",
+                said.display()
+            ));
+        }
+    }
+    let Some(notes) = file.notes else { return Ok(vault.to_path_buf()) };
+    // `~` expanded before anything else looks at it: a literal `~/notes` would
+    // otherwise be created as a directory called `~` wherever the process
+    // happened to start, and indexed with a straight face.
+    let expanded = expand_tilde(&notes);
+    let path = Path::new(&expanded);
+    let joined = if path.is_absolute() { path.to_path_buf() } else { vault.join(path) };
+    // Normalised, because `../notes` is what a relative pointer looks like and
+    // `…/state/../notes` is what every message and every `models` line would
+    // otherwise print.  Canonicalising also makes `dir:` comparisons and the
+    // client's own containment check agree with what is stored.
+    let notes = joined.canonicalize().unwrap_or(joined);
+    if !notes.is_dir() {
+        return Err(anyhow!(
+            "{} names {} as the notes, and it is not a directory",
+            said.display(),
+            notes.display()
+        ));
+    }
+    // One hop is about the indirection and not about the file.  A `vault.json`
+    // in the notes root is legal and reserved: it is where settings of the
+    // vault itself would be merged over the placeholder's, once there are any
+    // to merge.  What is refused is a second *notes* key, which would be a
+    // chain, or a cycle if the two named each other.
+    let onward = state_dir(&notes).join(VAULT_FILE);
+    // Compared canonically, or `"notes": "."` reads as a vault naming somebody
+    // else and is refused as a chain it is not.
+    let elsewhere = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf()) != notes;
+    if elsewhere {
+        if let Ok(bytes) = fs::read(&onward) {
+            let file: VaultFile = serde_json::from_slice(&bytes)
+                .with_context(|| format!("reading {}", onward.display()))?;
+            if file.notes.is_some() {
+                return Err(anyhow!(
+                    "{} names {}, which says where *its* notes are — one hop, not a chain",
+                    said.display(),
+                    notes.display()
+                ));
+            }
+        }
+    }
+    Ok(notes)
+}
+
 /// What this process is resident in, in bytes, or `None` where we cannot ask.
 ///
 /// The **total**, and the only figure here that covers the runtime: `ort` rc.13
@@ -3755,7 +3892,7 @@ type Seen<'a> =
 /// out on `Scan::unreadable` for the caller to remark on, because the caller is
 /// the one that knows which index it is scanning for.
 fn scan_vault(
-    vault: &Path,
+    notes: &Path,
     files: &[PathBuf],
     prev: Option<Seen<'_>>,
     rehash: bool,
@@ -3786,7 +3923,7 @@ fn scan_vault(
         j.progress(
             &Progress::new(target, "scan", "files", i, t0.elapsed().as_secs_f64()).of(files.len()),
         );
-        let path = rel_path(vault, f);
+        let path = rel_path(notes, f);
         let stamp = stamp_of(f);
 
         // Fast path: same mtime and size as when we last looked.
@@ -3905,9 +4042,12 @@ fn cmd_index_lexical(
     stop: &Cancel,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
+    let notes = notes_root(vault)?;
     let mut files = Vec::new();
-    org_files(vault, &mut files)?;
+    org_files(&notes, &mut files)?;
     files.sort();
+    report_empty(&notes, &files, "lexical", j);
+    report_stranded(vault, &notes, "lexical", j);
 
     let dir = state_dir(vault);
     let old: Option<LexManifest> = (!full)
@@ -3916,7 +4056,7 @@ fn cmd_index_lexical(
         .and_then(|b| serde_json::from_slice(&b).ok());
 
     let scan = scan_vault(
-        vault,
+        &notes,
         &files,
         old.as_ref().map(|m| (&m.files, &m.stamps)),
         rehash,
@@ -3937,7 +4077,7 @@ fn cmd_index_lexical(
     let mut speculative = Journal::quiet();
     for st in &scan.stale {
         stop.check()?;
-        let f = vault.join(&st.path);
+        let f = notes.join(&st.path);
         chunks.extend(chunk_file(
             &f,
             &st.path,
@@ -3972,7 +4112,7 @@ fn cmd_index_lexical(
                 &Progress::new("lexical", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
                     .of(files.len()),
             );
-            let path = rel_path(vault, f);
+            let path = rel_path(&notes, f);
             if unopenable.contains(path.as_str()) {
                 continue;
             }
@@ -4225,15 +4365,18 @@ fn cmd_index(
     stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
+    let notes = notes_root(vault)?;
     let mut files = Vec::new();
-    org_files(vault, &mut files)?;
+    org_files(&notes, &mut files)?;
     files.sort();
+    report_empty(&notes, &files, "semantic", j);
+    report_stranded(vault, &notes, "semantic", j);
 
     let dir = semantic_dir(vault, m);
     let old = if full { None } else { load_index(&dir, m, j) };
 
     let scan = scan_vault(
-        vault,
+        &notes,
         &files,
         old.as_ref().map(|ix| (&ix.files, &ix.stamps)),
         rehash,
@@ -4326,7 +4469,7 @@ fn cmd_index(
             &Progress::new("semantic", "chunk", "files", i, t_chunk.elapsed().as_secs_f64())
                 .of(files.len()),
         );
-        let path = rel_path(vault, f);
+        let path = rel_path(&notes, f);
         if reused.contains(path.as_str()) {
             if let Some(ix) = &old {
                 for &j in ix.by_path.get(&path).map(Vec::as_slice).unwrap_or(&[]) {
@@ -4747,10 +4890,10 @@ type Notes = std::collections::HashMap<String, Option<Vec<String>>>;
 /// A file that has moved or shrunk since indexing yields nothing rather than an
 /// error or the wrong lines: an index a little behind its vault should still
 /// answer, visibly missing a preview rather than inventing one.
-fn passage(vault: &Path, path: &str, span: (usize, usize), notes: &mut Notes) -> String {
+fn passage(root: &Path, path: &str, span: (usize, usize), notes: &mut Notes) -> String {
     let (start, end) = span;
     let lines = notes.entry(path.to_string()).or_insert_with(|| {
-        fs::read_to_string(vault.join(path)).ok().map(|s| s.lines().map(str::to_string).collect())
+        fs::read_to_string(root.join(path)).ok().map(|s| s.lines().map(str::to_string).collect())
     });
     let Some(lines) = lines else { return String::new() };
     if start == 0 || start > end || end > lines.len() {
@@ -4764,7 +4907,7 @@ fn passage(vault: &Path, path: &str, span: (usize, usize), notes: &mut Notes) ->
 /// `:ID:` when there is one so it can jump through `org-id` and survive the note
 /// moving, and the line as the fallback when there is not.
 fn hits_json(
-    vault: &Path,
+    root: &Path,
     scored: &[(f32, &Chunk)],
     lim: Limits,
     merge: bool,
@@ -4787,7 +4930,7 @@ fn hits_json(
                 // and has no such floor.
                 "z": base.map(|b| b.z(score)),
                 "path": c.path,
-                "file": vault.join(&c.path),
+                "file": root.join(&c.path),
                 // The heading's line, which is what a client jumps to.  Named
                 // for what it is: plain `line` read as "the line of the hit",
                 // which it never was.
@@ -4807,7 +4950,7 @@ fn hits_json(
                 "lang": (!c.lang.is_empty()).then_some(&c.lang),
                 // Read from the note, not from the index: the real passage,
                 // code blocks and all.
-                "text": passage(vault, &c.path, span, &mut notes),
+                "text": passage(root, &c.path, span, &mut notes),
             })
         })
         .collect();
@@ -4823,7 +4966,7 @@ fn hits_json(
 /// BM25 has no such floor, so lexical hits pass `None` and show their score
 /// alone.
 fn report(
-    vault: &Path,
+    root: &Path,
     scored: &[(f32, &Chunk)],
     lim: Limits,
     merge: bool,
@@ -4857,7 +5000,7 @@ fn report(
         }
         let shown = merged(g, merge);
         for (score, c, span) in &shown {
-            let preview: String = passage(vault, &c.path, *span, &mut notes)
+            let preview: String = passage(root, &c.path, *span, &mut notes)
                 .split_whitespace()
                 .take(20)
                 .collect::<Vec<_>>()
@@ -4959,11 +5102,15 @@ fn cmd_search(
     let m = choose_index(vault, want)?;
     let ix = Index::read(&semantic_dir(vault, m), m)?;
     let n = ix.chunks.len();
+    // Where the notes are, which is what a passage is read back from and what a
+    // `dir:` predicate is relative to -- a chunk's path is relative to that
+    // root, not to the directory the index sits in.
+    let notes = notes_root(vault)?;
 
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
     let mut f = parse_query(query);
-    f.relative_to(vault)?;
+    f.relative_to(&notes)?;
     // A language is a stemmer's business, and an embedding is not stemmed.  The
     // semantic index therefore records no language, so this predicate could only
     // ever match nothing — better said than silently returned.
@@ -4978,7 +5125,7 @@ fn cmd_search(
         // No match is an answer, not an error: a caller reading JSON gets an
         // empty list rather than prose it would have to recognise.
         if json {
-            println!("{}", hits_json(vault, &[], lim, merge, None));
+            println!("{}", hits_json(&notes, &[], lim, merge, None));
         } else {
             println!("no chunk matches those filters");
         }
@@ -5013,10 +5160,10 @@ fn cmd_search(
 
     let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(s, i)| (*s, &ix.chunks[*i])).collect();
     if json {
-        println!("{}", hits_json(vault, &hits, lim, merge, ix.baseline));
+        println!("{}", hits_json(&notes, &hits, lim, merge, ix.baseline));
         return Ok(());
     }
-    report(vault, &hits, lim, merge, ix.baseline.as_ref());
+    report(&notes, &hits, lim, merge, ix.baseline.as_ref());
     eprintln!(
         "\n[model load {:.0}ms · query embed {:.0}ms · search over {} vectors {:.2}ms]",
         load.as_secs_f64() * 1000.0,
@@ -5031,8 +5178,9 @@ fn cmd_search(
 /// full run.  Reports the chunk-length distribution too, since throughput on
 /// this workload is set by tokens rather than by chunk count.
 fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
+    let notes = notes_root(vault)?;
     let mut files = Vec::new();
-    org_files(vault, &mut files)?;
+    org_files(&notes, &mut files)?;
     files.sort();
     // Packed with the real tokenizer, or this measures chunks the indexer would
     // never produce.
@@ -5045,7 +5193,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
         if let Ok(text) = fs::read_to_string(f) {
             chunks.extend(chunk_file(
                 f,
-                &rel_path(vault, f),
+                &rel_path(&notes, f),
                 &text,
                 None,
                 &Config::default(),
@@ -5122,8 +5270,9 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
 fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let tok = tokenizer_for(m)?;
 
+    let notes = notes_root(vault)?;
     let mut files = Vec::new();
-    org_files(vault, &mut files)?;
+    org_files(&notes, &mut files)?;
     files.sort();
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
@@ -5134,7 +5283,7 @@ fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
         if let Ok(text) = fs::read_to_string(f) {
             chunks.extend(chunk_file(
                 f,
-                &rel_path(vault, f),
+                &rel_path(&notes, f),
                 &text,
                 None,
                 &Config::default(),
@@ -5425,8 +5574,9 @@ fn cmd_chunks(
             Target::Lexical => "lexical",
         }
     );
+    let notes = notes_root(vault)?;
     let mut files = Vec::new();
-    org_files(vault, &mut files)?;
+    org_files(&notes, &mut files)?;
     files.sort();
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
@@ -5441,7 +5591,7 @@ fn cmd_chunks(
         };
         let chunks = chunk_file(
             f,
-            &rel_path(vault, f),
+            &rel_path(&notes, f),
             &text,
             // Only the lexical preview reads a note's `# ltex:`, so only it can
             // report a bad one.
@@ -5502,8 +5652,9 @@ fn cmd_lexical(
         .ok_or_else(|| anyhow!("no lexical index in {} — run `index --lexical`", dir.display()))?;
     let analyzer = lexical::Analyzer::from_key(&stored)
         .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
+    let notes = notes_root(vault)?;
     let mut f = parse_query(query);
-    f.relative_to(vault)?;
+    f.relative_to(&notes)?;
     if !f.is_empty() && !json {
         println!("filter: {}", describe_filters(&f));
     }
@@ -5519,14 +5670,14 @@ fn cmd_lexical(
     if json {
         // No baseline: BM25 scores are unbounded, so there is nothing to
         // standardise them against.
-        println!("{}", hits_json(vault, &hits, lim, merge, None));
+        println!("{}", hits_json(&notes, &hits, lim, merge, None));
         return Ok(());
     }
     if hits.is_empty() {
         println!("no match");
         return Ok(());
     }
-    report(vault, &hits, lim, merge, None);
+    report(&notes, &hits, lim, merge, None);
     eprintln!("\n[lexical search {:.1}ms]", el.as_secs_f64() * 1000.0);
     Ok(())
 }
@@ -5708,6 +5859,20 @@ fn main() -> Result<()> {
             }
             if built.is_none() {
                 println!("\nPass a vault to see which are built for it.");
+            }
+            // With the notes possibly elsewhere, this is the only place that
+            // says what an index describes — the directory alone no longer
+            // tells you, which is the point of allowing the split at all.
+            if let Some(v) = args.get(2) {
+                let vault = Path::new(v);
+                println!("\nIndex in {}", state_dir(vault).display());
+                match notes_root(vault) {
+                    Ok(notes) if notes != vault => {
+                        println!("Notes in {} (said by {VAULT_FILE})", notes.display());
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("Notes: {e}"),
+                }
             }
             println!(
                 "\nEach model keeps its own index under .org-semantic/semantic/<model>/, so\n\
@@ -6539,6 +6704,165 @@ mod tests {
             loaded(&sem(&v), m).unwrap().files[&a],
             old_hash,
             "the new content hash must reach the manifest, or this repeats every run"
+        );
+    }
+
+    /// The whole of the split, on the one path where it could silently
+    /// half-work: an index written beside notes that are somewhere else.
+    ///
+    /// The failure it guards is not an error but an *empty answer* — notes
+    /// looked for in the directory holding the index, none found, an index of
+    /// nothing written, and every search then answering with nothing at all.
+    #[test]
+    fn a_vault_may_hold_only_its_index_and_say_where_the_notes_are() {
+        let v = scratch("detached");
+        let state = v.join("state");
+        let notes = v.join("notes");
+        fs::create_dir_all(state_dir(&state)).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        let rel = note(&notes, "pumps");
+        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"version":1,"notes":"../notes"}"#)
+            .unwrap();
+
+        // Relative to the vault, and normalised: `state/../notes` is not what a
+        // message should print, nor what a client should be handed.
+        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let mut j = Journal::quiet();
+        let report =
+            cmd_index_lexical(&state, true, false, &lang, false, &cfg, &mut j, &Cancel::default())
+                .unwrap();
+        assert_eq!(report.files, 1, "the note was found where vault.json said");
+        assert!(report.chunks > 0, "and it was indexed");
+
+        // The index is in the vault, and nothing of it is beside the notes.
+        assert!(lexical::stored_key(&state_dir(&state)).is_some());
+        assert!(!state_dir(&notes).exists(), "nothing is written beside the notes");
+
+        // A chunk's path is relative to the notes, which is what makes a
+        // passage readable back and `dir:` predicates meaningful.
+        let hits = {
+            let stored = lexical::stored_key(&state_dir(&state)).unwrap();
+            let analyzer = lexical::Analyzer::from_key(&stored).unwrap();
+            let f = parse_query("pumps");
+            lexical::search(&state_dir(&state), &f, 10, true, &analyzer).unwrap()
+        };
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.path, rel);
+        let mut cache = Notes::new();
+        let text = passage(
+            &notes,
+            &hits[0].1.path,
+            (hits[0].1.start_line, hits[0].1.end_line),
+            &mut cache,
+        );
+        assert!(text.contains("pumps"), "read back from the notes, not from the vault: {text:?}");
+    }
+
+    /// Every way `vault.json` can be wrong, said rather than guessed at.
+    ///
+    /// Each of these would otherwise be a quiet empty index: a version this
+    /// binary cannot read, a notes root that is not there, a misspelt key, and a
+    /// pointer to a vault that points somewhere else again.
+    #[test]
+    fn a_vault_that_says_where_its_notes_are_is_read_strictly() {
+        let v = scratch("vault-file");
+        let state = v.join("state");
+        let notes = v.join("notes");
+        fs::create_dir_all(state_dir(&state)).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        let said = state_dir(&state).join(VAULT_FILE);
+        // `{:#}` and not `to_string()`: a serde failure arrives as the *cause*
+        // under "reading <file>", which is what the CLI prints as `Caused by:`.
+        let complaint = |json: &str| -> String {
+            fs::write(&said, json).unwrap();
+            format!("{:#}", notes_root(&state).unwrap_err())
+        };
+
+        // Nothing said at all, and nothing but a version: the notes are here.
+        assert_eq!(notes_root(&state).unwrap(), state, "no file means no indirection");
+        fs::write(&said, "{}").unwrap();
+        assert_eq!(notes_root(&state).unwrap(), state, "an empty object is legal");
+        fs::write(&said, r#"{"version":1}"#).unwrap();
+        assert_eq!(notes_root(&state).unwrap(), state, "and says nothing about notes");
+
+        let newer = complaint(r#"{"version":99}"#);
+        assert!(newer.contains("version 99"), "{newer}");
+        assert!(newer.contains(VAULT_FILE), "the file is named: {newer}");
+
+        let missing = complaint(r#"{"notes":"nowhere"}"#);
+        assert!(missing.contains("not a directory"), "{missing}");
+        assert!(missing.contains(VAULT_FILE), "the file is named: {missing}");
+
+        let typo = complaint(r#"{"note":"../notes"}"#);
+        assert!(typo.contains("unknown field"), "a misspelt key is refused: {typo}");
+
+        // One hop, not a chain.
+        fs::create_dir_all(state_dir(&notes)).unwrap();
+        fs::write(state_dir(&notes).join(VAULT_FILE), r#"{"notes":"../state"}"#).unwrap();
+        let chain = complaint(r#"{"notes":"../notes"}"#);
+        assert!(chain.contains("one hop"), "{chain}");
+
+        // But a `vault.json` at the notes root that says nothing about notes is
+        // *allowed*, being where settings of the vault itself would be merged
+        // from one day.  Refusing the file rather than the second indirection
+        // would close that door.
+        fs::write(state_dir(&notes).join(VAULT_FILE), r#"{"version":1}"#).unwrap();
+        fs::write(&said, r#"{"notes":"../notes"}"#).unwrap();
+        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+    }
+
+    /// A vault with no notes at all is said, and notes left beside the index too.
+    ///
+    /// Both are silent otherwise, and both look like something else: an empty
+    /// index reads as a broken search, and a note stranded in the placeholder
+    /// reads as a chunking bug — it is there, it is never in a result, and no
+    /// run mentions it.  The first is why `vault.json` living inside the
+    /// disposable directory is safe enough: deleting it makes the notes look
+    /// empty, and this is what says so.
+    #[test]
+    fn a_vault_with_nothing_to_index_says_so() {
+        let v = scratch("nothing-to-index");
+        let state = v.join("state");
+        let notes = v.join("notes");
+        fs::create_dir_all(state_dir(&state)).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let run = |dir: &Path, j: &mut Journal| {
+            cmd_index_lexical(dir, true, false, &lang, false, &cfg, j, &Cancel::default()).unwrap()
+        };
+
+        // An empty vault: the run works, and says what it found.
+        let mut j = Journal::quiet();
+        run(&state, &mut j);
+        assert!(
+            j.remarks.iter().any(|r| r.kind == "no-notes"),
+            "an index of nothing is announced: {:?}",
+            j.remarks
+        );
+
+        // Notes elsewhere, and one left behind in the placeholder.
+        note(&notes, "pumps");
+        note(&state, "stray");
+        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"notes":"../notes"}"#).unwrap();
+        let mut j = Journal::quiet();
+        let report = run(&state, &mut j);
+        assert_eq!(report.files, 1, "only the notes are indexed");
+        let stranded = j.remarks.iter().find(|r| r.kind == "notes-elsewhere").expect("said");
+        assert!(stranded.message.contains("not indexed"), "{}", stranded.message);
+
+        // And no such remark when the notes are where the index is.
+        let plain = scratch("nothing-to-index-plain");
+        note(&plain, "pumps");
+        let mut j = Journal::quiet();
+        run(&plain, &mut j);
+        assert!(
+            !j.remarks.iter().any(|r| r.kind == "notes-elsewhere" || r.kind == "no-notes"),
+            "an ordinary vault says neither: {:?}",
+            j.remarks
         );
     }
 

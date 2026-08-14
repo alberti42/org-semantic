@@ -364,7 +364,10 @@ impl Server {
         };
 
         let mut f = parse_query(query);
-        f.relative_to(&vault)?;
+        // A hit's path is relative to where the notes are, which is not the
+        // vault directory when that directory holds only the index.
+        let notes = notes_root(&vault)?;
+        f.relative_to(&notes)?;
         if f.text.trim().is_empty() && f.is_empty() {
             // An empty query is not an error while someone is still typing.
             return Ok(answer(serde_json::json!({ "hits": [] })));
@@ -406,7 +409,7 @@ impl Server {
             let hits = lexical::search(&state_dir(&vault), &f, pool, conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
-            return Ok(answer(hits_json(&vault, &hits, lim, merge, None)));
+            return Ok(answer(hits_json(&notes, &hits, lim, merge, None)));
         }
 
         // Negated as well as plain, and this was missed once: the CLI's copy of
@@ -450,7 +453,7 @@ impl Server {
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &ix.chunks[*i])).collect();
-        Ok(answer(hits_json(&vault, &hits, lim, merge, ix.baseline)))
+        Ok(answer(hits_json(&notes, &hits, lim, merge, ix.baseline)))
     }
 
     /// Everything an `index` request can be refused for, settled before a thread
@@ -842,6 +845,12 @@ impl Server {
         let lexical = lexical::stored_key(&state_dir(&vault)).is_some();
         Ok(serde_json::json!({
             "vault": vault,
+            // Where the notes are, which is the vault itself unless its
+            // `vault.json` says otherwise.  A client needs it and cannot work it
+            // out: a hit's path is relative to *this* root, and an editor
+            // deciding whether a saved file belongs to this vault is asking
+            // about this directory rather than about the one holding the index.
+            "notes": notes_root(&vault)?,
             "semantic": models,
             "lexical": lexical,
             // About *this* vault, like every other field here: whether its index

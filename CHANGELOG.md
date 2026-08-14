@@ -111,6 +111,24 @@ not have.
 
 ### Added
 
+- **A vault's index need not sit beside its notes.** A `vault.json` in
+  `.org-semantic/` names where the notes are, and then the vault directory holds
+  nothing but the index — for notes in a synced folder that should not have
+  vectors rewritten under it, or for several vaults keeping their indexes together
+  under one cache directory. Needs binary 0.2.1.
+
+  Every command still takes the one path it always took, and nothing about the
+  index format changes, so an existing index is read by the new binary as it
+  stands. `models <vault>` prints both roots, which is the only way to see what an
+  index describes once the two can differ. Both keys are optional and merged over
+  the defaults; an unknown key or a version this binary does not know is refused
+  rather than half-read; and a vault named by `notes` may not name notes of its
+  own — one hop, not a chain.
+
+  Two things are now said rather than left to be found: a vault with no notes at
+  all, instead of an index of nothing that answers every search with nothing, and
+  `.org` files left in the vault directory when the notes are elsewhere, which
+  otherwise look exactly like a chunking bug.
 - **`org-semantic-auto-reindex-mode`** keeps a vault's indexes current as its
   notes are saved: two seconds after saving stops, whatever changed is reindexed.
   The wait is a debounce (`org-semantic-auto-reindex-delay`), so

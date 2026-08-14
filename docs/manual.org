@@ -1763,7 +1763,8 @@ model --- =tag:work= would otherwise have it looking for notes /about/ the words
 :PROPERTIES:
 :CUSTOM_ID: what-it-writes
 :END:
-Everything goes in one hidden directory beside your notes. *No note is ever
+Everything goes in one hidden directory --- beside your notes by default, or
+[[#index-elsewhere][somewhere else entirely]] if you say so. *No note is ever
 modified* --- org-semantic only reads them.
 
 | path                                           | 951-note vault | what it is                                                          |
@@ -1807,8 +1808,57 @@ rebuilt or deleted without disturbing the other --- which is what makes
 The two chunk differently, because they are bounded by different things --- see
 =chunk= in the policy above.
 
-Add =/.org-semantic/= to the vault's =.gitignore=. All of it is derived --- delete
-the directory and =org-semantic index= rebuilds it in one pass.
+Add =/.org-semantic/= to the vault's =.gitignore=. All of it is derived, so
+rebuilding is always available: =org-semantic index --full= writes it again in one
+pass. Deleting the directory works too, with one caveat --- if this vault keeps
+its notes elsewhere, =vault.json= (below) goes with it, and the vault then looks
+empty rather than unindexed.
+
+*** A vault whose index is not beside its notes
+:PROPERTIES:
+:CUSTOM_ID: index-elsewhere
+:END:
+A vault directory is where its *index* lives, and by default the notes are in it.
+They need not be: if the directory holds a =vault.json=, the notes are wherever
+that says, and the vault itself holds nothing but the index.
+
+That is what to reach for when the notes live in a synced folder --- Dropbox,
+iCloud, Syncthing --- and you would rather not have gigabytes of vectors
+rewritten under it on every reindex, or when several vaults should keep their
+indexes together under one cache directory:
+
+#+begin_example
+  ~/state/notes/
+  ├── .org-semantic/
+  │   ├── vault.json      { "version": 1, "notes": "~/Dropbox/org" }
+  │   ├── semantic/…
+  │   └── tantivy/…
+  └──
+#+end_example
+
+Then =org-semantic index ~/state/notes= indexes the notes in =~/Dropbox/org= and
+writes nothing whatever inside it. Every command still takes the one path it
+always took --- the vault --- and =org-semantic models ~/state/notes= prints both
+roots, which is the only way to see what an index describes once the two can
+differ.
+
+Both keys are optional and are merged over the defaults, so ={}= is legal and
+means "the notes are here". =notes= may be absolute, start with =~=, or be
+relative to the vault (=../org=). =version= is what a future format would be read
+against; a version this binary does not know is refused by name rather than
+half-read. An unknown key is refused, as it is in the policy file --- a misspelt
+setting that is silently ignored is worse than one that fails.
+
+Two things are said out loud rather than left to be discovered:
+
+- a vault with *no notes at all* --- rather than writing an index of nothing and
+  answering every search with nothing;
+- =.org= files left in the vault directory when the notes are elsewhere, which
+  are not indexed and otherwise look exactly like a chunking bug.
+
+A vault named by =notes= may not name notes of its own: one hop, not a chain. (A
+=vault.json= *in* the notes root that says nothing about notes is allowed, and is
+where settings of the vault itself would be read from if there are ever any.)
 
 *Two things live outside the vault*, both downloaded once and shared by every
 vault: the embedding model, in =$XDG_CACHE_HOME/fastembed=, and the language

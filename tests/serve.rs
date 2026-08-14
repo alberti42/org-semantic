@@ -381,6 +381,65 @@ fn status_answers_about_a_vault() {
     assert_eq!(result["lexical"], false, "nothing built here yet");
     assert_eq!(result["semantic"], json!([]));
     assert!(result.get("version").is_none(), "not its question to answer: {result:?}");
+    // Where the notes are, which is the vault itself here.
+    assert_eq!(result["notes"], json!(v));
+}
+
+/// A vault may hold only its index, and then `status` is how a client learns
+/// where the notes are.
+///
+/// It cannot work that out: a hit's path is relative to the notes root, and an
+/// editor asking whether a saved file belongs to this vault is asking about that
+/// directory rather than about the one holding the index.  So the answer travels
+/// with everything else that is about the vault.
+#[test]
+fn status_says_where_the_notes_are_when_they_are_elsewhere() {
+    let notes = vault("detached-notes", 2);
+    let state = scratch("detached-state");
+    std::fs::create_dir_all(state.join(".org-semantic")).unwrap();
+    std::fs::write(
+        state.join(".org-semantic/vault.json"),
+        serde_json::to_vec(&json!({ "version": 1, "notes": notes })).unwrap(),
+    )
+    .unwrap();
+
+    // Two sessions, because a search sent in the same one is answered *while*
+    // the index runs -- from the version committed before it, which here is none.
+    let built = talk(
+        &[json!({ "jsonrpc": "2.0", "id": 1, "method": "index",
+                  "params": { "vault": state, "mode": "lexical" } })],
+        None,
+    );
+    let msgs = talk(
+        &[
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "status",
+                    "params": { "vault": state } }),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "search",
+                    "params": { "vault": state, "query": "atoms", "mode": "lexical" } }),
+        ],
+        None,
+    );
+    let reply = |id: i64| match id {
+        1 => &built.iter().find(|m| m["id"] == 1).expect("a reply")["result"],
+        _ => &msgs.iter().find(|m| m["id"] == id).expect("a reply")["result"],
+    };
+    assert_eq!(reply(1)["lexical"]["files"], 2, "the notes were found: {:?}", reply(1));
+    assert_eq!(reply(2)["notes"], json!(notes.canonicalize().unwrap()));
+    assert_eq!(reply(2)["vault"], json!(state), "and the vault is still what was asked about");
+    // And a hit is readable: its text comes from the notes, over the span.
+    let hits = reply(3)["hits"].as_array().expect("hits").clone();
+    assert!(!hits.is_empty(), "a search of a detached vault answers: {:?}", reply(3));
+    assert!(
+        hits[0]["text"].as_str().unwrap().contains("atoms"),
+        "read back from the notes: {:?}",
+        hits[0]
+    );
+    // And the file it names is in the notes, not beside the index.
+    let file = hits[0]["file"].as_str().unwrap();
+    assert!(
+        Path::new(file).starts_with(notes.canonicalize().unwrap()),
+        "a hit addresses the note itself: {file}"
+    );
 }
 
 /// `close` is how a client says it is done with a vault, so the chunk table and
