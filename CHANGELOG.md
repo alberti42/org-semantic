@@ -129,6 +129,12 @@ not have.
   all, instead of an index of nothing that answers every search with nothing, and
   `.org` files left in the vault directory when the notes are elsewhere, which
   otherwise look exactly like a chunking bug.
+
+  From Emacs, `org-semantic-vault-root` names the vault, as it always did — a hit
+  already carries the absolute file it is in, and `org-semantic-auto-reindex-mode`
+  asks whether a saved file is in the *notes*, so saving one still reindexes.
+  `status` carries `notes` for any client that needs it, and
+  `M-x org-semantic-show-status` names both.
 - **`org-semantic-auto-reindex-mode`** keeps a vault's indexes current as its
   notes are saved: two seconds after saving stops, whatever changed is reindexed.
   The wait is a debounce (`org-semantic-auto-reindex-delay`), so

@@ -1860,6 +1860,12 @@ A vault named by =notes= may not name notes of its own: one hop, not a chain. (A
 =vault.json= *in* the notes root that says nothing about notes is allowed, and is
 where settings of the vault itself would be read from if there are ever any.)
 
+From Emacs, ~org-semantic-vault-root~ names the *vault* --- =~/state/notes= in the
+example above --- because that is what every request is keyed by. Nothing else
+changes: a hit already comes back with the absolute file it is in, and
+~org-semantic-auto-reindex-mode~ asks whether a saved file is in the **notes**, so
+saving one still reindexes. ~M-x org-semantic-show-status~ names both.
+
 *Two things live outside the vault*, both downloaded once and shared by every
 vault: the embedding model, in =$XDG_CACHE_HOME/fastembed=, and the language
 classifier, in =$XDG_CACHE_HOME/org-semantic=. =org-semantic models= prints both

@@ -478,6 +478,57 @@ after another by a server that runs one per vault."
                                 org-semantic-auto-reindex--timers)
                        (car org-semantic-tests--armed)))))))
 
+(ert-deftest a-vault-may-keep-its-notes-somewhere-else ()
+  "The notes are the vault, unless its `vault.json' says otherwise.
+
+A vault directory is where the *index* lives, so saving a note asks
+whether the file is in the **notes** -- and reindexes the vault, which
+is what the server is keyed by.  Comparing against the vault instead
+would make the mode silently do nothing for exactly the vaults that
+keep their notes elsewhere.
+
+Read here rather than asked of the server: this runs on
+`after-save-hook', where a round trip would start the process for any
+org file saved anywhere."
+  (org-semantic-tests--with-vault notes
+    (let ((state (make-temp-file "org-semantic-state" t)))
+      (unwind-protect
+          (progn
+            (make-directory (expand-file-name ".org-semantic" state))
+            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+              (insert (json-serialize `(:version 1 :notes ,notes))))
+            (should (equal (org-semantic-notes-root state)
+                           (org-semantic--canonical notes)))
+            ;; Anything absent, unreadable or silent is the vault itself.
+            (should (equal (org-semantic-notes-root notes)
+                           notes))
+            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+              (insert "{ this is not json"))
+            (should (equal (org-semantic-notes-root state) state))
+            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+              (insert "{\"version\": 1}"))
+            (should (equal (org-semantic-notes-root state) state))
+
+            ;; And a note in those notes arms a reindex of the vault holding
+            ;; the index, which is the path the server knows it by.
+            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+              (insert (json-serialize `(:notes ,notes))))
+            (let ((org-semantic-vault-root state))
+              (org-semantic-tests--saving
+                (let ((buffer (find-file-noselect
+                               (expand-file-name "pumps.org" notes))))
+                  (unwind-protect
+                      (with-current-buffer buffer
+                        ;; The declaration is what the buffer must resolve to,
+                        ;; as a vault of its own would declare itself.
+                        (setq-local org-semantic-vault-root state)
+                        (org-semantic-auto-reindex--on-save))
+                    (kill-buffer buffer)))
+                (should (= 1 (length org-semantic-tests--armed)))
+                (should (gethash (org-semantic--canonical state)
+                                 org-semantic-auto-reindex--timers)))))
+        (delete-directory state t)))))
+
 (ert-deftest a-save-that-is-not-a-note-in-the-vault-arms-nothing ()
   "Three questions, cheapest first, and containment is the one that bites.
 

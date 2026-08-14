@@ -315,6 +315,36 @@ not evidence."
      ((stringp org-semantic-vault-root)
       (org-semantic--canonical (expand-file-name org-semantic-vault-root))))))
 
+(defun org-semantic-notes-root (vault)
+  "Where VAULT's notes are: VAULT itself, or what its `vault.json' says.
+
+A vault directory is where its *index* lives, and the notes are
+inside it unless `.org-semantic/vault.json' names somewhere else --
+for notes in a synced folder that should not have vectors rewritten
+under it, or for several vaults keeping their indexes together.
+
+The server is the authority on this and answers it in `status'.
+This reads the one key instead, because the caller is
+`after-save-hook': a round trip there would start the server for any
+org file saved anywhere, and the question being asked is only
+whether to bother it at all.  Anything absent, unreadable or silent
+answers VAULT, which is the default the server applies too.
+
+Nothing here decides what is indexed.  It decides what we ask about."
+  (let ((said (expand-file-name ".org-semantic/vault.json" vault)))
+    (or (and (file-readable-p said)
+             (ignore-errors
+               (let ((notes (plist-get (with-temp-buffer
+                                         (insert-file-contents said)
+                                         (json-parse-buffer :object-type 'plist))
+                                       :notes)))
+                 (and (stringp notes)
+                      ;; `expand-file-name' against the vault covers all three
+                      ;; forms the server accepts: absolute, `~/...', and
+                      ;; relative to the vault.
+                      (org-semantic--canonical (expand-file-name notes vault))))))
+        vault)))
+
 (defun org-semantic-vault-or-error (&optional buffer)
   "Return the vault BUFFER belongs to, or signal an error saying it has none.
 BUFFER is as in `org-semantic-vault'."
@@ -1230,11 +1260,16 @@ Containment is the last question and not a formality.  With
 `org-semantic-vault-root' set globally, *every* buffer resolves to
 that vault -- which is what makes a search from `*scratch*' work --
 so without it, saving a README in a code repository would reindex
-your notes and report success."
+your notes and report success.
+
+And it is containment in the *notes*, which are not always in the
+vault: a vault directory may hold nothing but the index.  Asking the
+wrong one of the two would make this mode do nothing at all for
+exactly the vaults that keep their notes elsewhere."
   (let ((file (buffer-file-name)))
     (when (and file (string-suffix-p ".org" file))
       (let ((vault (org-semantic-vault)))
-        (when (and vault (file-in-directory-p file vault))
+        (when (and vault (file-in-directory-p file (org-semantic-notes-root vault)))
           (org-semantic-auto-reindex--arm vault))))))
 
 ;;;###autoload
@@ -1293,8 +1328,14 @@ asking."
   (let* ((vault (or vault (org-semantic-vault-or-error)))
          (status (org-semantic-status vault))
          (models (append (plist-get status :semantic) nil)))
-    (message "%s: semantic [%s], lexical %s, %s%s"
+    (message "%s%s: semantic [%s], lexical %s, %s%s"
              (abbreviate-file-name vault)
+             ;; Only when they differ, and then it is most of the answer: the
+             ;; directory named no longer says what is indexed.
+             (let ((notes (plist-get status :notes)))
+               (if (and notes (not (equal notes vault)))
+                   (format " (notes in %s)" (abbreviate-file-name notes))
+                 ""))
              ;; A model whose weights are gone is named as such: the index is
              ;; there and unsearchable, which is otherwise indistinguishable
              ;; from a working one until a search refuses.
