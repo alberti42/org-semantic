@@ -184,7 +184,7 @@ notes by meaning, and a lexical one, which finds them by word.
          Phrases, AND/OR/NOT and parentheses follow tantivy's query
          syntax.  A query may carry predicates:
            tag:x  dir:x  todo:x  lang:x, and any of them negated with a
-           leading -   (lang: is lexical only)
+           leading -   (both rankings honour all four)
 
   chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
          A dry run of `index`: how notes would be split, and what a
@@ -1561,13 +1561,13 @@ org-semantic search ~/notes 'dir:"01 Daily notes" atom sorting in a tweezer arra
 org-semantic search ~/notes '-tag:Deutschlernen -tag:Computer atom heating'
 #+end_src
 
-| predicate | meaning                                                                            |
-|-----------+------------------------------------------------------------------------------------|
-| =tag:x=   | chunk carries tag =x=; repeating narrows (all must match)                          |
-| =dir:x=   | note lives under directory =x=; repeating widens (any may match)                   |
-| =todo:x=  | nearest enclosing heading has TODO keyword =x=                                     |
-| =lang:x=  | note is in language =x=; =lang:de= matches =de-DE= and =de-AT=. *=--lexical= only* |
-| =-…=      | any of them negated: the chunk must *not* answer to it                             |
+| predicate | meaning                                                          |
+|-----------+------------------------------------------------------------------|
+| =tag:x=   | chunk carries tag =x=; repeating narrows (all must match)        |
+| =dir:x=   | note lives under directory =x=; repeating widens (any may match) |
+| =todo:x=  | nearest enclosing heading has TODO keyword =x=                   |
+| =lang:x=  | note is in language =x=; =lang:de= matches =de-DE= and =de-AT=   |
+| =-…=      | any of them negated: the chunk must *not* answer to it           |
 
 *Every predicate negates*, with a leading =-=. Excluding a directory excludes
 everything under it, so =-dir:archive= also drops =archive/2024/=. A query may be
@@ -1798,12 +1798,21 @@ The keyword is always =ltex=. You do not need ltex installed to use it ---
 =# ltex: language=de-DE= is an ordinary org comment --- and if you do use it, the
 line you already wrote for grammar checking is the one this reads.
 
-*Language is a lexical concern.* It selects the stemmer that makes =Sprachen=
-find =Sprache=, and an embedding is not stemmed --- so it affects only the lexical
-index, and =lang:= narrows only =search --lexical=, which says so rather than
-accepting a predicate that would do nothing. Multilingual /semantic/ search is a
-question about the embedding model, not about labels, and is answered by using a
-multilingual model.
+*A language does two jobs, and only one of them is about stemming.* It selects
+the stemmer that makes =Sprachen= find =Sprache=, which is the lexical index's
+business alone --- an embedding is not stemmed. But it is also a fact about the
+note, and =lang:de= is a reasonable thing to ask of either ranking, so both
+indexes record one and both honour the predicate.
+
+Do not read that as multilingual semantic search. /Retrieving/ across languages
+is a question about the embedding model --- ask it in German and =bge-small-en=
+will not find your German notes, whatever they are labelled --- and the answer is
+a multilingual model, =e5-small= or one of the large ones. =lang:= answers the
+other question, "show me only the German ones", which no model can.
+
+Earlier versions narrowed =search --lexical= alone and refused =lang:= on the
+other side rather than quietly matching nothing, because the semantic index
+recorded no language at all. If yours does, rebuild it: =index --full=.
 
 Otherwise =languages= names what the vault is written in, and *how many you name
 decides everything else*:
@@ -1830,6 +1839,15 @@ vault that takes the misclassifications to zero.
 Languages are matched on their primary subtag but stored as you wrote them, so
 =de-DE= stays =de-DE= rather than becoming fastText's bare =de=. The first one
 you name is the vault's default.
+
+*Settle the list before you first index, because changing it later is not cheap.*
+Both indexes write a language onto every chunk, so both are refused until they are
+rebuilt under the new one --- the word index in a second or two, the meaning index
+by re-embedding the corpus, which is minutes. Leaving the semantic index alone
+instead was the alternative and is worse: every note you did not touch keeps the
+label it had, so a language you have just added answers nothing, with no error and
+nothing in the log. The order counts as a change too, since the first entry is the
+default.
 
 A misclassified chunk is stemmed wrongly and becomes harder to find, with nothing
 to indicate why. An explicit =# ltex: language=…= overrides the classifier --- it

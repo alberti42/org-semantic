@@ -41,7 +41,7 @@ searched:
 | `-tag:x` | chunk does not carry it |
 | `dir:x` | note lives under directory `x`; repeat to widen |
 | `todo:x` | nearest heading has TODO keyword `x` |
-| `lang:x` | note is in language `x` — **lexical only** |
+| `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT` |
 
 ```sh
 org-semantic search <vault> 'tag:Literature dir:"03 Reviews" quantum error correction' --json

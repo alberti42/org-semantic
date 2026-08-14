@@ -623,8 +623,9 @@ With one prefix ARG, ask which ranking; with two, ask about the
 length of the list as well.  See `org-semantic--find-prompts'.
 
 A query may carry predicates the server reads out of it --
-`tag:x', `dir:x', `todo:x', `lang:x' for a word search, and any of
-them negated with a leading `-' -- with the rest as free text."
+`tag:x', `dir:x', `todo:x', `lang:x', honoured by either ranking,
+and any of them negated with a leading `-' -- with the rest as free
+text."
   (interactive
    (let* ((asks (org-semantic--find-prompts current-prefix-arg))
           (start (if (or (car asks) (equal org-semantic-results-ranking "ask"))

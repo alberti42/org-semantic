@@ -111,6 +111,28 @@ not have.
 
 ### Added
 
+- **`lang:` narrows a search by meaning too.** It answered `search --lexical`
+  alone and was refused on the other side, because only the word index recorded a
+  language: a language picks a stemmer, and an embedding is not stemmed. That is
+  the right answer to *retrieving* across languages — which is a question about the
+  embedding model, and still is — and the wrong answer to "show me only the German
+  notes", which no model can do and which a label can. Both indexes now write a
+  language onto every chunk, from the same `# ltex:` declarations and the same
+  classifier, and both honour `lang:` and `-lang:`. Needs binary 0.2.1.
+
+  **Rebuild the semantic index once to get it: `index --full`.** An index built
+  before this parses perfectly and has the field empty, so every `lang:` query
+  would answer with nothing and say nothing — the layout version is raised so that
+  it asks for the rebuild instead of quietly doing that. Nothing else about the
+  format moves, and the word index is unaffected.
+
+  **And `languages` now defines the semantic index as well**, so changing the list
+  — the order included, since the first entry is the vault's default — is refused
+  until the index is rebuilt under it. That is minutes of re-embedding where the
+  word index is seconds, which is the price of the label being trustworthy;
+  applying it silently would leave every note you had not edited answering under
+  the language it was given last time. Settle the list when you first index.
+
 - **A vault's index need not sit beside its notes.** A `vault.json` in
   `.org-semantic/` names where the notes are, and then the vault directory holds
   nothing but the index — for notes in a synced folder that should not have

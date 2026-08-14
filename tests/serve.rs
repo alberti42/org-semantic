@@ -1331,37 +1331,51 @@ fn the_download_directory_can_be_moved_and_the_move_is_visible() {
     );
 }
 
-/// `lang:` is refused by the semantic side in **both** directions, through the
-/// server as well as the command line.
+/// `lang:` is answered rather than refused, in both directions and both modes.
 ///
-/// This is here rather than beside the parser tests because that is where it
-/// went wrong: the CLI's copy of the check learned about `-lang:` and the
-/// server's did not, so a negated language through an editor was parsed,
-/// silently ignored — the semantic index records no language for
-/// `Filters::matches` to consult — and answered as though the exclusion had
-/// applied. Both now call `Filters::wants_language`, and this test is what says
-/// the server's path is covered.
+/// This is here rather than beside the parser tests because this is where it
+/// went wrong twice, in opposite directions. First the server ignored a negated
+/// language the CLI had learned to refuse, so `-lang:en` from an editor was
+/// parsed, dropped and answered as though the exclusion had applied. Then both
+/// refused it — correctly, while the semantic index wrote `Chunk::lang` empty —
+/// and the refusal outlived its reason: the field is filled now, so what stood
+/// here would keep an editor from asking a question the index can answer.
 ///
-/// Offline: the refusal happens before any index or model is touched, so a vault
-/// with nothing built reaches it.
+/// Offline, so it can only reach the lexical half. The semantic half is asserted
+/// two ways in the unit suite: `lang_narrows_both_rankings` on the filter, and
+/// `a_semantic_index_records_the_language_of_each_note` (`--ignored`) end to end.
+/// What is checked here is that the *server* no longer objects to the predicate:
+/// with nothing semantic built the reply is the ordinary `no-index`, not a
+/// complaint about the language.
 #[test]
-fn a_negated_language_is_refused_by_the_semantic_side_too() {
-    let v = vault("negated-lang", 2);
+fn a_language_predicate_is_answered_by_both_modes() {
+    let v = built("lang-predicate", 2);
     let msgs = talk(
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "search",
-                    "params": { "vault": v, "query": "-lang:en atoms" } }),
+                    "params": { "vault": v, "query": "lang:en atoms", "mode": "lexical" } }),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "search",
-                    "params": { "vault": v, "query": "lang:en atoms" } }),
+                    "params": { "vault": v, "query": "-lang:en atoms", "mode": "lexical" } }),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "search",
+                    "params": { "vault": v, "query": "-lang:en atoms" } }),
         ],
         None,
     );
-    for id in [1, 2] {
-        let reply = msgs.iter().find(|m| m["id"] == id).expect("a reply");
-        let message = reply["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("lang:"),
-            "id {id} must be refused for naming a language, not answered: {reply:?}"
-        );
-    }
+    let reply = |id: i64| msgs.iter().find(|m| m["id"] == id).expect("a reply").clone();
+
+    let hits = reply(1);
+    assert!(
+        !hits["result"]["hits"].as_array().expect("hits, not an error").is_empty(),
+        "every note here is English, and the default policy says so: {hits:?}"
+    );
+    let none = reply(2);
+    assert!(
+        none["result"]["hits"].as_array().expect("hits, not an error").is_empty(),
+        "and the negation excludes them all: {none:?}"
+    );
+
+    // The semantic side: refused for having no index, which is a fact about the
+    // vault, and not for having named a language, which is no longer one.
+    let semantic = reply(3);
+    assert_eq!(semantic["error"]["data"]["kind"], "no-index", "{semantic:?}");
 }

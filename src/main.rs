@@ -3,7 +3,7 @@
 //! Prototype.  Commands:
 //!
 //!   org-semantic index  <vault> [--lexical|--both] [--full|--rehash]
-//!                           [--lang en-US,de-DE|auto] [--fold]   (lexical only)
+//!                           [--config FILE]   (languages and folding live there)
 //!   org-semantic search  <vault> <query> [k] [--lexical]  ranked by meaning, or
 //!                                                          by words with --lexical
 //!   org-semantic chunks <vault> <path-substring>  show chunking, no embedding
@@ -603,7 +603,7 @@ notes by meaning, and a lexical one, which finds them by word.
          Phrases, AND/OR/NOT and parentheses follow tantivy's query
          syntax.  A query may carry predicates:
            tag:x  dir:x  todo:x  lang:x, and any of them negated with a
-           leading -   (lang: is lexical only)
+           leading -   (both rankings honour all four)
 
   chunks <vault> <path-substring> [--lexical] [--config FILE] [--model NAME]
          A dry run of `index`: how notes would be split, and what a
@@ -862,9 +862,21 @@ fn classifier() -> Result<&'static Lid> {
 /// Fetch and load the classifier before any work starts, so a failed download is
 /// an error on the way in rather than a panic part-way through a long run.
 ///
-/// Unconditional even when a single `--lang` means nothing will be classified:
-/// the model is still what says whether a language exists, and `index` is
-/// already downloading an embedding model two orders of magnitude larger.
+/// Unconditional even when a single configured language means nothing will be
+/// classified: the model is still what says whether a language exists, and
+/// `index` is already downloading an embedding model two orders of magnitude
+/// larger.
+///
+/// Called once per `index`, ahead of both indexes rather than inside either,
+/// since both record a language now.  A `--both` run that prepared per index
+/// would warn about an unknown language code twice.
+///
+/// It is **not** gated on anything having changed, and that costs a measurable
+/// amount: a semantic run with nothing stale went from 7.7 ms to 17.4 ms on a
+/// 300-note vault (medians of 40, and the whole difference is this call).  Paid
+/// anyway, for the reason above — the load is also what says whether a configured
+/// language exists, and a run that skipped it would not check.  Under `serve` it
+/// is charged once per process, since `classifier` caches in a `OnceLock`.
 fn prepare_lang(lang: &LangConfig, j: &mut Journal) -> Result<()> {
     // Noted rather than merely printed: over `serve` this is minutes of network
     // with no reply yet, and afterwards it is the only explanation for why a
@@ -1235,20 +1247,27 @@ impl Config {
     /// so changing it must not force a re-embed.  A single hash over the whole
     /// config made every lexical-only edit cost minutes on the semantic side.
     fn hash_for(&self, target: Target) -> u64 {
-        // Both indexes share what is excluded, and what counts as a keyword:
-        // a keyword is cut out of the heading before either one sees it.
+        // Both indexes share what is excluded, what counts as a keyword — a
+        // keyword is cut out of the heading before either one sees it — and the
+        // languages.  `languages` was lexical-only for as long as only the
+        // lexical index recorded a language; now that both do, both are wrong
+        // about a chunk's label when the list moves, and the semantic side is
+        // wrong *silently*: it parses, and answers `lang:it-IT` with nothing.
+        // The price is real and accepted — the remedy is `--full`, which
+        // discards the previous index and re-embeds the corpus, minutes where
+        // the lexical rebuild is seconds.  A cheaper relabel is available in
+        // principle, since `chunk_key` excludes the language and so every vector
+        // could be carried; it is not built, because this failure is loud and
+        // the list is a once-in-a-vault's-life setting.
         let mut key = format!(
-            "tags={};todo={}",
+            "tags={};todo={};langs={}",
             as_set(&self.exclude_tagged).join(","),
-            as_set(&self.todo_keywords).join(",")
+            as_set(&self.todo_keywords).join(","),
+            self.languages.join(",")
         );
         if target == Target::Lexical {
-            // Language and folding pick stemmers, which only this index has.
-            key.push_str(&format!(
-                ";langs={};fold={}",
-                self.languages.join(","),
-                self.fold_diacritics
-            ));
+            // Folding picks a filter for the analyzer, which only this index has.
+            key.push_str(&format!(";fold={}", self.fold_diacritics));
         }
         for kind in Self::KINDS {
             let p = self.blocks.of(kind);
@@ -1324,6 +1343,10 @@ impl Config {
         for (name, mine, theirs) in [
             ("exclude_tagged", as_set(&self.exclude_tagged), as_set(&other.exclude_tagged)),
             ("todo_keywords", as_set(&self.todo_keywords), as_set(&other.todo_keywords)),
+            // Not sorted, unlike the two above: the *order* is policy here —
+            // `languages.first()` is the vault's default for a note whose
+            // declaration is unknown.
+            ("languages", self.languages.clone(), other.languages.clone()),
         ] {
             moved(
                 name.into(),
@@ -1332,11 +1355,6 @@ impl Config {
             );
         }
         if target == Target::Lexical {
-            moved(
-                "languages".into(),
-                format!("[{}]", other.languages.join(", ")),
-                format!("[{}]", self.languages.join(", ")),
-            );
             moved(
                 "fold_diacritics".into(),
                 other.fold_diacritics.to_string(),
@@ -1441,18 +1459,6 @@ fn resolve_config(vault: &Path, given: Option<&Path>, j: &mut Journal) -> Result
 /// settings no longer match the index it is searching.
 /// How the CLI says yes.  `serve` names its own, since an editor has no flags.
 const CLI_REMEDY: &str = "pass --full to rebuild under the new one";
-
-/// Why a `lang:` predicate cannot be answered by the semantic index.
-///
-/// One sentence in one place, with each caller appending its own remedy — the
-/// arrangement `CLI_REMEDY` above already uses, and for the reason this needs it:
-/// the two copies of this message drifted, and the one in `serve` went on
-/// accepting `-lang:` after the other had learned to refuse it.
-///
-/// "applies to" rather than "narrows": narrowing is what a predicate that *works*
-/// does, so the old wording read as though the search had been filtered, which is
-/// the opposite of what happened.
-const LANG_IS_LEXICAL: &str = "lang: applies to the lexical index only";
 
 fn check_config(
     previous: Option<u64>,
@@ -1565,8 +1571,8 @@ impl LangConfig {
 /// declaration is reported.
 ///
 /// One parameter rather than two because the journal is only ever wanted where
-/// the policy is: the semantic index passes `None` for both, since it does not
-/// read `# ltex:` at all.
+/// the policy is: a caller with no language has nowhere to report a bad `# ltex:`
+/// declaration either.
 struct Lang<'a> {
     cfg: &'a LangConfig,
     journal: &'a mut Journal,
@@ -1726,10 +1732,13 @@ fn parse_tag_list(s: &str) -> Vec<String> {
 /// matters, and the available Rust org parsers are alpha-stage.
 /// Chunk one note.
 ///
-/// LANG is `None` for the semantic index, which has no use for a language: an
-/// embedding is not stemmed, so classifying a note there would be labelling for
-/// its own sake.  Language belongs to the lexical index, which needs it to pick
-/// a stemmer.
+/// LANG is given for both indexes, and `None` only where there is nothing to
+/// report a bad declaration to.  It was `None` for the whole semantic side, on
+/// the grounds that an embedding is not stemmed and a label there would be for
+/// its own sake — which was true of *retrieval* and false of the question a
+/// reader actually asks, "show me only the German notes".  The lexical index
+/// needs a language to pick a stemmer; the semantic index needs one to answer
+/// `lang:`, and nothing else about it changes.
 /// The line left where a block's body was: enough to say what stood here.
 fn placeholder(kind: &str, arg: &str) -> String {
     if arg.is_empty() || arg.starts_with(':') {
@@ -2619,16 +2628,6 @@ impl Filters {
             && self.not_langs.is_empty()
     }
 
-    /// Does this query ask about a language, in either direction?
-    ///
-    /// One function because there were two copies of the question and they
-    /// drifted: the CLI's grew `not_langs` and `serve`'s did not, so `-lang:en`
-    /// from an editor was accepted and then ignored.  Anything lang-shaped added
-    /// later is answered here or nowhere.
-    fn wants_language(&self) -> bool {
-        !self.langs.is_empty() || !self.not_langs.is_empty()
-    }
-
     fn matches(&self, c: &Chunk) -> bool {
         if !self.tags.iter().all(|t| c.tags.iter().any(|x| x.eq_ignore_ascii_case(t))) {
             return false;
@@ -2655,6 +2654,16 @@ impl Filters {
             return false;
         }
         if self.not_dirs.iter().any(|d| under(&c.path, d)) {
+            return false;
+        }
+        // Matched the same way `lexical::search` matches it — through
+        // `lang_matches`, on subtag boundaries — because a predicate over a field
+        // both indexes hold must answer alike on both or a comparison between the
+        // two rankings is one filtered against one that is not.
+        if !self.langs.is_empty() && !self.langs.iter().any(|l| lang_matches(&c.lang, l)) {
+            return false;
+        }
+        if self.not_langs.iter().any(|l| lang_matches(&c.lang, l)) {
             return false;
         }
         true
@@ -3178,7 +3187,13 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 
 /// Bumped when the on-disk layout changes, so a stale index is rebuilt rather
 /// than misread.
-const INDEX_VERSION: u32 = 8;
+///
+/// v9 did not change the *shape* of a chunk, which is the usual reason to bump
+/// this, and that is exactly why it had to: `Chunk::lang` was already a field and
+/// the semantic index wrote it empty, so a v8 index parses perfectly and answers
+/// every `lang:` query with nothing. A rebuild is the only thing that fills it,
+/// and this is what asks for one.
+const INDEX_VERSION: u32 = 9;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -4457,6 +4472,15 @@ fn cmd_index(
     }
     let mut carried = 0usize;
 
+    // From the policy and nowhere else, as on the lexical side — which is why
+    // this is derived here rather than passed in: a second channel for it is a
+    // second thing that can disagree with the hash in the manifest.  The
+    // classifier it needs is loaded by the caller, before either index runs; a
+    // caller that forgets leaves `accept_declared` reading a bad declaration as
+    // "no such language" and saying nothing, which is the one silence this whole
+    // path has.
+    let lang = LangConfig { languages: cfg.languages.clone() };
+
     let t_chunk = Instant::now();
     for (i, f) in files.iter().enumerate() {
         stop.check()?;
@@ -4486,7 +4510,15 @@ fn cmd_index(
         // are counted from the result — several chunks sharing a heading line —
         // rather than reported by the packer.
         let budget = Budget { measure: &measure, prefix: Some(m.passage) };
-        let cs = chunk_file(f, &path, text, None, cfg, Target::Semantic, &budget);
+        let cs = chunk_file(
+            f,
+            &path,
+            text,
+            Some(&mut Lang { cfg: &lang, journal: j }),
+            cfg,
+            Target::Semantic,
+            &budget,
+        );
         // A section that had to be divided shows up as consecutive chunks on one
         // heading line, so it is counted from the result rather than reported by
         // the packer — and counted once however many pieces it became.
@@ -5111,12 +5143,6 @@ fn cmd_search(
     // text is embedded.
     let mut f = parse_query(query);
     f.relative_to(&notes)?;
-    // A language is a stemmer's business, and an embedding is not stemmed.  The
-    // semantic index therefore records no language, so this predicate could only
-    // ever match nothing — better said than silently returned.
-    if f.wants_language() {
-        return Err(anyhow!("{LANG_IS_LEXICAL}; add --lexical"));
-    }
     let candidates: Vec<usize> = (0..n).filter(|&i| f.matches(&ix.chunks[i])).collect();
     if !f.is_empty() && !json {
         println!("filter: {} → {} of {n} chunks", describe_filters(&f), candidates.len());
@@ -5555,8 +5581,9 @@ fn vault_arg<'a>(args: &'a [String], usage: &str) -> Result<&'a Path> {
 /// The two differ in more than one way now — the semantic side re-splits at 512
 /// tokens and drops block bodies, the lexical side does neither — so a preview
 /// that showed one of them while claiming to show "the chunking" would be worse
-/// than none.  Bare is semantic, `--lexical` is the word index, as everywhere
-/// else.
+/// than none.  Language is no longer one of the differences: both indexes record
+/// one, so both previews classify.  Bare is semantic, `--lexical` is the word
+/// index, as everywhere else.
 fn cmd_chunks(
     vault: &Path,
     needle: &str,
@@ -5593,9 +5620,12 @@ fn cmd_chunks(
             f,
             &rel_path(&notes, f),
             &text,
-            // Only the lexical preview reads a note's `# ltex:`, so only it can
-            // report a bad one.
-            (target == Target::Lexical).then_some(Lang { cfg: lang, journal: j }).as_mut(),
+            // Both previews read a note's `# ltex:` now, because both indexes do.
+            // This was gated on the lexical target while only that index recorded
+            // a language, and leaving the gate would make a semantic preview
+            // print `lang=` empty for every chunk — a preview that lies about the
+            // one field the change is about.
+            Some(&mut Lang { cfg: lang, journal: j }),
             cfg,
             target,
             budget,
@@ -5741,11 +5771,14 @@ fn main() -> Result<()> {
             // a refused policy is still refused instantly rather than queueing
             // behind someone else's run.
             let _claim = Claim::on(vault)?;
+            // Once, for whichever indexes are about to run: both record a
+            // language now, and a `--both` run that prepared per index would
+            // announce an unknown language code twice.
+            prepare_lang(&lang, &mut j)?;
             if both || !lexical {
                 cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own, &Cancel::default())?;
             }
             if both || lexical {
-                prepare_lang(&lang, &mut j)?;
                 cmd_index_lexical(
                     vault,
                     full,
@@ -6817,6 +6850,59 @@ mod tests {
         assert!(text.contains("pumps"), "read back from the notes: {text:?}");
     }
 
+    /// A real semantic index carries a language per chunk, and `lang:` narrows it.
+    ///
+    /// The third `--ignored` test that exists because the fast set cannot reach
+    /// the code, not because it is slow, and for the same reason as the two
+    /// above: `cmd_index` passing `None` where the lexical copy passes a `Lang`
+    /// leaves every chunk labelled with the empty string, every `lang:` query
+    /// answering with nothing, and the run reporting success.  A unit test on
+    /// `chunk_file` cannot see that line, and it is the line the feature is.
+    ///
+    /// `--ignored`, and only with weights already cached: it must not quietly
+    /// pull 133 MB.
+    #[test]
+    #[ignore]
+    fn a_semantic_index_records_the_language_of_each_note() {
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        if !weights_cached(m) {
+            eprintln!("skipped: {} is not downloaded", m.name);
+            return;
+        }
+        let v = scratch("semantic-langs");
+        fs::create_dir_all(&v).unwrap();
+        fs::write(
+            v.join("de.org"),
+            "#+title: Wörter\nDie Wörter der deutschen Sprache sind sehr lang und diese Notiz \
+             ist ganz auf Deutsch geschrieben.\n",
+        )
+        .unwrap();
+        fs::write(
+            v.join("en.org"),
+            "#+title: Atoms\nThe damped oscillations of a trapped atom, written in English \
+             throughout this whole note.\n",
+        )
+        .unwrap();
+        let cfg = Config { languages: vec!["en-US".into(), "de-DE".into()], ..Config::default() };
+        let mut j = Journal::quiet();
+        prepare_lang(&LangConfig { languages: cfg.languages.clone() }, &mut j).unwrap();
+        cmd_index(&v, true, false, m, &cfg, &mut j, Lend::Own, &Cancel::default()).unwrap();
+
+        let ix = Index::read(&semantic_dir(&v, m), m).unwrap();
+        let of = |p: &str| ix.chunks.iter().find(|c| c.path == p).map(|c| c.lang.clone());
+        assert_eq!(of("de.org").as_deref(), Some("de-DE"), "labelled, not left empty");
+        assert_eq!(of("en.org").as_deref(), Some("en-US"));
+
+        // Which is the whole point: the predicate narrows the candidate list the
+        // dot product runs over, in both directions.
+        let narrowed = |q: &str| {
+            let f = parse_query(q);
+            ix.chunks.iter().filter(|c| f.matches(c)).map(|c| c.path.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(narrowed("lang:de Sprache"), vec!["de.org".to_string()]);
+        assert_eq!(narrowed("-lang:de atoms"), vec!["en.org".to_string()]);
+    }
+
     /// Every way `vault.json` can be wrong, said rather than guessed at.
     ///
     /// Each of these would otherwise be a quiet empty index: a version this
@@ -7597,22 +7683,33 @@ mod tests {
         assert!(resolve_config(&v, Some(&named), &mut j).is_err());
     }
 
+    /// Languages and folding are set in the policy file and nowhere else.
+    ///
+    /// Which index each of them *defines* is
+    /// `the_language_list_defines_both_indexes_and_folding_only_one`; this is the
+    /// other half, and the one that keeps them from becoming flags again. A
+    /// language set that reverts to its default rebuilds the lexical index with
+    /// English alone, silently losing German and Italian stemming, because the
+    /// analyzer key changes legitimately and nothing looks wrong.
     #[test]
-    fn languages_and_folding_are_lexical_policy_and_stick() {
-        let a = Config::default();
-        let b = Config { languages: vec!["en-US".into(), "de-DE".into()], ..Config::default() };
-        // Adding a language cannot change an embedding, so it must not cost one.
-        assert_eq!(a.hash_for(Target::Semantic), b.hash_for(Target::Semantic));
-        assert_ne!(a.hash_for(Target::Lexical), b.hash_for(Target::Lexical));
-
-        // They are set only in the policy file, so there is one place to look
-        // and one thing to forget — which the cache then remembers for you.
+    fn languages_and_folding_are_policy_and_stick() {
         let from_file: Config =
             serde_json::from_str(r#"{"languages":["en-US","de-DE"],"fold_diacritics":true}"#)
                 .unwrap();
         assert_eq!(from_file.languages, vec!["en-US", "de-DE"]);
         assert!(from_file.fold_diacritics);
-        assert_eq!(from_file.hash_for(Target::Semantic), a.hash_for(Target::Semantic));
+        // Order is preserved rather than sorted, unlike `exclude_tagged`: the
+        // first entry is the vault's default for an unknown declaration.
+        let reversed: Config =
+            serde_json::from_str(r#"{"languages":["de-DE","en-US"],"fold_diacritics":true}"#)
+                .unwrap();
+        assert_ne!(from_file.canonical(), reversed.canonical(), "the order is policy");
+        // Where a set really is a set, the canonical form does not care.
+        let tags = |s: &str| -> Config { serde_json::from_str(s).unwrap() };
+        assert_eq!(
+            tags(r#"{"exclude_tagged":["ARCHIVE","noexport"]}"#).canonical(),
+            tags(r#"{"exclude_tagged":["noexport","ARCHIVE"]}"#).canonical()
+        );
     }
 
     #[test]
@@ -8900,6 +8997,48 @@ mod tests {
         assert_eq!(c[0].lang, "it-IT");
     }
 
+    /// The semantic chunker labels a note exactly as the lexical one does.
+    ///
+    /// `chunk_file` took `None` for the semantic target and so wrote every chunk
+    /// with an empty language, which is what made `lang:` unanswerable there.
+    /// Asserted against both targets in one test, because the failure this
+    /// guards is the two drifting apart — a label that is right for the word
+    /// index and empty for the meaning index looks like nothing at all from
+    /// either side.
+    #[test]
+    fn both_targets_label_a_note_with_its_language() {
+        let cfg = LangConfig::parse("en-US,de-DE");
+        let note = "#+title: Wörter\n* Eins\nDie Wörter der deutschen Sprache sind sehr lang und \
+                    diese Notiz ist auf Deutsch geschrieben.\n";
+        for target in [Target::Semantic, Target::Lexical] {
+            let c = chunk_file(
+                Path::new("/v/N.org"),
+                "N.org",
+                note,
+                speaking!(&cfg),
+                &Config::default(),
+                target,
+                &UNSPLIT,
+            );
+            assert_eq!(c[0].lang, "de-DE", "classified, {target:?}");
+        }
+        // And a declaration is honoured on both sides, since it is read out of
+        // the note rather than guessed at.
+        let declared = "# ltex: language=it-IT\n#+title: T\nparole\n";
+        for target in [Target::Semantic, Target::Lexical] {
+            let c = chunk_file(
+                Path::new("/v/N.org"),
+                "N.org",
+                declared,
+                speaking!(&cfg),
+                &Config::default(),
+                target,
+                &UNSPLIT,
+            );
+            assert_eq!(c[0].lang, "it-IT", "declared, {target:?}");
+        }
+    }
+
     #[test]
     fn lang_predicate_matches_at_subtag_boundaries() {
         assert!(lang_matches("de-DE", "de"), "lang:de finds de-DE");
@@ -8909,18 +9048,74 @@ mod tests {
         assert!(!lang_matches("en-US", "de"));
     }
 
+    /// `lang:` narrows the semantic side too, in both directions.
+    ///
+    /// It used to be refused there, and rightly: the semantic index wrote
+    /// `Chunk::lang` empty, so the predicate could only ever match nothing.  Now
+    /// that the field is filled, the invariant that governs every other
+    /// predicate applies — a fact both indexes hold must constrain both, or a
+    /// comparison between the rankings is one filtered against one that is not.
+    ///
+    /// Written around `matches` rather than around `cmd_search` because that is
+    /// where the semantic narrowing happens; the two directions are separate
+    /// assertions because the sign has been dropped on the way to the right list
+    /// once before.
     #[test]
-    fn lang_is_a_lexical_predicate_only() {
-        // A language picks a stemmer, and an embedding is not stemmed, so the
-        // semantic index records none.  `matches` — which is the semantic-side
-        // filter — therefore ignores `langs`, and `cmd_search` rejects the query
-        // outright rather than quietly returning nothing.
+    fn lang_narrows_both_rankings() {
         let mut en = chunk_with("b.org", &[], None);
         en.lang = "en-US".into();
+        let mut de = chunk_with("c.org", &[], None);
+        de.lang = "de-DE".into();
+
         let f = parse_query("lang:de Wörter");
-        assert_eq!(f.langs, vec!["de"], "still parsed, for the lexical side");
-        assert!(f.matches(&en), "and not applied on the semantic side");
+        assert_eq!(f.langs, vec!["de"]);
         assert_eq!(f.text, "Wörter", "the predicate does not reach the embedder");
+        assert!(f.matches(&de), "the regional variant answers the bare subtag");
+        assert!(!f.matches(&en), "and the other language is excluded");
+
+        let f = parse_query("-lang:de Wörter");
+        assert!(f.matches(&en));
+        assert!(!f.matches(&de), "negation must reach the right list");
+
+        // A chunk from a v8 index, where the field was written empty.  It cannot
+        // answer either way, which is what `INDEX_VERSION` 9 exists to prevent
+        // anybody meeting.
+        let mut old = chunk_with("d.org", &[], None);
+        old.lang = String::new();
+        assert!(!parse_query("lang:en x").matches(&old));
+        assert!(parse_query("-lang:en x").matches(&old));
+    }
+
+    /// The language list is now part of the **semantic** policy hash as well.
+    ///
+    /// It was lexical-only, and had to stop being so the moment the semantic
+    /// index started recording a language: widening the list otherwise leaves
+    /// every unchanged note labelled with the old answer, and `lang:it-IT`
+    /// returns nothing with no error and nothing logged.  Folding stays
+    /// lexical-only — it picks an analyzer filter, which only that index has.
+    #[test]
+    fn the_language_list_defines_both_indexes_and_folding_only_one() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.languages = vec!["en-US".into(), "de-DE".into()];
+        for target in [Target::Semantic, Target::Lexical] {
+            assert_ne!(a.hash_for(target), b.hash_for(target), "languages moved, {target:?}");
+            let moved = b.differences(&a, target);
+            let changed: Vec<&str> = moved.iter().map(|c| c.setting.as_str()).collect();
+            assert!(changed.contains(&"languages"), "and is named: {changed:?}");
+        }
+
+        let mut c = a.clone();
+        c.fold_diacritics = !a.fold_diacritics;
+        assert_eq!(a.hash_for(Target::Semantic), c.hash_for(Target::Semantic), "folding is not");
+        assert_ne!(a.hash_for(Target::Lexical), c.hash_for(Target::Lexical));
+
+        // The order of the list is policy, not an accident: `languages.first()`
+        // is the vault's default for a note whose declaration is unknown.  So a
+        // reordering is a real change, unlike a reordered `exclude_tagged`.
+        let mut d = b.clone();
+        d.languages.reverse();
+        assert_ne!(b.hash_for(Target::Semantic), d.hash_for(Target::Semantic));
     }
 
     /// Each chunk is stemmed in its own language, and `lang:` constrains the

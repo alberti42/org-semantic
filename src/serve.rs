@@ -412,15 +412,11 @@ impl Server {
             return Ok(answer(hits_json(&notes, &hits, lim, merge, None)));
         }
 
-        // Negated as well as plain, and this was missed once: the CLI's copy of
-        // this check grew `not_langs` and the server's did not, so `-lang:en`
-        // through an editor was parsed, ignored -- the semantic index records no
-        // language for `Filters::matches` to consult -- and answered as though
-        // the exclusion had been applied.  A predicate that does nothing looks
-        // exactly like one that found nothing to remove.
-        if f.wants_language() {
-            return Err(anyhow!("{LANG_IS_LEXICAL}"));
-        }
+        // No `lang:` check here any more, in either direction: the semantic index
+        // records a language now, so `Filters::matches` has something to consult
+        // and both rankings answer the predicate alike.  What stood here refused
+        // it -- rightly, while the field was written empty, since a predicate
+        // that does nothing looks exactly like one that found nothing to remove.
         let s = self.semantic(&vault, want)?;
         let dim = s.which.dim;
         // Cloned out from under the lock: an index committed while this query is
@@ -674,6 +670,14 @@ impl Server {
         let Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve } = plan;
         let mut done = serde_json::Map::new();
 
+        // Languages come from the policy, not from separate parameters: they are
+        // part of what each index *is*, and a second channel for them is a second
+        // thing that can disagree.  Prepared once, ahead of both branches, since
+        // both indexes record a language now — and left unstamped by target for
+        // the same reason: the classifier belongs to neither one in particular.
+        let lang = LangConfig { languages: cfg.languages.clone() };
+        prepare_lang(&lang, j)?;
+
         if semantic {
             let key = (vault.clone(), want.name);
             // Stamped at the boundary rather than carried as state on the
@@ -718,12 +722,7 @@ impl Server {
         }
 
         if lexical {
-            // Languages and folding come from the policy, not from separate
-            // parameters: they are part of what the index *is*, and a second
-            // channel for them is a second thing that can disagree.
-            let lang = LangConfig { languages: cfg.languages.clone() };
             let mark = j.remarks.len();
-            prepare_lang(&lang, j)?;
             let report =
                 cmd_index_lexical(&vault, full, rehash, &lang, cfg.fold_diacritics, &cfg, j, stop)?;
             for r in &mut j.remarks[mark..] {
