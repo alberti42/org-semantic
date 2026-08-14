@@ -425,18 +425,21 @@ answering with the default vault instead of with none."
 (defmacro org-semantic-tests--saving (&rest body)
   "Run BODY with the timers and the server replaced by records of them.
 
-`org-semantic-tests--armed' collects what would have been armed,
+`org-semantic-tests--armed' collects what would have been armed and
+`--armed-args' the (SECONDS . ARGS) each was armed with,
 `--cancelled' what would have been cancelled, `--indexed' the
 arguments of each `org-semantic-index', and `--said' every message.
 Nothing waits and nothing is sent."
   (declare (indent 0))
   `(let ((org-semantic-tests--armed nil)
+         (org-semantic-tests--armed-args nil)
          (org-semantic-tests--cancelled nil)
          (org-semantic-tests--indexed nil)
          (org-semantic-tests--said nil))
      (cl-letf (((symbol-function 'run-with-timer)
-                (lambda (_secs _repeat fn &rest args)
+                (lambda (secs _repeat fn &rest args)
                   (let ((timer (list 'fake-timer fn args)))
+                    (push (cons secs args) org-semantic-tests--armed-args)
                     (push timer org-semantic-tests--armed)
                     timer)))
                ((symbol-function 'cancel-timer)
@@ -470,6 +473,10 @@ after another by a server that runs one per vault."
                 (dotimes (_ 3) (org-semantic-auto-reindex--on-save)))
             (kill-buffer buffer)))
         (should (= 3 (length org-semantic-tests--armed)))
+        ;; Each armed for the configured wait, which is the whole of the
+        ;; debounce: a number written here instead and the setting does nothing.
+        (should (equal (list org-semantic-auto-reindex-delay)
+                       (delete-dups (mapcar #'car org-semantic-tests--armed-args))))
         ;; Two of the three were cancelled by the save that followed, so one
         ;; run is pending -- and it is the last one armed.
         (should (= 2 (length org-semantic-tests--cancelled)))
@@ -654,6 +661,29 @@ the condition holds until somebody acts on it."
         (cl-letf (((symbol-function 'org-semantic-index) win))
           (org-semantic-auto-reindex--start vault "lexical"))
         (should-not (gethash vault org-semantic-auto-reindex--said))))))
+
+(ert-deftest a-server-that-will-not-start-does-not-break-every-save ()
+  "The run is on a timer, where an error is a backtrace nobody asked for.
+
+A missing binary, a server that dies on startup: raised from a timer
+that has nothing to do with the command the user just gave, and it
+would also stop later saves from trying.  Said once per vault instead
+-- never silently, since a mode that has quietly stopped keeping the
+index up to date looks exactly like one that is working."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic--canonical dir)))
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-status)
+                   (lambda (&rest _) (error "No such file or directory: org-semantic"))))
+          ;; Twice, because the latch is what keeps a broken setup from saying
+          ;; it on every save.
+          (org-semantic-auto-reindex--run vault)
+          (org-semantic-auto-reindex--run vault))
+        (should-not org-semantic-tests--indexed)
+        (should (= 1 (length org-semantic-tests--said)))
+        (should (string-match-p "No such file" (car org-semantic-tests--said)))
+        ;; And nothing is left pending, so the next save arms afresh.
+        (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))))))
 
 (ert-deftest turning-the-mode-off-drops-what-was-pending ()
   "A wait that outlives the mode would index a vault nobody asked about."

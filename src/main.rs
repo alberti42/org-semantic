@@ -6761,6 +6761,62 @@ mod tests {
         assert!(text.contains("pumps"), "read back from the notes, not from the vault: {text:?}");
     }
 
+    /// The semantic half of the split, which no offline test can reach.
+    ///
+    /// `cmd_index` and `cmd_index_lexical` each resolve the notes root and hand
+    /// it to `org_files`, `scan_vault` and `rel_path` — the same four lines twice,
+    /// and the lexical copy is the one the fast tests cover.  Passing the vault
+    /// where the notes belong would leave the semantic index of a detached vault
+    /// **empty and successful**, which is why this is worth an embedding model:
+    /// eyeballing "it is the same code" is what lets one of two copies rot.
+    ///
+    /// `--ignored`, and only with weights already cached: it must not quietly
+    /// pull 133 MB.
+    #[test]
+    #[ignore]
+    fn a_detached_vault_is_indexed_by_meaning_too() {
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        if !weights_cached(m) {
+            eprintln!("skipped: {} is not downloaded", m.name);
+            return;
+        }
+        let v = scratch("detached-semantic");
+        let state = v.join("state");
+        let notes = v.join("notes");
+        fs::create_dir_all(state_dir(&state)).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+        let rel = note(&notes, "pumps");
+        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"notes":"../notes"}"#).unwrap();
+
+        let indexed = cmd_index(
+            &state,
+            true,
+            false,
+            m,
+            &Config::default(),
+            &mut Journal::quiet(),
+            Lend::Own,
+            &Cancel::default(),
+        )
+        .unwrap();
+        assert_eq!(indexed.report.files, 1, "the note was found where vault.json said");
+        assert!(indexed.report.chunks > 0, "and embedded");
+
+        // Written to the vault, nothing beside the notes, and addressed
+        // relative to the notes — which is what makes the passage readable.
+        let ix = Index::read(&semantic_dir(&state, m), m).unwrap();
+        assert!(!state_dir(&notes).exists(), "nothing is written beside the notes");
+        assert_eq!(ix.chunks[0].path, rel);
+        let mut cache = Notes::new();
+        let text = passage(
+            &notes,
+            &ix.chunks[0].path,
+            (ix.chunks[0].start_line, ix.chunks[0].end_line),
+            &mut cache,
+        );
+        assert!(text.contains("pumps"), "read back from the notes: {text:?}");
+    }
+
     /// Every way `vault.json` can be wrong, said rather than guessed at.
     ///
     /// Each of these would otherwise be a quiet empty index: a version this

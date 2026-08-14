@@ -1261,6 +1261,49 @@ fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
 /// It asserts the **override wins over `XDG_CACHE_HOME`**, since both being set
 /// is the ordinary case — every Linux desktop sets the latter — and a rule that
 /// only holds when the other is absent is not the rule anyone wants.
+/// `~` in `vault.json` is expanded, and `models` says where the notes are.
+///
+/// A subprocess, because `$HOME` is what decides and setting it in-process would
+/// race every other test.  Worth its own test rather than an eyeballed run: the
+/// manual's own recipe writes `~/Dropbox/org` into that file, so this is the form
+/// a reader is most likely to have, and an unexpanded one would be looked for in
+/// a directory *named* `~` beside wherever the process happened to start — found
+/// missing, and reported as "not a directory" for a path that plainly exists.
+///
+/// It also covers `models` naming both roots, which is the only place either is
+/// visible once they can differ.
+#[test]
+fn a_tilde_in_the_vault_file_is_expanded_and_both_roots_are_printed() {
+    let home = scratch("tilde-home");
+    let state = home.join("state");
+    let notes = home.join("org");
+    std::fs::create_dir_all(state.join(".org-semantic")).unwrap();
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        state.join(".org-semantic/vault.json"),
+        br#"{ "version": 1, "notes": "~/org" }"#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_org-semantic"))
+        .arg("models")
+        .arg(&state)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(notes.canonicalize().unwrap().to_str().unwrap()),
+        "the notes root is expanded and named: {said}"
+    );
+    assert!(
+        said.contains(state.join(".org-semantic").to_str().unwrap()),
+        "and so is the index's own directory: {said}"
+    );
+    assert!(!said.contains("/~/"), "nothing is left literal: {said}");
+}
+
 #[test]
 fn the_download_directory_can_be_moved_and_the_move_is_visible() {
     let elsewhere = scratch("cache-elsewhere");
