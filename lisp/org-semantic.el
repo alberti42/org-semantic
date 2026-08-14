@@ -269,8 +269,16 @@ Those two are the whole of it.  The `.org-semantic' directory is
 vault's to promise, and a vault found that way would be found on
 one machine and not on another that keeps its indexes elsewhere --
 silently answering with a different vault rather than with none."
+  ;; `t' and a relative directory are here because Emacs checks a
+  ;; directory-local value against this type and warns when it does not fit --
+  ;; so a type that admitted only what makes sense *globally* complained about
+  ;; the very declaration the docstring above tells a vault to write, on merely
+  ;; visiting a note.  What is legal where is the docstring's business; this is
+  ;; the set of values that exist.
   :type '(choice (const :tag "No vault unless one declares itself" nil)
-                 (directory :tag "This vault, unless one declares itself")))
+                 (directory :tag "This vault, unless one declares itself")
+                 (const :tag "The directory declaring it (.dir-locals.el only)" t)
+                 (string :tag "Relative to the declaration (.dir-locals.el only)")))
 
 (defun org-semantic-vault (&optional buffer)
   "Return the vault root BUFFER belongs to, or nil.

@@ -22,6 +22,10 @@
 ;;; Code:
 
 (require 'ert)
+;; For `custom-variable-type' and `widget-convert', used by the test that
+;; the setting's type admits what a vault declares.
+(require 'cus-edit)
+(require 'wid-edit)
 (require 'org-semantic)
 
 (defconst org-semantic-tests--root
@@ -408,6 +412,25 @@ answering with the default vault instead of with none."
         (setq default-directory (file-name-as-directory dir))
         (should-not (org-semantic-vault))
         (should-error (org-semantic-vault-or-error) :type 'user-error)))))
+
+(ert-deftest the-type-admits-every-value-a-vault-may-declare ()
+  "Emacs checks a directory-local value against the customize type.
+
+So a type describing only what makes sense *globally* -- a directory, or
+nothing -- warns about the value t that the docstring tells a vault to
+write, and it warns on merely visiting a note in it.  `safe-local-variable' passing
+is not enough: that decides whether the value is applied, this decides
+whether Emacs complains while applying it."
+  (let ((type (widget-convert (custom-variable-type 'org-semantic-vault-root))))
+    (dolist (value '(nil t "/abs/notes" "notes" "~/notes"))
+      (should (widget-apply type :match value))))
+  ;; And the predicate that makes it safe to set from a vault admits the same
+  ;; two shapes, or the value would be refused before the type is consulted.
+  (let ((safe (get 'org-semantic-vault-root 'safe-local-variable)))
+    (should (functionp safe))
+    (should (funcall safe t))
+    (should (funcall safe "notes"))
+    (should-not (funcall safe 42))))
 
 (ert-deftest the-spelling-of-a-vault-is-a-public-question ()
   "An integration naming a vault of its own has to spell it as we do.
