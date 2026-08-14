@@ -264,11 +264,30 @@ globally.  A string names the root instead: absolute, or relative
 to the declaration, for a vault whose notes sit under a
 subdirectory of the project that declares them.
 
-Those two are the whole of it.  The `.org-semantic' directory is
-*not* consulted: it holds derived data, its location is not the
-vault's to promise, and a vault found that way would be found on
-one machine and not on another that keeps its indexes elsewhere --
-silently answering with a different vault rather than with none."
+Set globally, it may instead be a *function* of no arguments,
+returning a directory or nil.  That is for the case where the answer
+has to be worked out rather than written down -- notably a package
+that already tracks which collection of notes is current:
+
+  (setq org-semantic-vault-root
+        (lambda () (and vulpea-vault-directory
+                        (expand-file-name vulpea-vault-directory))))
+
+It is asked on every question about a vault, so keep it to a
+variable lookup; and it is your code, so an error in it is left to
+signal rather than quietly treated as \"no vault\".  Returning nil
+is how it says there is nothing open.
+
+A function is deliberately legal only here, never in a
+`.dir-locals.el': `safe-local-variable' refuses one, since a
+directory you merely visit could otherwise run whatever it liked.
+A declaration says which directory, never how to work it out.
+
+Those, and the `.org-semantic' directory is *not* consulted: it
+holds derived data, its location is not the vault's to promise, and
+a vault found that way would be found on one machine and not on
+another that keeps its indexes elsewhere -- silently answering with
+a different vault rather than with none."
   ;; `t' and a relative directory are here because Emacs checks a
   ;; directory-local value against this type and warns when it does not fit --
   ;; so a type that admitted only what makes sense *globally* complained about
@@ -277,6 +296,7 @@ silently answering with a different vault rather than with none."
   ;; the set of values that exist.
   :type '(choice (const :tag "No vault unless one declares itself" nil)
                  (directory :tag "This vault, unless one declares itself")
+                 (function :tag "Worked out by this function (globally only)")
                  (const :tag "The directory declaring it (.dir-locals.el only)" t)
                  (string :tag "Relative to the declaration (.dir-locals.el only)")))
 
@@ -293,7 +313,12 @@ Two ways to be a vault, in this order.  The buffer carries
 `.dir-locals.el' when the note was opened -- or when Dired opened
 the directory, which does the same.  Failing that, the global value
 of the same setting, which is the one-vault answer and the
-somewhere-else answer at once.
+somewhere-else answer at once, and which may be a function when the
+answer has to be worked out -- see that variable.
+
+A function that signals is left to signal.  It is the caller's own
+code and a broken vault is worth seeing, so there is nothing here
+that quietly falls back to another answer.
 
 Nothing here searches the filesystem for a vault; see
 `org-semantic-vault-root' for why the `.org-semantic' directory is
@@ -304,7 +329,19 @@ not evidence."
          ;; answers with that, which would claim the default vault for
          ;; every note in every undeclared one.
          (declared (and (local-variable-p 'org-semantic-vault-root buffer)
-                        (buffer-local-value 'org-semantic-vault-root buffer))))
+                        (buffer-local-value 'org-semantic-vault-root buffer)))
+         ;; A declaration says *where*, never how to work it out, so a
+         ;; function is not one.  `safe-local-variable' already refuses to
+         ;; apply one from a file; this covers the value being marked safe
+         ;; by hand, where the branch below would otherwise read a function
+         ;; as t and answer with the declaring directory.
+         (declared (unless (functionp declared) declared))
+         ;; The global value, and `default-value' is what says so.  Reading
+         ;; the variable plainly would answer with the buffer-local binding
+         ;; whenever there is one -- which is exactly the case reached here,
+         ;; a declaration that was not one, where it would then consult the
+         ;; very value just refused.
+         (global (default-value 'org-semantic-vault-root)))
     (cond
      ;; Both declared forms are relative to where the declaration came
      ;; from -- the nearest `.dir-locals.el', which is the only one Emacs
@@ -320,8 +357,16 @@ not evidence."
          ;; t can mean nothing else, so with no file to have said it
          ;; there is no vault to name.
          (home (org-semantic-canonical-vault home)))))
-     ((stringp org-semantic-vault-root)
-      (org-semantic-canonical-vault (expand-file-name org-semantic-vault-root))))))
+     ;; Asked before the string case, since a function is not one.  What it
+     ;; returns is read exactly as a global string would be -- expanded, so a
+     ;; caller may answer `~/notes' -- and nil is "no vault here", which is a
+     ;; real answer rather than a failure: a client with nothing open says so.
+     ((functionp global)
+      (let ((answer (funcall global)))
+        (when (stringp answer)
+          (org-semantic-canonical-vault (expand-file-name answer)))))
+     ((stringp global)
+      (org-semantic-canonical-vault (expand-file-name global))))))
 
 (defun org-semantic-notes-root (vault)
   "Where VAULT's notes are: VAULT itself, or what its `vault.json' says.

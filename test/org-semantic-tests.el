@@ -355,6 +355,65 @@ without this a search from one has no vault at all."
         (setq default-directory temporary-file-directory)
         (should (equal (org-semantic-vault) (org-semantic-canonical-vault dir)))))))
 
+(ert-deftest a-vault-that-has-to-be-worked-out-is-a-function ()
+  "The global value answers for every buffer that declares nothing.
+
+A fixed directory is the wrong answer when something else already
+tracks which collection of notes is current -- vulpea switching
+vaults, and anything like it.  Before this, such a package had to
+advise `org-semantic-vault' to say so, which is why the function
+value exists: the setting can now express the answer instead."
+  (org-semantic-tests--with-vault dir
+    (let ((org-semantic-vault-root (lambda () dir)))
+      (should (equal (org-semantic-canonical-vault dir) (org-semantic-vault))))
+    ;; `~/notes' is answerable, which is what a caller will write.  This
+    ;; guards the outcome and not one call: `file-truename', inside
+    ;; `org-semantic-canonical-vault', expands `~' as well -- so it fails only
+    ;; if the answer is taken verbatim, which is the thing that would break.
+    (let* ((home (file-name-directory (directory-file-name dir)))
+           (leaf (file-name-nondirectory (directory-file-name dir)))
+           (org-semantic-vault-root (lambda () (concat "~/" leaf)))
+           (process-environment (cons (concat "HOME=" (directory-file-name home))
+                                      process-environment)))
+      (should (equal (org-semantic-canonical-vault dir) (org-semantic-vault))))
+    ;; nil is a real answer -- nothing open -- and not a failure to fall back
+    ;; from.  A client with no vault says so; it does not guess.
+    (let ((org-semantic-vault-root #'ignore))
+      (should-not (org-semantic-vault)))))
+
+(ert-deftest a-declaration-may-not-be-a-function ()
+  "A vault says which directory it is, never how to work one out.
+
+`safe-local-variable' is the first refusal, and the important one: a
+directory you merely visit could otherwise run whatever it liked.
+This also covers the value being marked safe by hand, where the
+declared branch would read a function as t -- since it is neither a
+string nor nil -- and answer with the directory holding the
+`.dir-locals.el', which is a vault nobody named."
+  ;; The predicate admits what a vault may write, and nothing else.
+  (let ((safe (get 'org-semantic-vault-root 'safe-local-variable)))
+    (should (funcall safe t))
+    (should (funcall safe "notes"))
+    (should-not (funcall safe (lambda () "/tmp")))
+    (should-not (funcall safe 'ignore)))
+  ;; And a declaration that is a function is ignored rather than obeyed: the
+  ;; global value answers instead, which here is another vault entirely.
+  (org-semantic-tests--with-vault dir
+    (let ((buffer (find-file-noselect (expand-file-name "pumps.org" dir)))
+          (before (default-value 'org-semantic-vault-root)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (setq-local org-semantic-vault-root (lambda () "/never/asked"))
+            ;; `setq-default', not `let': a `let' here would rebind the
+            ;; buffer-local binding -- the declaration itself -- so the
+            ;; function under test would never see one, and the test would
+            ;; pass against code that obeys a declared function.
+            (setq-default org-semantic-vault-root "/elsewhere/notes")
+            (should (equal (org-semantic-canonical-vault "/elsewhere/notes")
+                           (org-semantic-vault))))
+        (setq-default org-semantic-vault-root before)
+        (kill-buffer buffer)))))
+
 (ert-deftest only-a-declaration-carries-a-declaration-s-meaning ()
   "A value of t means \"the directory that said so\", and globally nothing did.
 

@@ -445,6 +445,30 @@ holds derived data, its place is not the vault's to promise, and a vault found
 that way would be found on one machine and not on another that keeps its indexes
 elsewhere --- answering with a *different* vault rather than with none.
 
+*When the answer has to be worked out rather than written down*, the global
+setting may be a function of no arguments instead. That is for the case where
+something else in your configuration already tracks which collection of notes is
+current --- switching between vaults, or opening one per project --- so that a
+fixed directory is the wrong answer and the right one changes during the session:
+
+#+begin_src emacs-lisp
+(setq org-semantic-vault-root
+      (lambda () (and vulpea-vault-directory
+                      (expand-file-name vulpea-vault-directory))))
+#+end_src
+
+Returning nil means there is no vault here, which is a complete answer --- a
+search then says so rather than guessing. Keep it to a variable lookup: it is
+asked on every question about a vault, including once per save when
+~org-semantic-auto-reindex-mode~ is on. An error in it is left to signal, since
+it is your code and a vault that cannot be worked out is worth seeing.
+
+A function is legal *only* as the global value, never in a =.dir-locals.el=: a
+directory you merely visit could otherwise run whatever it liked, so Emacs
+refuses to apply one and org-semantic ignores it if it is marked safe by hand. A
+declaration says which directory a vault is; how to work one out is a decision
+for your own configuration.
+
 Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
 searches the vault that note belongs to and shows what came back. The prompt
 says which ranking will answer --- =Semantic search for:= or =Lexical search
@@ -532,7 +556,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 
 | variable                             | default        | what it decides                                             |
 |--------------------------------------+----------------+-------------------------------------------------------------|
-| ~org-semantic-vault-root~            | =nil=          | which vault your notes are in --- above                     |
+| ~org-semantic-vault-root~            | =nil=          | which vault your notes are in, or a function --- above      |
 | ~org-semantic-executable~            | =org-semantic= | the binary, by name on =exec-path= or as a path             |
 | ~org-semantic-install-directory~     | =~/.emacs.d/org-semantic/= | where a binary of its own is kept --- below     |
 | ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |

@@ -111,6 +111,24 @@ not have.
 
 ### Added
 
+- **`org-semantic-vault-root` may be a function**, for a vault whose identity has
+  to be worked out rather than written down — a package that already tracks which
+  collection of notes is current, and switches between them during a session. It
+  is asked on every question about a vault, returns a directory or nil, and nil
+  means "no vault here", which is a complete answer rather than a failure to
+  recover from.
+
+  This exists because the alternative was advice. Something like vulpea had no way
+  to say "the vault is whichever one is open now": the setting held a fixed string,
+  so answering that meant `advice-add` on `org-semantic-vault` from outside. Now
+  the setting can express it, and any package — org-roam, `project.el`, your own
+  init — can answer without reaching into this one.
+
+  A function is legal only as the **global** value. `safe-local-variable` refuses
+  one from a `.dir-locals.el`, since a directory you merely visit could otherwise
+  run whatever it liked, and a declared function is ignored rather than obeyed if
+  it is marked safe by hand. A declaration says which directory a vault is; how to
+  work one out belongs to your configuration.
 - **`lang:` narrows a search by meaning too.** It answered `search --lexical`
   alone and was refused on the other side, because only the word index recorded a
   language: a language picks a stemmer, and an embedding is not stemmed. That is
