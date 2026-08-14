@@ -54,11 +54,19 @@ org-semantic search <vault> 'tag:Literature dir:"03 Reviews" quantum error corre
 Each hit is an object:
 
 ```json
-{ "score": 0.883, "z": 2.1, "file": "/abs/path/note.org",
+{ "score": 0.883, "z": 2.1,
+  "path": "03 Reviews/note.org", "file": "/abs/vault/03 Reviews/note.org",
   "headingLine": 672, "startLine": 674, "endLine": 691,
-  "id": "f73825a4-…", "title": "…", "section": "…", "tags": ["Literature"],
-  "text": "the passage itself" }
+  "id": "f73825a4-…", "title": "Trapping", "section": "Escape > Losses",
+  "heading": "Trapping > Escape > Losses",
+  "tags": ["Literature", "work"], "todo": "TODO", "priority": "A",
+  "lang": "en-US", "text": "the passage itself" }
 ```
+
+That is every key: nothing else is sent, and none of them is ever absent —
+`z`, `id`, `section`, `todo`, `priority` and `lang` are `null` when they do not
+apply. `path` is vault-relative and `file` is it joined to the vault you named,
+so `file` is absolute only if your vault argument was.
 
 - **`z` is the figure to trust for semantic hits** — how many standard
   deviations above the corpus's own background a hit sits. Raw `score` is mostly
@@ -76,6 +84,16 @@ Each hit is an object:
   the outline path, for saying *where* a hit is in prose. `id` is an org-id only
   when the note carries one, and it is the *nearest enclosing* node's — in a
   large file every hit may report the same one, so never use it as an address.
+- **`tags`, `todo` and `priority` are inherited, as org inherits them.** `tags`
+  is the effective set — `#+filetags:` plus every ancestor heading's tags plus
+  its own — which is what `tag:` matches, so a hit can carry a tag its own
+  heading does not show. `todo` and `priority` are the nearest enclosing
+  heading's and apply to the body under it; `priority` is the cookie's letter,
+  `[#A]` → `"A"`. There is no `priority:` predicate — filter on the field
+  yourself.
+- `lang` is the language in effect there, from a `# ltex: language=…` comment in
+  the note or the vault's configured default. Both rankings carry it, and it is
+  what `lang:` narrows on.
 - `text` is the passage itself, **read from the note at search time**, so it is
   the real document — code blocks and tables appear in full, not as the
   placeholders the index embedded. You usually need not open the file. It is
