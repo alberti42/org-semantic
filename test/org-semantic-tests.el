@@ -420,6 +420,204 @@ answering with the default vault instead of with none."
       (should-not (string-suffix-p "/" canonical)))))
 
 
+;;;; Reindexing when a note is saved
+
+(defmacro org-semantic-tests--saving (&rest body)
+  "Run BODY with the timers and the server replaced by records of them.
+
+`org-semantic-tests--armed' collects what would have been armed,
+`--cancelled' what would have been cancelled, `--indexed' the
+arguments of each `org-semantic-index', and `--said' every message.
+Nothing waits and nothing is sent."
+  (declare (indent 0))
+  `(let ((org-semantic-tests--armed nil)
+         (org-semantic-tests--cancelled nil)
+         (org-semantic-tests--indexed nil)
+         (org-semantic-tests--said nil))
+     (cl-letf (((symbol-function 'run-with-timer)
+                (lambda (_secs _repeat fn &rest args)
+                  (let ((timer (list 'fake-timer fn args)))
+                    (push timer org-semantic-tests--armed)
+                    timer)))
+               ((symbol-function 'cancel-timer)
+                (lambda (timer) (push timer org-semantic-tests--cancelled)))
+               ((symbol-function 'timerp)
+                (lambda (thing) (eq (car-safe thing) 'fake-timer)))
+               ((symbol-function 'org-semantic-index)
+                (lambda (&rest args) (push args org-semantic-tests--indexed) "id"))
+               ((symbol-function 'org-semantic-indexing-p) #'ignore)
+               ((symbol-function 'message)
+                (lambda (format &rest args)
+                  (when format
+                    (push (apply #'format format args)
+                          org-semantic-tests--said)))))
+       (clrhash org-semantic-auto-reindex--timers)
+       (clrhash org-semantic-auto-reindex--said)
+       ,@body)))
+
+(ert-deftest saving-a-note-arms-one-reindex-however-many-saves ()
+  "Each save restarts the wait, so a batch of them costs one run.
+
+`save-some-buffers' over a vault is the case: fifty notes written in
+a second, and fifty reindexes of the same vault would be refused one
+after another by a server that runs one per vault."
+  (org-semantic-tests--with-vault dir
+    (let ((org-semantic-vault-root dir))
+      (org-semantic-tests--saving
+        (let ((buffer (find-file-noselect (expand-file-name "pumps.org" dir))))
+          (unwind-protect
+              (with-current-buffer buffer
+                (dotimes (_ 3) (org-semantic-auto-reindex--on-save)))
+            (kill-buffer buffer)))
+        (should (= 3 (length org-semantic-tests--armed)))
+        ;; Two of the three were cancelled by the save that followed, so one
+        ;; run is pending -- and it is the last one armed.
+        (should (= 2 (length org-semantic-tests--cancelled)))
+        (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
+        (should (equal (gethash (org-semantic--canonical dir)
+                                org-semantic-auto-reindex--timers)
+                       (car org-semantic-tests--armed)))))))
+
+(ert-deftest a-save-that-is-not-a-note-in-the-vault-arms-nothing ()
+  "Three questions, cheapest first, and containment is the one that bites.
+
+`after-save-hook' runs for every save in Emacs.  With a global
+`org-semantic-vault-root' every buffer resolves to that vault -- which
+is what makes a search from `*scratch*' work -- so a README.org in a
+code repository would otherwise reindex the notes and report success."
+  (org-semantic-tests--with-vault dir
+    (let* ((elsewhere (make-temp-file "org-semantic-outside" t))
+           (org-semantic-vault-root dir))
+      (unwind-protect
+          (org-semantic-tests--saving
+            ;; A note, but not one of this vault's.
+            (with-temp-file (expand-file-name "README.org" elsewhere) (insert "hi"))
+            (let ((buffer (find-file-noselect
+                           (expand-file-name "README.org" elsewhere))))
+              (unwind-protect
+                  (with-current-buffer buffer
+                    (org-semantic-auto-reindex--on-save))
+                (kill-buffer buffer)))
+            ;; And a file in the vault that the indexer would not index.
+            (with-temp-file (expand-file-name "notes.txt" dir) (insert "hi"))
+            (let ((buffer (find-file-noselect (expand-file-name "notes.txt" dir))))
+              (unwind-protect
+                  (with-current-buffer buffer
+                    (org-semantic-auto-reindex--on-save))
+                (kill-buffer buffer)))
+            ;; And a buffer visiting nothing at all.
+            (with-temp-buffer
+              (setq default-directory (file-name-as-directory dir))
+              (org-semantic-auto-reindex--on-save))
+            (should-not org-semantic-tests--armed))
+        (delete-directory elsewhere t)))))
+
+(ert-deftest an-automatic-run-refreshes-what-exists-and-builds-nothing ()
+  "A save must not start minutes of embedding nobody asked for.
+
+`org-semantic-index-mode' defaults to \"both\", so a vault with only
+the word index would have every save kick off a first semantic build
+-- with the echo area silenced, from a keystroke about saving a file.
+So the run is narrowed to what the vault already has, and a vault
+with nothing built is told about `org-semantic-reindex' instead."
+  (org-semantic-tests--with-vault dir
+    (let ((org-semantic-index-mode "both")
+          (vault (org-semantic--canonical dir)))
+      ;; The word index alone: refresh that, and say nothing.
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-status)
+                   (lambda (&rest _) '(:semantic [] :lexical t))))
+          (org-semantic-auto-reindex--run vault))
+        (should (= 1 (length org-semantic-tests--indexed)))
+        (should (equal (plist-get (car org-semantic-tests--indexed) :mode) "lexical"))
+        (should-not org-semantic-tests--said))
+      ;; Both: both.
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-status)
+                   (lambda (&rest _) '(:semantic [(:name "e5-small" :cached t)]
+                                       :lexical t))))
+          (org-semantic-auto-reindex--run vault))
+        (should (equal (plist-get (car org-semantic-tests--indexed) :mode) "both")))
+      ;; Nothing built: nothing started, and said once rather than per save.
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-status)
+                   (lambda (&rest _) '(:semantic [] :lexical :json-false))))
+          (org-semantic-auto-reindex--run vault)
+          (org-semantic-auto-reindex--run vault))
+        (should-not org-semantic-tests--indexed)
+        (should (= 1 (length org-semantic-tests--said)))
+        ;; Naming what the reader can press, not a key of some other buffer.
+        (should (string-match-p "org-semantic-reindex" (car org-semantic-tests--said)))))))
+
+(ert-deftest a-run-of-its-own-is-waited-for-rather-than-refused ()
+  "The server runs one index per vault and refuses the second.
+
+So a save landing during a run must not send one: it re-arms, which
+also folds every save made while that run was going into the single
+run that follows it."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic--canonical dir)))
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-indexing-p) (lambda (&rest _) "id"))
+                  ((symbol-function 'org-semantic-status)
+                   (lambda (&rest _) (error "Nobody should have asked"))))
+          (org-semantic-auto-reindex--run vault))
+        (should-not org-semantic-tests--indexed)
+        (should (= 1 (length org-semantic-tests--armed)))))))
+
+(ert-deftest a-failure-speaks-once-and-a-success-only-if-asked ()
+  "Quiet is about success, and a failure is not success.
+
+An automatic feature that has stopped working looks exactly like one
+that is working, and there is no keystroke that came back empty to
+make anybody suspicious -- so a failure is said, and latched, since
+the condition holds until somebody acts on it."
+  (org-semantic-tests--with-vault dir
+    (let* ((vault (org-semantic--canonical dir))
+           (fail (lambda (&rest args)
+                   (funcall (plist-get args :failure)
+                            '(:message "the policy has changed"))
+                   "id"))
+           (win (lambda (&rest args)
+                  (funcall (plist-get args :success) '(:lexical (:files 1 :chunks 2 :secs 0.1)))
+                  "id")))
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-index) fail))
+          (org-semantic-auto-reindex--start vault "lexical")
+          (org-semantic-auto-reindex--start vault "lexical"))
+        (should (= 1 (length org-semantic-tests--said)))
+        (should (string-match-p "the policy has changed" (car org-semantic-tests--said))))
+      ;; Quiet by default, and a run that works clears what was said, so the
+      ;; next failure is heard.
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-index) win))
+          (let ((org-semantic-auto-reindex-quietly t))
+            (org-semantic-auto-reindex--start vault "lexical"))
+          (should-not org-semantic-tests--said)
+          (let ((org-semantic-auto-reindex-quietly nil))
+            (org-semantic-auto-reindex--start vault "lexical"))
+          (should (= 1 (length org-semantic-tests--said)))))
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'org-semantic-index) fail))
+          (org-semantic-auto-reindex--start vault "lexical"))
+        (cl-letf (((symbol-function 'org-semantic-index) win))
+          (org-semantic-auto-reindex--start vault "lexical"))
+        (should-not (gethash vault org-semantic-auto-reindex--said))))))
+
+(ert-deftest turning-the-mode-off-drops-what-was-pending ()
+  "A wait that outlives the mode would index a vault nobody asked about."
+  (org-semantic-tests--with-vault dir
+    (let ((org-semantic-vault-root dir))
+      (org-semantic-tests--saving
+        (org-semantic-auto-reindex--arm (org-semantic--canonical dir))
+        (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
+        (org-semantic-auto-reindex-mode 1)
+        (should (memq #'org-semantic-auto-reindex--on-save after-save-hook))
+        (org-semantic-auto-reindex-mode -1)
+        (should-not (memq #'org-semantic-auto-reindex--on-save after-save-hook))
+        (should (= 1 (length org-semantic-tests--cancelled)))
+        (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))))))
+
 ;;;; Errors carry a label, and the label is what to branch on
 
 (ert-deftest a-failure-worth-acting-on-arrives-labelled ()

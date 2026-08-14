@@ -111,6 +111,19 @@ not have.
 
 ### Added
 
+- **`org-semantic-auto-reindex-mode`** keeps a vault's indexes current as its
+  notes are saved: two seconds after saving stops, whatever changed is reindexed.
+  The wait is a debounce (`org-semantic-auto-reindex-delay`), so
+  `save-some-buffers` over fifty notes costs one run rather than fifty, and a save
+  landing during a run waits for it instead of being refused. A run of one changed
+  note is about 70 ms.
+
+  It **will not build** an index that does not exist — that is minutes of
+  embedding and a decision — so a vault with nothing built is named once, with
+  `M-x org-semantic-reindex` as the thing to press. Successes are silent
+  (`org-semantic-auto-reindex-quietly`); failures are said once per vault, because
+  an automatic feature that has stopped working looks exactly like one that is
+  working. Notes changed outside Emacs are still `org-semantic-reindex`'s to catch.
 - **`org-semantic-results-connector`** and `l` — for logic — in the results buffer:
   join a word query's terms with `and` or `or`. Named for the logic rather than for the wire,
   which spells it as a boolean called `any` — the server's vocabulary, and no

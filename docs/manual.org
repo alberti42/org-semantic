@@ -238,7 +238,10 @@ this can go.
   ;; Optional, and one of the nicer things here: each passage is previewed
   ;; in its note as point reaches it, so `n' and `p' read the vault rather
   ;; than a list of it.  `f' in the results buffer toggles it either way.
-  :hook (org-semantic-results-mode . next-error-follow-minor-mode))
+  :hook (org-semantic-results-mode . next-error-follow-minor-mode)
+  ;; Also optional: keep the indexes up to date as notes are saved, so
+  ;; `C-c n R' is for what changed outside Emacs rather than for every edit.
+  :init (org-semantic-auto-reindex-mode 1))
 #+end_src
 
 =s= searches, =S= searches for the region or the symbol at point, and =R=
@@ -255,6 +258,27 @@ the note keeps up. Without =use-package= it is the same one hook:
 =(add-hook 'org-semantic-results-mode-hook #'next-error-follow-minor-mode)=.
 Called from a hook a minor mode *enables* rather than toggling, which is why
 this reads as it does and =f= still toggles.
+
+~org-semantic-auto-reindex-mode~ is the other optional line, and it is the one
+that makes searching feel current: saving a note reindexes the vault it belongs
+to, two seconds after saving stops. That wait is a debounce ---
+~org-semantic-auto-reindex-delay~ --- so writing fifty notes with
+=save-some-buffers= costs one run rather than fifty, and a save landing while a
+run is going waits for it rather than being refused. A run of one changed note is
+about 70 ms: the note is re-chunked, and only the passages whose text actually
+moved are embedded again.
+
+It says nothing when it works, which is ~org-semantic-auto-reindex-quietly=; set
+it to nil to see each run reported. Failures are *not* quiet --- said once per
+vault, since an automatic feature that has stopped working looks exactly like one
+that is working.
+
+Two things it deliberately will not do. It will not **build** an index that does
+not exist: that is minutes of embedding and a decision, so a vault with nothing
+built is named once, with =M-x org-semantic-reindex= as the thing to press. And
+it does not see notes that changed outside Emacs --- a sync, a =git pull=, a
+rename in Dired --- which is what =M-x org-semantic-reindex= remains for. Being
+behind costs nothing: a search says so when the index is a version old.
 
 A passage is org text, so it is shown with org's own faces: emphasis, verbatim,
 headings, block markers and links all look as they do in the note. That is
@@ -412,6 +436,9 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |
 | ~org-semantic-model~                 | =nil=          | which model, when a vault has several built                 |
 | ~org-semantic-index-mode~            | ="both"=       | which indexes =M-x org-semantic-reindex= builds             |
+| ~org-semantic-auto-reindex-mode~     | =nil=          | reindex a vault when one of its notes is saved --- above    |
+| ~org-semantic-auto-reindex-delay~    | =2.0=          | seconds of quiet after a save before it runs                |
+| ~org-semantic-auto-reindex-quietly~  | =t=            | whether a run that worked says so                           |
 | ~org-semantic-config~                | =nil=          | the indexing policy to send --- below                       |
 | ~org-semantic-conserve-memory~       | =nil=          | see [[#during-a-reindex][Searching while it reindexes]]     |
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |

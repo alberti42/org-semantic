@@ -1092,6 +1092,179 @@ and what only a full rebuild can do."
    ""))
 
 
+;;;; Reindexing when a note is saved
+
+(defcustom org-semantic-auto-reindex-delay 2.0
+  "Seconds of quiet after a save before `org-semantic-auto-reindex-mode' runs.
+
+Each save restarts the wait, so saving fifty notes -- which is what
+`save-some-buffers' does -- costs one run rather than fifty.  A run
+of one changed note is about 70 ms, so there is nothing to be
+gained by waiting longer than it takes to stop typing."
+  :type 'number)
+
+(defcustom org-semantic-auto-reindex-quietly t
+  "Whether `org-semantic-auto-reindex-mode' keeps quiet about having worked.
+
+The point of an automatic reindex is that nobody has to think about
+it, and a line in the echo area after every save is thinking about
+it.
+
+Only about *success*.  A vault with no index to refresh, or a run
+that failed, is said once -- an automatic feature that has stopped
+working is otherwise indistinguishable from one that is working, and
+there is no keystroke that came back empty to make anybody
+suspicious."
+  :type 'boolean)
+
+(defvar org-semantic-auto-reindex--timers (make-hash-table :test 'equal)
+  "The pending reindex of each vault, keyed by the vault.")
+
+(defvar org-semantic-auto-reindex--said (make-hash-table :test 'equal)
+  "What has been said about each vault, so it is not said again per save.")
+
+(defun org-semantic-auto-reindex--say (os-vault what message)
+  "Say MESSAGE about OS-VAULT once, and remember it as WHAT.
+
+Latched per vault, because everything worth saying here holds until
+somebody acts on it: a vault with no index has none at the next save
+either.  Unlatched, `save-some-buffers' over fifty notes says the
+same sentence fifty times, which is the distraction this mode exists
+not to be.
+
+WHAT is compared, not the sentence, so a different condition still
+speaks; a run that works clears it."
+  (unless (eq what (gethash os-vault org-semantic-auto-reindex--said))
+    (puthash os-vault what org-semantic-auto-reindex--said)
+    (message "%s" message)))
+
+(defun org-semantic-auto-reindex--refreshable (vault)
+  "Which of VAULT's indexes an automatic run may refresh, or nil.
+
+Only the ones that already exist.  Saving a note is not a request to
+spend minutes embedding a corpus, and with `org-semantic-index-mode'
+at its default of \"both\" that is exactly what the first automatic
+run in an unindexed vault would be -- with the echo area silenced,
+for a keystroke that was about saving a file.  So a vault with only
+the word index refreshes that one, and a vault with nothing built is
+left to `org-semantic-reindex'.
+
+Costs one `status', which is milliseconds, and asks every time: a
+negative answer must not be remembered, or building the index would
+not be noticed."
+  (let* ((status (org-semantic-status vault))
+         (built-semantic (> (length (append (plist-get status :semantic) nil)) 0))
+         (built-lexical (org-semantic-true-p (plist-get status :lexical)))
+         (semantic (and (member org-semantic-index-mode '("both" "semantic"))
+                        built-semantic))
+         (lexical (and (member org-semantic-index-mode '("both" "lexical"))
+                       built-lexical)))
+    (cond ((and semantic lexical) "both")
+          (semantic "semantic")
+          (lexical "lexical"))))
+
+(defun org-semantic-auto-reindex--start (os-vault mode)
+  "Reindex MODE of OS-VAULT, saying as little as it is allowed to."
+  (org-semantic-index
+   :vault os-vault
+   :mode mode
+   :success
+   (lambda (result)
+     (remhash os-vault org-semantic-auto-reindex--said)
+     (unless org-semantic-auto-reindex-quietly
+       (message "org-semantic: indexed %s%s"
+                (abbreviate-file-name os-vault)
+                (org-semantic--summarise result))))
+   :failure
+   (lambda (error-object)
+     (org-semantic-auto-reindex--say
+      os-vault 'failed
+      (format "org-semantic: %s"
+              (or (plist-get error-object :message) "the index failed"))))))
+
+(defun org-semantic-auto-reindex--run (os-vault)
+  "Reindex OS-VAULT now, or find out why not.
+
+A run of its own may be in flight -- the server refuses a second one
+per vault rather than queueing it -- and the answer to that is to
+wait and ask again, which also folds every save made while it ran
+into the one run that follows."
+  (remhash os-vault org-semantic-auto-reindex--timers)
+  (condition-case error
+      (if (org-semantic-indexing-p os-vault)
+          (org-semantic-auto-reindex--arm os-vault)
+        (let ((mode (org-semantic-auto-reindex--refreshable os-vault)))
+          (if mode
+              (org-semantic-auto-reindex--start os-vault mode)
+            (org-semantic-auto-reindex--say
+             os-vault 'no-index
+             (format (concat "org-semantic: %s has no index to keep up to "
+                             "date -- M-x org-semantic-reindex builds one")
+                     (abbreviate-file-name os-vault))))))
+    ;; A server that will not start, a binary that is not there: said once,
+    ;; and never signalled.  This runs from a timer, where an error is a
+    ;; backtrace nobody asked for, and it must not stop later saves trying.
+    (error (org-semantic-auto-reindex--say
+            os-vault 'broken
+            (format "org-semantic: %s" (error-message-string error))))))
+
+(defun org-semantic-auto-reindex--arm (vault)
+  "Reindex VAULT once saving has stopped for `org-semantic-auto-reindex-delay'."
+  (let ((pending (gethash vault org-semantic-auto-reindex--timers)))
+    (when (timerp pending) (cancel-timer pending)))
+  (puthash vault
+           (run-with-timer org-semantic-auto-reindex-delay nil
+                           #'org-semantic-auto-reindex--run vault)
+           org-semantic-auto-reindex--timers))
+
+(defun org-semantic-auto-reindex--on-save ()
+  "Arm a reindex, if what was just saved is a note in a vault.
+
+On `after-save-hook', which runs for every save in Emacs, so the
+cheap questions come first.  The vault is worked out from scratch
+each time rather than cached: it is a handful of file names, next to
+nothing beside the write that has just happened, and a cache would
+answer for the vault this buffer belonged to when it was opened.
+
+Containment is the last question and not a formality.  With
+`org-semantic-vault-root' set globally, *every* buffer resolves to
+that vault -- which is what makes a search from `*scratch*' work --
+so without it, saving a README in a code repository would reindex
+your notes and report success."
+  (let ((file (buffer-file-name)))
+    (when (and file (string-suffix-p ".org" file))
+      (let ((vault (org-semantic-vault)))
+        (when (and vault (file-in-directory-p file vault))
+          (org-semantic-auto-reindex--arm vault))))))
+
+;;;###autoload
+(define-minor-mode org-semantic-auto-reindex-mode
+  "Keep a vault's indexes up to date as its notes are saved.
+
+Incremental, so it costs about what one changed note costs: a note
+whose timestamp and size are unchanged is not even read, and the
+passages of one that changed are re-embedded only where the text
+they were made of moved.  `org-semantic-auto-reindex-delay' is how
+long saving must stop for, and `org-semantic-auto-reindex-quietly'
+whether a run that worked says so.
+
+What it will not do is build an index that does not exist -- that is
+minutes of embedding, and a decision, so it says once which vault
+needs `org-semantic-reindex' and leaves it there.  Notes changed
+outside Emacs are not seen either: a sync, a `git pull', a rename in
+Dired.  `org-semantic-reindex' is what catches up with those, and
+nothing is lost by being behind, since a search says when an index
+is a version old."
+  :global t
+  :group 'org-semantic
+  (clrhash org-semantic-auto-reindex--said)
+  (if org-semantic-auto-reindex-mode
+      (add-hook 'after-save-hook #'org-semantic-auto-reindex--on-save)
+    (remove-hook 'after-save-hook #'org-semantic-auto-reindex--on-save)
+    (maphash (lambda (_vault timer) (when (timerp timer) (cancel-timer timer)))
+             org-semantic-auto-reindex--timers)
+    (clrhash org-semantic-auto-reindex--timers)))
+
 ;;;; What the server holds
 
 (defun org-semantic-status (&optional vault)
