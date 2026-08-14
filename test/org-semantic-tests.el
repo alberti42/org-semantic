@@ -415,8 +415,8 @@ answering with the default vault instead of with none."
 The server keys everything it holds by the string it was given, so a
 `close' or a `status' for the same vault spelled another way finds
 nothing and says so cheerfully -- zero entries dropped, no index here.
-This was a private function, and the one integration that needed it
-(vulpea, closing the vault being switched away from) had to carry a copy
+This was a private function, and the one integration that needed it --
+vulpea, closing the vault being switched away from -- had to carry a copy
 that would fall out of step the moment ours changed."
   (should (fboundp 'org-semantic-canonical-vault))
   (org-semantic-tests--with-vault dir
