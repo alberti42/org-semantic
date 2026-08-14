@@ -38,10 +38,12 @@ searched:
 | predicate | meaning |
 |---|---|
 | `tag:x` | chunk carries org tag `x`; repeat to require several |
-| `-tag:x` | chunk does not carry it |
 | `dir:x` | note lives under directory `x`; repeat to widen |
 | `todo:x` | nearest heading has TODO keyword `x` |
 | `lang:x` | note is in language `x`; `lang:de` matches `de-DE` and `de-AT` |
+
+Any of the four negates with a leading `-`: `-tag:x` excludes what carries the
+tag, `-dir:archive` excludes that directory.
 
 ```sh
 org-semantic search <vault> 'tag:Literature dir:"03 Reviews" quantum error correction' --json
@@ -65,7 +67,7 @@ Each hit is an object:
 - **For lexical hits `z` is null.** BM25 scores have no fixed scale, so read
   only the ordering, never the number.
 - A hit is an **outline node**, not a file: `heading` is the full path to it and
-  `line` is where it starts. In a vault that keeps three hundred meetings in one
+  `headingLine` is where it starts. In a vault that keeps three hundred meetings in one
   `meetings.org`, `title` is the file's and tells you nothing — `section` and
   `heading` are what locate the hit.
 - **The address of a hit is `file` (or `path`) and `headingLine`.** That is the
