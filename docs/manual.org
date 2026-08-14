@@ -355,30 +355,20 @@ exactly what a save hook cannot. The two indexes then answer different halves of
 one question over one tree, and neither knows about the other's directory:
 =.vulpea/= and =.org-semantic/= sit side by side in the vault.
 
-Hearing about it depends on which way vulpea parses, and it is worth getting right
-because the wrong choice fails *silently* --- an index that quietly stops being
-updated looks exactly like one that is. With ~vulpea-db-async-extraction~ on, a
-background worker does the parsing and reports each file through a declared
-extension point, which needs no advice:
+Hearing about what those watches found means reaching into vulpea, and the two
+signals worth knowing are ~vulpea-db-update-file~, which vulpea calls for a note
+whose content is new to it, and its own handler for a removed file, which is the
+only place a *deletion* shows up. Neither has a hook, so both mean =advice-add= on
+another package --- your call, and the usual caveat about advice applies. Do not
+take the first alone and assume you are covered: a note deleted or renamed away
+never reaches it, so the index would go on offering a note that is gone, which is
+the silent half of being out of date.
 
-#+begin_src emacs-lisp
-(add-hook 'vulpea-db-worker-done-functions
-          (lambda (_path status _count)
-            ;; `applied' is a note written, `missing' one deleted.  The other
-            ;; statuses either mean nothing changed or that a further report
-            ;; is coming, so there is nothing to reindex for yet.
-            (when (memq status '(applied missing))
-              (org-semantic-auto-reindex-touch "/Users/you/notes"))))
-#+end_src
-
-That variable is *nil by default*, and the hook is the worker's --- so on a stock
-vulpea the snippet above is never called and nothing tells you. If you keep the
-default synchronous parsing, the signal is ~vulpea-db-update-file~, which is
-public and documented but has no hook of its own, so reaching it means
-=advice-add= on another package's function --- your call, and the usual caveat
-about advice applies. Whichever you use, vulpea reports *per file*: its own first
-sync of a thousand notes fires this a thousand times, and the debounce makes that
-one run.
+If that is more coupling than you want, the =filenotify= watch above is the
+honest alternative --- it sees creation, change, deletion and renaming in one
+place, at the cost of walking the tree yourself. Either way vulpea reports and
+watches *per file*: a first sync of a thousand notes fires this a thousand times,
+and the debounce makes that one run.
 
 Failing both, =M-x org-semantic-reindex= remains what catches up. Being behind
 costs nothing: a search says so when the index is a version old.
@@ -2150,9 +2140,7 @@ areas". And vulpea already watches the filesystem to keep its own database
 current --- the whole tree, new subdirectories included --- which is the one thing
 org-semantic does not do at all. Those watches can keep *both* indexes current,
 including the changes a save hook cannot see; see
-[[#searching-from-emacs][Searching from Emacs]] for how to hear about them, and
-for the wrinkle that which signal to use depends on
-~vulpea-db-async-extraction~.
+[[#searching-from-emacs][Searching from Emacs]] for how to hear about them.
 
 * Licence
 :PROPERTIES:
