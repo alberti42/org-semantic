@@ -536,6 +536,35 @@ org file saved anywhere."
                                  org-semantic-auto-reindex--timers)))))
         (delete-directory state t)))))
 
+(ert-deftest status-names-the-notes-only-when-they-are-elsewhere ()
+  "The one place a user sees where a vault's notes are.
+
+Both halves matter because it is a condition, and a condition inverts
+without failing: silent when they differ leaves the split invisible
+from inside Emacs -- the reply carries `notes' and nothing shows it --
+and spoken when they do not adds a clause to every ordinary vault
+saying only that the notes are where you asked for them."
+  (let ((said nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format &rest args)
+                 (when format (push (apply #'format format args) said)))))
+      ;; The ordinary vault: nothing to say.
+      (cl-letf (((symbol-function 'org-semantic-status)
+                 (lambda (&rest _) `(:notes "/vault" :semantic [] :lexical
+                                     :json-false :loaded :json-false
+                                     :indexing :json-false))))
+        (org-semantic-show-status "/vault"))
+      (should-not (string-match-p "notes in" (car said)))
+      ;; And one that keeps its notes elsewhere: named, so `M-x
+      ;; org-semantic-show-status' answers "which notes is this index of?".
+      (cl-letf (((symbol-function 'org-semantic-status)
+                 (lambda (&rest _) `(:notes "/elsewhere/org" :semantic []
+                                     :lexical t :loaded :json-false
+                                     :indexing :json-false))))
+        (org-semantic-show-status "/state/notes"))
+      (should (string-match-p "notes in /elsewhere/org" (car said)))
+      (should (string-match-p "/state/notes" (car said))))))
+
 (ert-deftest a-save-that-is-not-a-note-in-the-vault-arms-nothing ()
   "Three questions, cheapest first, and containment is the one that bites.
 
