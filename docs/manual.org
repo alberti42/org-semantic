@@ -311,6 +311,63 @@ they share the debounce. What the touch takes from the mode is its manners: the
 same delay, the same silence when it works, and the same refusal to *build* an
 index that does not exist.
 
+So there are two levels of keeping current, and the first is enough for most
+people:
+
+- ~org-semantic-auto-reindex-mode~, above. Built in, one line, nothing else
+  installed --- and it hears about every note *you* write, which is most of what
+  changes.
+- **A watcher, plus the touch.** For the rest: a note renamed or deleted in
+  Dired, a =git pull=, a folder arriving from Dropbox. Something has to be
+  watching the filesystem, and org-semantic deliberately is not --- =serve= has no
+  lifetime beyond the editor that started it, so a watcher belongs on the Emacs
+  side where it can be switched off.
+
+**vulpea is the companion worth naming here**, because if you keep notes in one
+you have that watcher already. [[https://github.com/d12frosted/vulpea][vulpea]]
+maintains its own database of what each note *is* --- its =:ID:=, its title, its
+tags, what links to it --- and with ~vulpea-db-autosync-mode~ on it watches the
+tree to keep that database current. Those watches see exactly what a save hook
+cannot, and vulpea publishes what they found as an extension point, so no advice
+is involved:
+
+#+begin_src emacs-lisp
+(add-hook 'vulpea-db-worker-done-functions
+          (lambda (_path status _count)
+            ;; `applied' is a note written, `missing' one deleted.  The other
+            ;; statuses either mean nothing changed or that a further report
+            ;; is coming, so there is nothing to reindex for yet.
+            (when (memq status '(applied missing))
+              (org-semantic-auto-reindex-touch "/Users/you/notes"))))
+#+end_src
+
+The two indexes then answer different halves of one question over one tree ---
+vulpea what a note *is*, org-semantic what it *says* --- and neither knows about
+the other's directory: =.vulpea/= and =.org-semantic/= sit side by side in the
+vault. Note that vulpea reports *per file*, so its own first sync of a thousand
+notes fires this a thousand times; the debounce makes that one run.
+
+Without vulpea, the same thing in eleven lines of Emacs's own
+=filenotify=. Watch the vault, touch on anything that looks like a note:
+
+#+begin_src emacs-lisp
+(require 'filenotify)
+
+(defvar my/notes "/Users/you/notes")
+
+(file-notify-add-watch
+ my/notes '(change)
+ (lambda (event)
+   (when (and (memq (nth 1 event) '(created changed deleted renamed))
+              (string-suffix-p ".org" (or (nth 2 event) "")))
+     (org-semantic-auto-reindex-touch my/notes))))
+#+end_src
+
+That watches one directory and not its subdirectories, which is the honest limit
+of a short example: watching a tree means walking it, adding a watch per
+directory, and adding one for each directory that appears later. vulpea does that
+work already, which is the argument for letting it.
+
 Failing both, =M-x org-semantic-reindex= remains what catches up. Being behind
 costs nothing: a search says so when the index is a version old.
 
@@ -2061,6 +2118,27 @@ All of these are Markdown-first; org-semantic exists because none of them parse 
 [[https://github.com/jkitchin/org-db-v3][org-db]] and [[https://github.com/jkitchin/emacs-rag-libsql][emacs-rag-libsql]], both by John Kitchin, are the closest in aim to org-semantic --- semantic search over an org tree, driven from Emacs. Both split the work the same way: Emacs parses and navigates, a Python FastAPI server does the embedding and the vector search. org-db goes wide --- CLIP image search, SQLite full-text, indexing linked PDF/DOCX/PPTX, gptel tools for an LLM; emacs-rag-libsql goes deep on ranking, a cross-encoder reranking the vector hits in a second stage. Both fuse vector and keyword into one hybrid result.
 
 The difference is what you have to install and what has to be running. Each needs Python and =uv=, and pulls in =sentence-transformers= and =torch= --- org-db also =transformers=, =pillow=, =pymupdf4llm=, =python-docx=, =python-pptx= --- then a FastAPI process listening on a port for Emacs to reach over HTTP. org-semantic is one static binary: the embedding model runs in-process through a statically linked ONNX Runtime, nothing binds a port, and =serve= is a stdio child the editor starts and owns, not a daemon.
+
+** vulpea, which is a companion and not an alternative
+:PROPERTIES:
+:CUSTOM_ID: vulpea
+:END:
+[[https://github.com/d12frosted/vulpea][vulpea]] is not in the table above because it answers a different question and has
+no embeddings in it at all. It indexes what a note *is* --- its =:ID:=, its title,
+its tags, its metadata, what links to it --- and gives you a query API and
+=completing-read= over that. org-semantic indexes what a note *says*. Over one
+tree the two compose about as well as two packages can: =.vulpea/= and
+=.org-semantic/= sit side by side in the vault, each owning its own, and neither
+is told about the other's.
+
+Two concrete reasons to run both. You can *name* a note with vulpea and *find* one
+you cannot name with org-semantic --- =vulpea-find= when you know it is the note
+about the Rabi paper, =C-c n s= when all you have is "that thing about pulse
+areas". And vulpea already watches the filesystem to keep its own database
+current, which is the one thing org-semantic does not do: with
+~vulpea-db-autosync-mode~ on, a single ~add-hook~ makes its watches keep *both*
+indexes current, including the changes a save hook cannot see. That recipe is
+under [[#searching-from-emacs][Searching from Emacs]].
 
 * Licence
 :PROPERTIES:
