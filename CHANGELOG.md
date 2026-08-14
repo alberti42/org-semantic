@@ -161,6 +161,21 @@ not have.
 
 ### Changed
 
+- **A vault is declared, and one setting is the whole of it.**
+  `org-semantic-vault-root` is now a `defcustom`: set it to a directory and that
+  is your vault, from any buffer at all — a note, Dired, `*scratch*`, the agenda.
+  A vault's own `.dir-locals.el` still overrides it for the notes inside, which is
+  the several-vaults answer, and Emacs applies that when the file is opened so
+  nothing here searches for anything.
+
+  **The `.org-semantic` directory is no longer consulted**, which is the breaking
+  half: a vault that was found only because it had been indexed now needs
+  declaring. It held derived data, its place is not the vault's to promise, and
+  a vault discovered that way stops being discoverable the moment those indexes
+  are allowed to live elsewhere — silently answering with a *different* vault
+  rather than with none. Reading a directory's `.dir-locals.el` by hand went with
+  it: Emacs decides when directory-local variables apply, and Dired already
+  applies them.
 - **A failed search asks what to do in the minibuffer** rather than drawing a row
   of buttons in the results buffer. One keystroke per offer — each its label's own
   initial, so `d` for "Download it", `b` for "Build it", `l` for "Search by word

@@ -244,92 +244,87 @@ and `org-semantic-cancel' is how a run is stopped."
 (put 'org-semantic-vault-root 'safe-local-variable
      (lambda (v) (or (eq v t) (stringp v))))
 
-(defvar org-semantic-vault-root nil
-  "Whether this file belongs to an org-semantic vault, and which.
+(defcustom org-semantic-vault-root nil
+  "Which vault the notes you search belong to.
 
-Set from a vault's own `.dir-locals.el', so that the vault
-declares itself rather than being configured from the far side:
+Set here, globally, this is the whole of the setup for one vault --
+a directory, and every buffer that says nothing else belongs to it,
+including the ones that are nowhere in particular: `*scratch*', an
+agenda.  Someone with several vaults leaves it nil, or names the one
+to fall back on.
+
+A vault says which it is in its own `.dir-locals.el', which is what
+overrides this for the notes inside it:
 
   ((nil . ((org-semantic-vault-root . t))))
 
-Value t means the directory holding that `.dir-locals.el'.  A
-string names the root instead, absolute or relative to it, for a
-vault whose notes sit under a subdirectory of the project that
-declares them.
+Value t means the directory holding that `.dir-locals.el' -- so it
+is only meaningful there, having nothing to refer to when set
+globally.  A string names the root instead: absolute, or relative
+to the declaration, for a vault whose notes sit under a
+subdirectory of the project that declares them.
 
-This is how a vault is found before it has an index.  Afterwards
-the `.org-semantic' directory is enough -- see
-`org-semantic-vault' -- but that only exists once something has
-been built, and the first `index' has to be reachable too.")
+Those two are the whole of it.  The `.org-semantic' directory is
+*not* consulted: it holds derived data, its location is not the
+vault's to promise, and a vault found that way would be found on
+one machine and not on another that keeps its indexes elsewhere --
+silently answering with a different vault rather than with none."
+  :type '(choice (const :tag "No vault unless one declares itself" nil)
+                 (directory :tag "This vault, unless one declares itself")))
 
-(defun org-semantic-vault (&optional where)
-  "Return the vault root WHERE belongs to, or nil.
+(defun org-semantic-vault (&optional buffer)
+  "Return the vault root BUFFER belongs to, or nil.
 
-WHERE is a buffer, a file name or a directory, and defaults to the
-current buffer.  The answer is absolute and has no trailing slash,
-which is also how it is spelled on the wire: the server keys what
-it holds by that string, so `close' and `status' find a vault only
-when it is named the same way every time.
+BUFFER defaults to the current one.  The answer is absolute and has
+no trailing slash, which is also how it is spelled on the wire: the
+server keys what it holds by that string, so `close' and `status'
+find a vault only when it is named the same way every time.
 
-Two ways to be a vault, in this order.  A file may declare its
-vault with `org-semantic-vault-root', which is the only way that
-works before anything is indexed.  Failing that, the nearest
-directory above it holding `.org-semantic' is the vault, since
-that is where an index lives."
-  (let* ((buffer (cond ((bufferp where) where)
-                       ((null where) (current-buffer))))
-         (dir (if buffer
-                  (with-current-buffer buffer default-directory)
-                (if (file-directory-p where)
-                    (file-name-as-directory where)
-                  (file-name-directory (expand-file-name where)))))
-         (declared (or (and buffer
-                            (buffer-local-value 'org-semantic-vault-root buffer))
-                       ;; Nothing has applied that directory's local
-                       ;; variables when a path was named -- and also not
-                       ;; when the buffer is not visiting a file, which is
-                       ;; where `M-x' is most likely to be pressed from.
-                       (org-semantic--declared dir))))
+Two ways to be a vault, in this order.  The buffer carries
+`org-semantic-vault-root', because Emacs applied the vault's
+`.dir-locals.el' when the note was opened -- or when Dired opened
+the directory, which does the same.  Failing that, the global value
+of the same setting, which is the one-vault answer and the
+somewhere-else answer at once.
+
+Nothing here searches the filesystem for a vault; see
+`org-semantic-vault-root' for why the `.org-semantic' directory is
+not evidence."
+  (let* ((buffer (or buffer (current-buffer)))
+         ;; A *declaration* is what counts, and `buffer-local-value'
+         ;; cannot say whether there is one: with a global value set it
+         ;; answers with that, which would claim the default vault for
+         ;; every note in every undeclared one.
+         (declared (and (local-variable-p 'org-semantic-vault-root buffer)
+                        (buffer-local-value 'org-semantic-vault-root buffer))))
     (cond
      ;; Both declared forms are relative to where the declaration came
      ;; from -- the nearest `.dir-locals.el', which is the only one Emacs
      ;; reads: it uses that file and does not merge.  Resolving a
-     ;; relative root against the *starting* directory instead would name
-     ;; notes/notes when asked about notes.
+     ;; relative root against the buffer's own directory instead would
+     ;; name notes/notes when asked about a note in notes/.
      (declared
-      (let ((home (locate-dominating-file dir ".dir-locals.el")))
+      (let* ((dir (with-current-buffer buffer default-directory))
+             (home (locate-dominating-file dir ".dir-locals.el")))
         (cond
          ((stringp declared)
           (org-semantic--canonical (expand-file-name declared (or home dir))))
          ;; t can mean nothing else, so with no file to have said it
          ;; there is no vault to name.
          (home (org-semantic--canonical home)))))
-     ((locate-dominating-file dir ".org-semantic")
-      (org-semantic--canonical
-       (locate-dominating-file dir ".org-semantic"))))))
+     ((stringp org-semantic-vault-root)
+      (org-semantic--canonical (expand-file-name org-semantic-vault-root))))))
 
-(defun org-semantic-vault-or-error (&optional where)
-  "Return the vault WHERE belongs to, or signal an error saying it has none.
-WHERE is as in `org-semantic-vault'."
-  (or (org-semantic-vault where)
+(defun org-semantic-vault-or-error (&optional buffer)
+  "Return the vault BUFFER belongs to, or signal an error saying it has none.
+BUFFER is as in `org-semantic-vault'."
+  (or (org-semantic-vault buffer)
+      ;; Naming the setting rather than the state, because the state is
+      ;; that nothing was set: there is no file to go and look at.
       (user-error
-       (concat "No org-semantic vault here: no .org-semantic above %s, "
-               "and no org-semantic-vault-root declared for it")
-       (abbreviate-file-name
-        (if (bufferp where) (buffer-name where) (or where default-directory))))))
-
-(defun org-semantic--declared (dir)
-  "What DIR's directory-local variables say `org-semantic-vault-root' is.
-
-Read here rather than taken from the buffer, because a buffer that
-is not visiting a file has never had them applied -- `*scratch*',
-an agenda buffer, anything a command is invoked from that is not
-one of the notes.  Only consulted when the buffer itself says
-nothing, so a visited file costs no extra file reads."
-  (with-temp-buffer
-    (setq default-directory dir)
-    (hack-dir-local-variables-non-file-buffer)
-    org-semantic-vault-root))
+       (concat "No org-semantic vault for %s: set org-semantic-vault-root, "
+               "or declare it in the vault's .dir-locals.el")
+       (buffer-name (or buffer (current-buffer))))))
 
 (defun org-semantic--canonical (dir)
   "Return DIR as the server will be asked about it.

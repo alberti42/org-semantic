@@ -289,12 +289,35 @@ block is one paragraph however many blank lines are in it, and its =#+begin_=
 line is inside the span, so a passage never shows one marker without the other.
 That last one took two fixes to be true.
 
-A vault says which directory it is, in its own =.dir-locals.el=, so that it can
-be found before anything has been indexed:
+One setting says which vault your notes are in. With a single vault that is the
+whole of it:
+
+#+begin_src emacs-lisp
+(setq org-semantic-vault-root "~/notes")
+#+end_src
+
+Every buffer then belongs to that vault, including the ones that are nowhere in
+particular --- =*scratch*=, an agenda --- so a search works from wherever you
+happen to be.
+
+With several vaults, each one says which directory it is, in its own
+=.dir-locals.el=, and that overrides the setting for the notes inside it:
 
 #+begin_src emacs-lisp
 ((nil . ((org-semantic-vault-root . t))))
 #+end_src
+
+=t= means "the directory this declaration came from"; a string names a
+subdirectory of it, for notes that live below the project that declares them.
+Emacs applies directory-local variables when a file is opened --- and when Dired
+opens the directory --- so a note in a declared vault arrives already knowing
+which one it is, before anything has been indexed. Leave the global setting nil,
+or point it at whichever vault should answer from everywhere else.
+
+Nothing looks for the =.org-semantic= directory to work out where a vault is: it
+holds derived data, its place is not the vault's to promise, and a vault found
+that way would be found on one machine and not on another that keeps its indexes
+elsewhere --- answering with a *different* vault rather than with none.
 
 Then =M-x org-semantic-find= from any note --- or from Dired, or the agenda ---
 searches the vault that note belongs to and shows what came back. The prompt
@@ -383,6 +406,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 
 | variable                             | default        | what it decides                                             |
 |--------------------------------------+----------------+-------------------------------------------------------------|
+| ~org-semantic-vault-root~            | =nil=          | which vault your notes are in --- above                     |
 | ~org-semantic-executable~            | =org-semantic= | the binary, by name on =exec-path= or as a path             |
 | ~org-semantic-install-directory~     | =~/.emacs.d/org-semantic/= | where a binary of its own is kept --- below     |
 | ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |

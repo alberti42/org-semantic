@@ -308,45 +308,22 @@ own resolution.  It downloads nothing."
 
 ;;;; Which vault a buffer belongs to
 
-(ert-deftest an-index-is-enough-to-find-a-vault ()
-  "The directory holding `.org-semantic' is the vault."
-  (org-semantic-tests--with-vault dir
-    (make-directory (expand-file-name ".org-semantic/semantic" dir) t)
-    (make-directory (expand-file-name "sub/deeper" dir) t)
-    (should (equal (org-semantic-vault (expand-file-name "sub/deeper" dir))
-                   (org-semantic--canonical dir)))
-    (should (equal (with-current-buffer
-                       (find-file-noselect (expand-file-name "pumps.org" dir))
-                     (org-semantic-vault))
-                   (org-semantic--canonical dir)))))
+(ert-deftest a-vault-declares-itself-and-a-note-in-it-carries-that ()
+  "The vault's own `.dir-locals.el' is what a note's buffer arrives holding.
 
-(ert-deftest a-vault-can-say-so-before-it-has-an-index ()
-  "A declaration is the only way to find a vault with nothing built yet.
-
-Which is not an edge case: it is where every vault starts, and the
-first `index' has to be reachable too."
+Emacs applies them when the file is opened, so this costs nothing per
+buffer and works before anything has been indexed -- which is where
+every vault starts."
   (org-semantic-tests--with-vault dir
     (with-temp-file (expand-file-name ".dir-locals.el" dir)
       (insert "((nil . ((org-semantic-vault-root . t))))\n"))
     (should-not (file-exists-p (expand-file-name ".org-semantic" dir)))
-    (should (equal (org-semantic-vault (expand-file-name "pumps.org" dir))
-                   (org-semantic--canonical dir)))))
-
-(ert-deftest a-declaration-is-read-even-from-a-buffer-visiting-nothing ()
-  "`M-x' is pressed from Dired, from an agenda, from *scratch*.
-
-None of those has had the directory's local variables applied to
-it, so reading `org-semantic-vault-root' out of the buffer finds
-nothing and the declaration appears not to work -- which is how a
-command run from anywhere but a note failed to find the vault it
-was standing in."
-  (org-semantic-tests--with-vault dir
-    (with-temp-file (expand-file-name ".dir-locals.el" dir)
-      (insert "((nil . ((org-semantic-vault-root . t))))\n"))
-    (with-temp-buffer
-      (setq default-directory (file-name-as-directory dir))
-      (should-not (local-variable-p 'org-semantic-vault-root))
-      (should (equal (org-semantic-vault) (org-semantic--canonical dir))))))
+    (let ((buffer (find-file-noselect (expand-file-name "pumps.org" dir))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (local-variable-p 'org-semantic-vault-root))
+            (should (equal (org-semantic-vault) (org-semantic--canonical dir))))
+        (kill-buffer buffer)))))
 
 (ert-deftest a-declaration-may-name-a-directory-under-the-project ()
   "A string names the root, for notes that sit below what declares them."
@@ -354,14 +331,83 @@ was standing in."
     (make-directory (expand-file-name "notes" dir))
     (with-temp-file (expand-file-name ".dir-locals.el" dir)
       (insert "((nil . ((org-semantic-vault-root . \"notes\"))))\n"))
-    (should (equal (org-semantic-vault (expand-file-name "notes" dir))
-                   (org-semantic--canonical (expand-file-name "notes" dir))))))
+    (let ((buffer (find-file-noselect (expand-file-name "notes/pumps.org" dir))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (equal (org-semantic-vault)
+                           (org-semantic--canonical
+                            (expand-file-name "notes" dir)))))
+        (kill-buffer buffer)))))
+
+(ert-deftest one-vault-needs-no-declaration-and-answers-from-anywhere ()
+  "The global setting is the one-vault setup, and the somewhere-else answer.
+
+A buffer that is nowhere in particular -- *scratch*, an agenda -- has
+had no directory-local variables applied to it and never will, so
+without this a search from one has no vault at all."
+  (org-semantic-tests--with-vault dir
+    (let ((org-semantic-vault-root dir))
+      (with-temp-buffer
+        (setq default-directory temporary-file-directory)
+        (should (equal (org-semantic-vault) (org-semantic--canonical dir)))))))
+
+(ert-deftest only-a-declaration-carries-a-declaration-s-meaning ()
+  "A value of t means \"the directory that said so\", and globally nothing did.
+
+That value is what the manual shows in a vault's `.dir-locals.el', so it is
+what someone reaching for the global setting is most likely to write
+by mistake.  Read with `buffer-local-value' alone -- which cannot
+tell a local binding from the global value -- it would then take the
+*declared* meaning and name whichever directory happens to hold a
+`.dir-locals.el' above the buffer: somebody's project root becomes
+their vault, and searching it fails as an unindexed vault rather
+than as the setting it is.
+
+The same reading is what makes the guard invisible for an ordinary
+absolute directory, where both routes expand to the same answer.
+This is the case that tells them apart."
+  (org-semantic-tests--with-vault dir
+    ;; A project that says something else entirely, as most do.
+    (with-temp-file (expand-file-name ".dir-locals.el" dir)
+      (insert "((nil . ((indent-tabs-mode . nil))))\n"))
+    (let ((buffer (find-file-noselect (expand-file-name "pumps.org" dir)))
+          (before (default-value 'org-semantic-vault-root)))
+      (unwind-protect
+          (progn
+            ;; `setq-default' and not `let': a `let' binds whichever
+            ;; binding is current, and in a buffer carrying a declaration
+            ;; that is the declaration itself.
+            (setq-default org-semantic-vault-root t)
+            (with-current-buffer buffer
+              (should-not (org-semantic-vault))))
+        (setq-default org-semantic-vault-root before)
+        (kill-buffer buffer)))))
+
+(ert-deftest an-index-on-disk-is-not-what-makes-a-vault ()
+  "`.org-semantic' is derived data, and its location is not promised.
+
+It was the fallback once, which meant a vault was discoverable only
+after it had been indexed -- and would stop being discoverable at all
+once that directory is allowed to live somewhere else, silently
+answering with the default vault instead of with none."
+  (org-semantic-tests--with-vault dir
+    (make-directory (expand-file-name ".org-semantic/semantic" dir) t)
+    (let ((org-semantic-vault-root nil)
+          (buffer (find-file-noselect (expand-file-name "pumps.org" dir))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should-not (org-semantic-vault))
+            (should-error (org-semantic-vault-or-error) :type 'user-error))
+        (kill-buffer buffer)))))
 
 (ert-deftest somewhere-that-is-not-a-vault-is-not-one ()
-  "No index above it and nothing declared means no vault, not a guess."
+  "Nothing declared and no default means no vault, not a guess."
   (org-semantic-tests--with-vault dir
-    (should-not (org-semantic-vault dir))
-    (should-error (org-semantic-vault-or-error dir) :type 'user-error)))
+    (let ((org-semantic-vault-root nil))
+      (with-temp-buffer
+        (setq default-directory (file-name-as-directory dir))
+        (should-not (org-semantic-vault))
+        (should-error (org-semantic-vault-or-error) :type 'user-error)))))
 
 (ert-deftest a-vault-is-spelled-one-way-however-it-was-reached ()
   "The server keys what it holds on this string, so `close' has to match."
