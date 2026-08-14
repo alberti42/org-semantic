@@ -50,6 +50,16 @@ anything interactive, run `org-semantic serve` instead: it keeps the model and
 the vectors resident, and answers in 7–9 ms by meaning or 3 ms by word — fast
 enough to search as you type.
 
+Your notes are read and never written: everything it builds goes in one
+`.org-semantic/` directory beside them, and deleting it leaves the vault exactly
+as it was. Nothing about them leaves the machine — no service, no account, no
+API key, no telemetry. The only thing that ever touches the network is fetching
+the model and a small language classifier, once each, after which it works
+offline. [What it
+touches](https://alberti42.github.io/org-semantic/#what-it-touches) says it in
+full, and points at some public vaults if you would rather try it on notes that
+are not yours.
+
 ## Install
 
 ```sh

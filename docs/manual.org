@@ -87,6 +87,80 @@ If you work in Markdown, [[https://github.com/geckse/markdown-vdb][markdown-vdb]
 reaches a very similar architecture for that format and you should use it
 instead.
 
+* What it touches
+:PROPERTIES:
+:CUSTOM_ID: what-it-touches
+:END:
+Indexing a vault means pointing a program at everything you have ever written
+down, which is worth being sure about before you do it.
+
+*It reads your notes and never writes them.* Not a heading, not a property
+drawer, not a timestamp: nothing anywhere in the binary opens a =.org= file for
+writing. What it creates is one hidden directory --- =.org-semantic/= beside the
+notes, or [[#index-elsewhere][somewhere else entirely]] if you say so --- holding
+the two indexes and nothing besides. [[#what-it-writes][What it writes]] lists
+every file in it. Delete that directory and the vault is exactly as it was,
+because all of it is derived: =index --full= writes it again in one pass.
+
+*Nothing about your notes leaves the machine.* There is no service to sign up
+to, no account, no API key, no telemetry. The embedding model runs in this
+process on this CPU --- that is what most of the 34 MB is --- so your prose and
+your queries are never transmitted anywhere, there being nowhere for them to go.
+
+*It reaches the network to fetch two things for itself, and for nothing else:*
+the embedding model (see [[#install][Install]]), and a 938 kB language
+classifier from =dl.fbaipublicfiles.com=, each once. Both land in the cache and
+are reused ever after, so *a machine that has indexed once works entirely
+offline*. A search in particular never downloads anything at all: asked for a
+model that is not there, it says so in about a millisecond rather than reaching
+for the network. Block both hosts after the first run and everything keeps
+working, short of indexing under a model you have not fetched yet.
+
+** Trying it on somebody else's notes
+:PROPERTIES:
+:CUSTOM_ID: somebody-elses-notes
+:END:
+None of which helps if what you want is to see it work before deciding. Any
+public collection of org files will do, and these three need nothing installed
+--- least of all org-roam, whose vaults are plain org files with =:ID:=
+properties and =#+filetags:= that org-semantic reads on their own:
+
+| vault                         | notes | what it shows off                                                                                                                 |
+|-------------------------------+-------+-----------------------------------------------------------------------------------------------------------------------------------|
+| [[https://github.com/denialbb/braindump][denialbb/braindump]] (=roam/=)  |   753 | a genuinely bilingual Zettelkasten --- about a tenth of it is Italian, so =lang:= and a multilingual model have something to do   |
+| [[https://github.com/jethrokuan/braindump][jethrokuan/braindump]] (=org/=) |   529 | org-roam's own author: =main/= is written-through concept notes against =reference/='s 516 paper notes, so =dir:= means something |
+| [[https://git.sr.ht/~bzg/worg][Worg]]                          |   293 | the Org community wiki --- larger, deeply nested, and unambiguously licensed (GFDL 1.3)                                           |
+
+The first is the one to reach for. Point the vault straight at the clone; the
+PDFs and LaTeX beside the notes are simply not =.org=, so nothing looks at them.
+Say that it is bilingual, or nothing is classified and =lang:= has nothing to
+narrow by --- one language declared *is* the answer for every note:
+
+#+begin_src sh
+git clone --depth 1 https://github.com/denialbb/braindump
+echo '{ "languages": ["en-US", "it-IT"] }' > bilingual.json
+
+org-semantic index braindump/roam --lexical --config bilingual.json  # 2863 chunks in 0.5s
+org-semantic search braindump/roam "algoritmo lang:it-IT" --lexical
+#+end_src
+
+The search needs no =--config= of its own: a policy is remembered once given,
+so later runs against that vault answer under it.
+
+The semantic index over the same notes is around a minute on =e5-small=, which
+is the model to pick there --- an English-only one will rank the Italian half
+badly. Then ask it something in English that the notes answer in Italian, which
+is the thing no word search can do:
+
+#+begin_src sh
+org-semantic index braindump/roam --model e5-small
+org-semantic search braindump/roam "what happens when a process is scheduled off the cpu"
+#+end_src
+
+One note in that vault is UTF-16 rather than UTF-8, so =index= names it and
+carries on without it. That is the tool saying what it left out, not a bad
+clone.
+
 * Install
 :PROPERTIES:
 :CUSTOM_ID: install
