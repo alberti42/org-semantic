@@ -355,20 +355,29 @@ exactly what a save hook cannot. The two indexes then answer different halves of
 one question over one tree, and neither knows about the other's directory:
 =.vulpea/= and =.org-semantic/= sit side by side in the vault.
 
-Hearing about what those watches found means reaching into vulpea, and the two
-signals worth knowing are ~vulpea-db-update-file~, which vulpea calls for a note
-whose content is new to it, and its own handler for a removed file, which is the
-only place a *deletion* shows up. Neither has a hook, so both mean =advice-add= on
-another package --- your call, and the usual caveat about advice applies. Do not
-take the first alone and assume you are covered: a note deleted or renamed away
-never reaches it, so the index would go on offering a note that is gone, which is
-the silent half of being out of date.
+Hearing about what those watches found is one ~add-hook~ and no advice.
+~vulpea-db-updated-functions~ is vulpea's single data-changed signal: it is called
+with =(PATH COUNT)= once per file whose database content changed, *after* the
+write or delete transaction commits --- for an edit, for a note arriving, and,
+with a count of 0, for a removal.
 
-If that is more coupling than you want, the =filenotify= watch above is the
-honest alternative --- it sees creation, change, deletion and renaming in one
-place, at the cost of walking the tree yourself. Either way vulpea reports and
-watches *per file*: a first sync of a thousand notes fires this a thousand times,
-and the debounce makes that one run.
+#+begin_src emacs-lisp
+(add-hook 'vulpea-db-updated-functions
+          (lambda (_path _count)
+            (org-semantic-auto-reindex-touch "/Users/you/notes")))
+#+end_src
+
+Both arguments are ignored on purpose. A reindex is a vault-wide incremental
+scan, so *which* file changed does not matter --- and neither does the count,
+since 0 (the notes were dropped) and 3 (they were written) call for the identical
+scan. Committing first is what makes this better than an =after-save-hook=, which
+fires *before* vulpea's own update.
+
+It needs a vulpea newer than 2.7.0: the hook landed in August 2026, after that
+release. On an older one the =add-hook= quietly succeeds and is never called, so
+that is the first thing to check if changes stop reaching the index. vulpea also
+reports *per file*, so its own first sync of a thousand notes fires this a
+thousand times --- the debounce makes that one run.
 
 Failing both, =M-x org-semantic-reindex= remains what catches up. Being behind
 costs nothing: a search says so when the index is a version old.
