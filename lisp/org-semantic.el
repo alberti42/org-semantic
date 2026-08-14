@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Andrea Alberti
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
@@ -53,7 +53,7 @@
 (require 'cl-lib)
 (require 'jsonrpc)
 
-(defconst org-semantic-version "0.2.0"
+(defconst org-semantic-version "0.3.0"
   "The release this package is from.
 
 The release version, which is the package's: it moves whenever
@@ -61,7 +61,7 @@ anything here ships, including a change to this file alone.  It is
 *not* what the binary reports, and the two are compared through
 `org-semantic-minimum-binary-version' rather than for equality.")
 
-(defconst org-semantic-minimum-binary-version "0.2.1"
+(defconst org-semantic-minimum-binary-version "0.3.0"
   "The oldest binary this package knows how to talk to.
 
 Bump this when the elisp starts needing something the server did
@@ -69,8 +69,10 @@ not have -- a new method, a new field, a changed reply shape -- and
 also when a release *documents* behaviour that only the newer binary
 provides and the older one gets **silently wrong**.
 
-0.2.1 raised it for the first reason: `org-semantic-download' calls
-a `download' method that 0.2.0 has no answer for at all.
+0.3.0 raised it for the first reason: `org-semantic-download' calls
+a `download' method that 0.2.0 has no answer for at all.  That
+arrived while the tree said 0.2.1, which no release ever carried, so
+the floor names the release it actually shipped in.
 
 0.2.0 raised it for the second, which is worth keeping as the
 example, because nothing in that release called anything new: 0.1.0

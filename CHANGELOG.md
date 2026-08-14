@@ -58,8 +58,24 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Needs binary version **0.2.1**: the package calls a `download` method 0.2.0 does
-not have.
+## [0.3.0] — 2026-08-14
+
+Binary version 0.3.0, and this release needs it: the package calls a `download`
+method 0.2.0 has no answer for.
+
+**Rebuild the semantic index once, and searching by meaning will not work until
+you do**: `org-semantic index <vault> --full`, or `C-u C-u M-x
+org-semantic-reindex`. The index now records a language per passage, so its
+layout version moved and an older index is refused rather than answering every
+`lang:` query with nothing. The word index is unaffected, and rebuilding it is
+seconds in any case.
+
+Two things this release is for. `lang:` now narrows a search by meaning as well
+as by word, which is the one predicate that used to be honoured on one side and
+refused on the other. And the Emacs client stops needing to be driven: it keeps a
+vault's indexes current as notes are saved, takes a function for a vault whose
+identity is worked out rather than written down, and asks what to do about a
+failure instead of drawing one.
 
 ### Fixed
 
@@ -136,7 +152,7 @@ not have.
   embedding model, and still is — and the wrong answer to "show me only the German
   notes", which no model can do and which a label can. Both indexes now write a
   language onto every chunk, from the same `# ltex:` declarations and the same
-  classifier, and both honour `lang:` and `-lang:`. Needs binary 0.2.1.
+  classifier, and both honour `lang:` and `-lang:`. Needs binary 0.3.0.
 
   **Rebuild the semantic index once to get it: `index --full`.** An index built
   before this parses perfectly and has the field empty, so every `lang:` query
@@ -155,7 +171,7 @@ not have.
   `.org-semantic/` names where the notes are, and then the vault directory holds
   nothing but the index — for notes in a synced folder that should not have
   vectors rewritten under it, or for several vaults keeping their indexes together
-  under one cache directory. Needs binary 0.2.1.
+  under one cache directory. Needs binary 0.3.0.
 
   Every command still takes the one path it always took, and nothing about the
   index format changes, so an existing index is read by the new binary as it
@@ -419,6 +435,7 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.1.0
