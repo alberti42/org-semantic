@@ -156,7 +156,14 @@ not have.
   **`org-semantic-auto-reindex-touch`**, and the change is then picked up like a
   save. It takes a vault and not a file, because a run is a vault-wide
   incremental scan: a rename is caught by the arrival of the new name alone,
-  since the same scan finds the old one gone. Failing both,
+  since the same scan finds the old one gone.
+
+  The touch does **not** require the mode. The mode is one trigger and not the
+  policy: a watcher that reports saves too makes the save hook redundant, so
+  that configuration uses the touch alone. Both together cost one run, since
+  they share the debounce, and the touch keeps the mode's manners either way —
+  the same delay, the same silence, the same refusal to build an index that does
+  not exist. Failing both,
   `org-semantic-reindex` still catches up, and being behind costs nothing — a
   search says so when the index is a version old.
 - **`org-semantic-results-connector`** and `l` — for logic — in the results buffer:

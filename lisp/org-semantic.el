@@ -1343,13 +1343,15 @@ defaults to the one the current buffer is in -- which is rarely what
 a caller wants here, since a watcher's callback runs in whatever
 buffer happened to be current.  Nil, and no vault, is a silent no-op.
 
-Does nothing while `org-semantic-auto-reindex-mode' is off: the mode
-is the one place that says whether this Emacs keeps an index up to
-date by itself, and a caller that reindexed anyway would make turning
-it off mean nothing."
-  (when org-semantic-auto-reindex-mode
-    (when-let* ((vault (or vault (org-semantic-vault))))
-      (org-semantic-auto-reindex--arm vault))))
+Independent of `org-semantic-auto-reindex-mode', and NOT gated on it.
+That mode is one trigger -- `after-save-hook' -- and not the policy:
+a configuration whose file watcher already reports saves wants this
+without it, and gating would make it turn on the very hook it makes
+redundant.  What the two share is `org-semantic-auto-reindex-delay',
+`org-semantic-auto-reindex-quietly' and the rule that an index which
+does not exist is not built."
+  (when-let* ((vault (or vault (org-semantic-vault))))
+    (org-semantic-auto-reindex--arm vault)))
 
 ;;;; What the server holds
 

@@ -786,8 +786,7 @@ firing per file costs one run."
   (org-semantic-tests--with-vault dir
     (let ((vault (org-semantic-canonical-vault dir)))
       (org-semantic-tests--saving
-        (let ((org-semantic-auto-reindex-mode t))
-          (dotimes (_ 3) (org-semantic-auto-reindex-touch vault)))
+        (dotimes (_ 3) (org-semantic-auto-reindex-touch vault))
         (should (= 3 (length org-semantic-tests--armed)))
         ;; The debounce is the save's own, not a second one: two of the three
         ;; were cancelled by the touch that followed.
@@ -797,27 +796,38 @@ firing per file costs one run."
         ;; same string -- a file name here would reach the server as a vault.
         (should (timerp (gethash vault org-semantic-auto-reindex--timers)))
         (should (equal (list vault)
-                       (nth 2 (gethash vault org-semantic-auto-reindex--timers))))))))
+                       (nth 2 (gethash vault org-semantic-auto-reindex--timers))))
+        ;; And what it arms is the mode's own run, which is where the manners
+        ;; come from: the quiet, and the refusal to build a first index.  A
+        ;; second path to the server would have to repeat both.
+        (should (eq #'org-semantic-auto-reindex--run
+                    (nth 1 (gethash vault org-semantic-auto-reindex--timers))))))))
 
-(ert-deftest a-touch-does-nothing-while-the-mode-is-off ()
-  "The mode is the one place that says whether this Emacs indexes by itself.
+(ert-deftest a-touch-does-not-need-the-mode ()
+  "The mode is one trigger and not the policy.
 
-A caller that reindexed anyway would make turning it off mean
-nothing, and the caller is by definition something watching the tree
-for its own reasons -- so the decision cannot be left to it."
+A configuration whose file watcher already reports saves wants the
+touch and does not want `after-save-hook' -- so gating the touch on
+the mode would make it demand the very hook it makes redundant.  The
+two share a debounce, so both together still cost one run."
   (org-semantic-tests--with-vault dir
     (let ((vault (org-semantic-canonical-vault dir)))
+      (should-not org-semantic-auto-reindex-mode)
       (org-semantic-tests--saving
-        (let ((org-semantic-auto-reindex-mode nil))
-          (org-semantic-auto-reindex-touch vault))
-        (should-not org-semantic-tests--armed)
-        (should-not org-semantic-tests--said)
-        (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))
-        ;; And the same call with the mode on does arm, or the assertions
-        ;; above would pass for a function that never works at all.
-        (let ((org-semantic-auto-reindex-mode t))
-          (org-semantic-auto-reindex-touch vault))
-        (should (= 1 (length org-semantic-tests--armed)))))))
+        (org-semantic-auto-reindex-touch vault)
+        (should (= 1 (length org-semantic-tests--armed)))
+        (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
+        ;; The save hook is not switched on behind anybody's back either.
+        (should-not (memq #'org-semantic-auto-reindex--on-save after-save-hook))
+        ;; A save arriving on top of it is the same pending run, not a second.
+        (let ((buffer (find-file-noselect (expand-file-name "pumps.org" dir))))
+          (unwind-protect
+              (with-current-buffer buffer
+                (let ((org-semantic-vault-root dir))
+                  (org-semantic-auto-reindex--on-save)))
+            (kill-buffer buffer)))
+        (should (= 1 (hash-table-count org-semantic-auto-reindex--timers)))
+        (should (= 1 (length org-semantic-tests--cancelled)))))))
 
 (ert-deftest a-touch-that-names-no-vault-is-a-silent-no-op ()
   "It falls back to the current buffer, which is rarely a watcher's own.
@@ -829,8 +839,7 @@ somebody else's callback, and not a message to say about a vault
 nobody named."
   (org-semantic-tests--saving
     (with-temp-buffer
-      (let ((org-semantic-auto-reindex-mode t)
-            (org-semantic-vault-root nil))
+      (let ((org-semantic-vault-root nil))
         (should-not (org-semantic-auto-reindex-touch))))
     (should-not org-semantic-tests--armed)
     (should-not org-semantic-tests--said)))

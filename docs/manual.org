@@ -221,6 +221,11 @@ binary is, if it is not already on your =PATH=:
 (add-to-list 'load-path "/path/to/org-semantic/lisp")
 (require 'org-semantic-results)
 (setq org-semantic-executable "/path/to/org-semantic")
+
+;; Optional, and explained below: reindex a vault as its notes are saved, so
+;; that a note written now is searchable a couple of seconds later rather than
+;; after the next `M-x org-semantic-reindex'.
+(org-semantic-auto-reindex-mode 1)
 #+end_src
 
 Or with =use-package=, which also gives somewhere to put the keys. There are no
@@ -295,9 +300,16 @@ It takes a *vault* and not a file, because a run is a vault-wide incremental
 scan: it needs to know that something changed and not what --- which is also why
 a rename is caught by the arrival of the new name alone, the same scan finding
 the old one gone. Called with no argument it asks the current buffer, which is
-rarely what a watcher's callback wants. It does nothing while the mode is off,
-and is as cheap to over-call as a save: fifty touches inside the debounce are one
-run.
+rarely what a watcher's callback wants. It is as cheap to over-call as a save:
+fifty touches inside the debounce are one run.
+
+It does *not* need the mode, and is not disabled by it being off. The mode is one
+trigger --- saves --- and not the policy, so a configuration whose watcher
+already reports saves uses the touch alone and leaves the mode off; one that has
+no watcher uses the mode alone. Both together is allowed and costs one run, since
+they share the debounce. What the touch takes from the mode is its manners: the
+same delay, the same silence when it works, and the same refusal to *build* an
+index that does not exist.
 
 Failing both, =M-x org-semantic-reindex= remains what catches up. Being behind
 costs nothing: a search says so when the index is a version old.
