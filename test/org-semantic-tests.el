@@ -877,5 +877,28 @@ does not read the fixture as a call to `jsonrpc-error'."
       ;; And a vault can be handed back.
       (org-semantic-close dir))))
 
+(ert-deftest closing-a-vault-says-nothing-unless-it-was-asked-for ()
+  "A command reports; a function returns.
+
+The caller with a reason to send `close' is one that knows a vault has
+been left -- a vault switch, the last buffer of one being killed -- and
+neither is an occasion for a line in the echo area.  Announcing it
+anyway put \"closed ~/org/Private (0 entry/entries dropped)\" in front
+of somebody on every switch, for a vault the server had never held."
+  (let ((said nil))
+    (cl-letf (((symbol-function 'org-semantic-running-p) (lambda () t))
+              ((symbol-function 'org-semantic--call)
+               (lambda (&rest _) '(:dropped 2)))
+              ((symbol-function 'message)
+               (lambda (format &rest args)
+                 (when format (push (apply #'format format args) said)))))
+      ;; From Lisp: the number, and silence.
+      (should (equal 2 (org-semantic-close "/vault")))
+      (should-not said)
+      ;; As a command: the same number, and it says so.
+      (should (equal 2 (funcall-interactively #'org-semantic-close "/vault")))
+      (should (= 1 (length said)))
+      (should (string-match-p "closed" (car said))))))
+
 (provide 'org-semantic-tests)
 ;;; org-semantic-tests.el ends here

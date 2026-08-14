@@ -1394,15 +1394,24 @@ Expect a ceiling rather than a refund: the memory returns to the
 system on the allocator's own schedule, so do not wait for the
 number to fall.  What this buys is that N vaults on one model cost
 about 262 MB rather than 255 plus 143 for each one after the
-first."
+first.
+
+Returns how many entries were dropped, and **says so only when
+called as a command**.  The caller with a reason to send this is one
+that knows a vault has been left -- a vault switch, the last buffer
+of one being killed -- and neither is an occasion for a line in the
+echo area, least of all \"0 entry/entries dropped\" for a vault the
+server never held.  A client that wants to report it has the number."
   (interactive)
   (let* ((vault (or vault (org-semantic-vault-or-error)))
          (result (and (org-semantic-running-p)
                       (org-semantic--call
-                       "close" (org-semantic--params :vault vault)))))
-    (message "org-semantic: closed %s (%s entry/entries dropped)"
-             (abbreviate-file-name vault)
-             (or (plist-get result :dropped) 0))))
+                       "close" (org-semantic--params :vault vault))))
+         (dropped (or (plist-get result :dropped) 0)))
+    (when (called-interactively-p 'any)
+      (message "org-semantic: closed %s (%s entry/entries dropped)"
+               (abbreviate-file-name vault) dropped))
+    dropped))
 
 (provide 'org-semantic)
 ;;; org-semantic.el ends here

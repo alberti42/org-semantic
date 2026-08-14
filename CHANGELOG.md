@@ -221,6 +221,12 @@ not have.
   an account of the empty list once the question is gone. Declining costs nothing:
   `R` indexes the vault whenever you like, which is the same call the offer would
   have made.
+- **`org-semantic-close` says nothing unless it is called as a command**, and
+  returns how many entries were dropped. The caller with a reason to send it is
+  one that knows a vault has been left — a vault switch, the last buffer of one
+  being killed — and neither is an occasion for a line in the echo area, least of
+  all "0 entry/entries dropped" for a vault the server never held. A client that
+  wants to report it has the number.
 - The message behind a search that has no model reads *"indexing this vault will
   fetch it"* rather than *"index this vault to fetch it"*. It only ever reaches a
   client, which has a keystroke rather than a command line.
