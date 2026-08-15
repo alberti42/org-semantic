@@ -561,14 +561,12 @@ release whose binary is below `org-semantic-minimum-binary-version',
 so the matching release cannot be one this package would then warn
 about.")
 
-(defun org-semantic--release-asset (&optional configuration)
-  "The release archive built for CONFIGURATION, or nil if there is none.
+(defun org-semantic--release-platform (&optional configuration)
+  "The platform token this release names its binary for, or nil.
 
 CONFIGURATION defaults to `system-configuration', which names the
-platform Emacs itself was built for.  The names are the ones the
-release workflow publishes, and each archive holds one binary called
-`org-semantic' -- or `org-semantic.exe' -- at its top level, already
-named what it should be called on PATH.
+platform Emacs itself was built for.  The tokens are the ones in the
+release workflow's build matrix.
 
 Nil is a real answer and not a failure to recognise something.
 There is deliberately no Intel macOS build: ONNX Runtime publishes
@@ -580,13 +578,38 @@ be told apart from the real thing without asking the kernel."
   (let* ((c (or configuration system-configuration))
          (arm (string-match-p "\\`\\(aarch64\\|arm64\\)" c))
          (intel (string-match-p "\\`x86_64" c)))
-    (cond ((string-match-p "darwin" c)
-           (and arm "org-semantic-aarch64-macos.tar.gz"))
+    (cond ((string-match-p "darwin" c) (and arm "aarch64-macos"))
           ((string-match-p "linux" c)
-           (cond (arm "org-semantic-aarch64-linux.tar.gz")
-                 (intel "org-semantic-x86_64-linux.tar.gz")))
+           (cond (arm "aarch64-linux") (intel "x86_64-linux")))
           ((string-match-p "mingw\\|windows\\|msvc\\|cygwin" c)
-           (and intel "org-semantic-x86_64-windows.zip")))))
+           (and intel "x86_64-windows")))))
+
+(defun org-semantic--release-asset (&optional configuration version)
+  "The release archive built for CONFIGURATION, or nil if there is none.
+
+VERSION defaults to `org-semantic-version'.  Every asset carries it,
+so a downloaded file says which release it is from and a
+`SHA256SUMS' line is unambiguous between releases.
+
+`bin' rather than `cli': the same binary is the server the Emacs
+package drives, and this project calls Emacs and the CLI two ways of
+using it -- so a name mentioning the CLI would read as the download
+an Emacs user does not need, when it is the only thing that makes
+their package work.  `bin' against `src' says what is inside and
+claims nothing about which interface it is for.
+
+Each archive holds one binary called `org-semantic' -- or
+`org-semantic.exe' -- at its top level, already named what it should
+be called on PATH.
+
+Nil when this platform has no build; see
+`org-semantic--release-platform', which decides that."
+  (let ((platform (org-semantic--release-platform configuration)))
+    (when platform
+      (format "org-semantic-%s-bin-%s.%s"
+              (or version org-semantic-version)
+              platform
+              (if (string-suffix-p "windows" platform) "zip" "tar.gz")))))
 
 (defun org-semantic--verify-checksum (file sums asset)
   "Signal unless FILE hashes to what SUMS records for ASSET.
@@ -635,7 +658,7 @@ network and cannot say what it is has not been installed, it has
 merely been written to disk."
   (interactive)
   (let* ((version (or version org-semantic-version))
-         (asset (or (org-semantic--release-asset)
+         (asset (or (org-semantic--release-asset nil version)
                     (user-error
                      "No org-semantic binary is published for %s%s"
                      system-configuration

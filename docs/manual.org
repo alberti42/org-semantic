@@ -733,13 +733,21 @@ about *once* per results buffer and afterwards merely restated, which is what
 keeps a search you re-run from asking the same question on every reply.
 
 ~org-semantic-install-directory~ is where org-semantic keeps a binary of its
-own, under your ~user-emacs-directory~. Unpack a release there --- the file
-named =org-semantic= --- and nothing needs configuring:
+own, under your ~user-emacs-directory~. =M-x org-semantic-install= puts one
+there; by hand it is unpacking a release into it, and then nothing needs
+configuring either:
 
 #+begin_src sh
 mkdir -p ~/.config/emacs/org-semantic
-tar xzf org-semantic-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
+tar xzf org-semantic-0.3.0-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
 #+end_src
+
+Release assets are =org-semantic-<version>-bin-<platform>= for the binaries and
+=org-semantic-<version>-src.tar.gz= for the source, with =SHA256SUMS= covering
+both. They say =bin= rather than =cli= on purpose: the same binary is the
+server the Emacs package drives, so a name mentioning the CLI would read as the
+download an Emacs user does not need, when it is the only thing that makes
+their package work.
 
 It is deliberately outside your package manager's tree, since a =straight= or
 =elpaca= rebuild repopulates the package directory and would take the binary

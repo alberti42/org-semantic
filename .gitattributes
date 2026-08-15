@@ -1,0 +1,17 @@
+# What `git archive` leaves out of the source release.
+#
+# The tarball is for building, testing and packaging the software, so what goes
+# is what serves none of those.  Note what stays and is easy to think optional:
+# `README.md', `docs/manual.org' and `config.example.json' are pulled into the
+# test binary by `include_str!', and `.github/' is read by an elisp test that
+# checks the release asset names against the workflow that publishes them.
+# Drop any of the four and `make test' fails on a fresh unpack.
+
+# Screenshots.  Half the archive, and nothing builds or tests from them.
+docs/images/ export-ignore
+
+# The vendored ReadTheOrg theme, which only `make html' uses -- and that target
+# installs htmlize from MELPA as it runs, so it never worked offline from a
+# tarball to begin with.  Leaving it out also keeps the archive MIT throughout:
+# this is the one GPL-3 thing in the tree.
+docs/org-html-themes/ export-ignore

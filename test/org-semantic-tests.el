@@ -196,29 +196,44 @@ its prefix handling was being rewritten."
 ;;;; Which binary gets run
 
 (ert-deftest every-published-platform-maps-to-its-own-asset ()
-  "And the asset names are the ones the release workflow publishes.
+  "And the names are built the way the release workflow builds them.
 
-Read off `.github/workflows/release.yml' rather than restated, since
-a name that drifts is a 404 at the one moment a user has no binary
-to fall back on -- and the workflow is the only thing that decides
-what the names are."
-  (let ((published
+The workflow composes each asset from a matrix entry -- a `platform'
+token and an `ext' -- and this composes the same name from
+`system-configuration'.  Two places spelling one string, so the
+tokens and the extensions are read out of the workflow rather than
+restated here: a name that drifts is a 404 at the one moment a user
+has no binary to fall back on.
+
+The version is part of every name, so a downloaded file says which
+release it came from and a `SHA256SUMS' line cannot be mistaken for
+another release's."
+  (let ((matrix
          (with-temp-buffer
            (insert-file-contents
             (expand-file-name ".github/workflows/release.yml"
                               org-semantic-tests--root))
+           (goto-char (point-min))
            (let (out)
-             (goto-char (point-min))
-             (while (re-search-forward "^ *asset: +\\(org-semantic-[^ \n]+\\)$" nil t)
-               (push (match-string 1) out))
+             (while (re-search-forward
+                     "^ *platform: +\\([^ \n]+\\)\n *ext: +\\([^ \n]+\\)$" nil t)
+               (push (cons (match-string 1) (match-string 2)) out))
              (nreverse out)))))
-    (should (= 4 (length published)))
-    (dolist (case '(("aarch64-apple-darwin21.6.0"  . "org-semantic-aarch64-macos.tar.gz")
-                    ("x86_64-pc-linux-gnu"         . "org-semantic-x86_64-linux.tar.gz")
-                    ("aarch64-unknown-linux-gnu"   . "org-semantic-aarch64-linux.tar.gz")
-                    ("x86_64-w64-mingw32"          . "org-semantic-x86_64-windows.zip")))
-      (should (equal (org-semantic--release-asset (car case)) (cdr case)))
-      (should (member (cdr case) published)))))
+    (should (= 4 (length matrix)))
+    (dolist (case '(("aarch64-apple-darwin21.6.0" . "aarch64-macos")
+                    ("x86_64-pc-linux-gnu"        . "x86_64-linux")
+                    ("aarch64-unknown-linux-gnu"  . "aarch64-linux")
+                    ("x86_64-w64-mingw32"         . "x86_64-windows")))
+      (let* ((platform (cdr case))
+             (ext (cdr (assoc platform matrix))))
+        (should ext)
+        (should (equal (org-semantic--release-platform (car case)) platform))
+        (should (equal (org-semantic--release-asset (car case) "9.9.9")
+                       (format "org-semantic-9.9.9-bin-%s.%s" platform ext)))))
+    ;; And the default version is this package's, since that is the release
+    ;; whose binary it was written against.
+    (should (string-match-p (regexp-quote (concat "org-semantic-" org-semantic-version "-bin-"))
+                            (org-semantic--release-asset "aarch64-apple-darwin21.6.0")))))
 
 (ert-deftest a-platform-with-no-build-is-refused-rather-than-guessed ()
   "Intel macOS above all, which is the one a reader will meet.
@@ -228,10 +243,10 @@ There is no such asset -- ONNX Runtime publishes no
 install a binary that cannot run, and answering with anything at
 all would 404.  Nil is the answer, and `org-semantic-install' turns
 it into a sentence naming the reason."
-  (should-not (org-semantic--release-asset "x86_64-apple-darwin21.6.0"))
-  (should-not (org-semantic--release-asset "powerpc-apple-darwin"))
-  (should-not (org-semantic--release-asset "aarch64-w64-mingw32"))
-  (should-not (org-semantic--release-asset "sparc-sun-solaris2.11")))
+  (dolist (c '("x86_64-apple-darwin21.6.0" "powerpc-apple-darwin"
+               "aarch64-w64-mingw32" "sparc-sun-solaris2.11"))
+    (should-not (org-semantic--release-platform c))
+    (should-not (org-semantic--release-asset c))))
 
 (ert-deftest a-downloaded-archive-is-checked-against-the-release-s-own-sums ()
   "A truncated download and a tampered one want the same refusal.

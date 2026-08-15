@@ -65,6 +65,10 @@ jobs:
   # this release builds, which no user could satisfy.
   version:
     runs-on: ubuntu-latest
+    # Every asset carries the version, and only this job knows it -- the build
+    # matrix is static, so it composes its own name from this.
+    outputs:
+      version: ${{ steps.what.outputs.section }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -173,6 +177,7 @@ jobs:
         run: |
           git archive --format=tar --prefix="org-semantic-$SECTION/" "$REF" \
             | gzip -9n > "org-semantic-$SECTION-src.tar.gz"
+          tar -tzf "org-semantic-$SECTION-src.tar.gz" | wc -l
           ls -l "org-semantic-$SECTION-src.tar.gz"
       - uses: actions/upload-artifact@v5
         with:
@@ -188,13 +193,16 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: org-semantic-aarch64-macos.tar.gz
+            platform: aarch64-macos
+            ext: tar.gz
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: org-semantic-x86_64-linux.tar.gz
+            platform: x86_64-linux
+            ext: tar.gz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            asset: org-semantic-aarch64-linux.tar.gz
+            platform: aarch64-linux
+            ext: tar.gz
           # Builds and links -- `ort` takes its DirectML distribution, so the
           # binary wants DirectML.dll (present since Windows 10 1903).  The smoke
           # test below is the whole of what has ever been run on it: nobody has
@@ -202,8 +210,17 @@ jobs:
           # because that is what Explorer opens.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: org-semantic-x86_64-windows.zip
+            platform: x86_64-windows
+            ext: zip
     runs-on: ${{ matrix.os }}
+    # **`bin', not `cli'.**  The same binary is the server the Emacs package
+    # drives, and the README calls Emacs and the CLI two ways of using this --
+    # so an asset named for the CLI reads as the one an Emacs user does not
+    # need, when it is the only thing that makes their package work.  `bin'
+    # against `src' says what is inside and claims nothing about which
+    # interface it is for.
+    env:
+      ASSET: org-semantic-${{ needs.version.outputs.version }}-bin-${{ matrix.platform }}.${{ matrix.ext }}
     steps:
       - uses: actions/checkout@v5
 
@@ -320,10 +337,10 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ runner.os }}" in
-            Windows) 7z a -mx=9 "${{ matrix.asset }}" "$BIN" > /dev/null ;;
-            *)       tar czf "${{ matrix.asset }}" "$BIN" ;;
+            Windows) 7z a -mx=9 "$ASSET" "$BIN" > /dev/null ;;
+            *)       tar czf "$ASSET" "$BIN" ;;
           esac
-          ls -l "${{ matrix.asset }}"
+          ls -l "$ASSET"
 
       - name: Clean up the keychain
         if: always() && runner.os == 'macOS'
@@ -331,8 +348,8 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
           if-no-files-found: error
 
   # The only job a dry run does not do.  Everything expensive and everything
