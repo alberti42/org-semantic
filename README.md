@@ -6,7 +6,7 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
-The screenshot and the commands below search [Daniel Bias's
+The screenshot and the worked example below search [Daniel Bias's
 braindump](https://github.com/denialbb/braindump), someone else's public vault
 of 753 org notes in English and Italian, cloned into `braindump/`. So you can
 run them as they stand.
@@ -26,9 +26,49 @@ widen the list or deepen it, `g` asks again. It is a `next-error` client, so
 `f` is the one to know: **follow mode** opens each passage in its own note as
 point reaches it, without taking point out of the list — so `n` and `p` read the
 vault rather than an index of it. It is off until you press `f`, or until the
-`:hook` [below](#the-emacs-package) turns it on for every results buffer.
+`:hook` below turns it on for every results buffer.
+
+### Setting it up
+
+The package is in [`lisp/`](lisp/). There are no default global bindings and
+there will not be — `C-c` and a plain letter is yours rather than a package's —
+so a recommendation is as far as this goes:
+
+```elisp
+(use-package org-semantic-results
+  :load-path "/path/to/org-semantic/lisp"
+  :custom ((org-semantic-executable "/path/to/org-semantic")
+           (org-semantic-vault-root "~/notes"))
+  :bind (("C-c n s" . org-semantic-find)
+         ("C-c n S" . org-semantic-find-at-point)
+         ("C-c n R" . org-semantic-reindex))
+  ;; Follow mode, on for every results buffer.
+  :hook (org-semantic-results-mode . next-error-follow-minor-mode)
+  ;; Reindex a vault as its notes are saved.
+  :init (org-semantic-auto-reindex-mode 1))
+```
+
+`org-semantic-vault-root` is the one setting that has to be right: it says which
+directory your notes are, and every buffer that says nothing else — `*scratch*`,
+the agenda — searches it. With several vaults, leave it nil and let each one
+declare itself in its own `.dir-locals.el`. [Searching from
+Emacs](https://alberti42.github.io/org-semantic/#searching-from-emacs) covers
+the rest, including every key the results buffer takes.
 
 ## From the CLI
+
+```sh
+org-semantic index  ~/notes --both      # build both indexes
+org-semantic search ~/notes "how did we decide to do it that way"  # by meaning
+org-semantic search ~/notes 'tag:meeting budget' --lexical         # by word
+org-semantic serve                      # JSON-RPC over stdio, for an editor
+```
+
+`org-semantic -h` explains every command; how a vault is indexed — languages,
+excluded subtrees, what happens to `src` blocks — lives in a JSON policy file,
+starting from [`config.example.json`](config.example.json).
+
+One run in full, over the vault named above:
 
 ```console
 $ org-semantic index braindump/roam --both --model e5-small
@@ -92,10 +132,10 @@ Your notes are read and never written: everything it builds goes in one
 as it was. Nothing about them leaves the machine — no service, no account, no
 API key, no telemetry. The only thing that ever touches the network is fetching
 the model and a small language classifier, once each, after which it works
-offline. [What it
-touches](https://alberti42.github.io/org-semantic/#what-it-touches) says it in
-full, and points at more public vaults if you would rather try it on notes that
-are not yours.
+offline. The
+[manual](https://alberti42.github.io/org-semantic/#what-it-touches) has the
+detail, and lists more public vaults if you would rather not start with your own
+notes.
 
 ## Install
 
@@ -106,45 +146,6 @@ cargo install --git https://github.com/alberti42/org-semantic
 Requires a Rust toolchain. Nothing else — no Python, no system ONNX Runtime, no
 package manager. The embedding model downloads on first use.
 
-## At a glance
-
-```sh
-org-semantic index  ~/notes --both      # build both indexes
-org-semantic search ~/notes "how did we decide to do it that way"  # by meaning
-org-semantic search ~/notes 'tag:meeting budget' --lexical         # by word
-org-semantic serve                      # JSON-RPC over stdio, for an editor
-```
-
-`org-semantic -h` explains every command; how a vault is indexed — languages,
-excluded subtrees, what happens to `src` blocks — lives in a JSON policy file,
-starting from [`config.example.json`](config.example.json).
-
-## The Emacs package
-
-It is in [`lisp/`](lisp/). There are no default global bindings and there will
-not be — `C-c` and a plain letter is yours rather than a package's — so a
-recommendation is as far as this goes:
-
-```elisp
-(use-package org-semantic-results
-  :load-path "/path/to/org-semantic/lisp"
-  :custom ((org-semantic-executable "/path/to/org-semantic")
-           (org-semantic-vault-root "~/notes"))
-  :bind (("C-c n s" . org-semantic-find)
-         ("C-c n S" . org-semantic-find-at-point)
-         ("C-c n R" . org-semantic-reindex))
-  ;; Show each passage in its note as point reaches it.
-  :hook (org-semantic-results-mode . next-error-follow-minor-mode)
-  ;; Reindex a vault as its notes are saved.
-  :init (org-semantic-auto-reindex-mode 1))
-```
-
-`org-semantic-vault-root` is the one setting that has to be right: it says which
-directory your notes are, and every buffer that says nothing else — `*scratch*`,
-the agenda — searches it. With several vaults, leave it nil and let each one
-declare itself in its own `.dir-locals.el`. [Searching from
-Emacs](https://alberti42.github.io/org-semantic/#searching-from-emacs) covers
-the rest, including every key the results buffer takes.
 
 ## Documentation
 
