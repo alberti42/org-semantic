@@ -241,7 +241,7 @@ another release's."
 There is no such asset -- ONNX Runtime publishes no
 `x86_64-apple-darwin' -- so answering with the arm64 one would
 install a binary that cannot run, and answering with anything at
-all would 404.  Nil is the answer, and `org-semantic-install' turns
+all would 404.  Nil is the answer, and `org-semantic-binary-install' turns
 it into a sentence naming the reason."
   (dolist (c '("x86_64-apple-darwin21.6.0" "powerpc-apple-darwin"
                "aarch64-w64-mingw32" "sparc-sun-solaris2.11"))
@@ -255,7 +255,7 @@ The hash is over the bytes on disk, so this also pins that the file
 is read literally: reading an archive as text would decode it and
 hash something the release never published.
 
-`jka-compr-inhibit' is bound for the same reason `org-semantic-install'
+`jka-compr-inhibit' is bound for the same reason `org-semantic-binary-install'
 binds it -- writing to a name ending `.tar.gz' otherwise gzips what
 is written, which is how that hazard was noticed here in the first
 place."
@@ -324,6 +324,47 @@ purpose, so it has to come first."
       (let ((org-semantic-install-directory dir)
             (org-semantic-executable chosen))
         (should (equal (org-semantic--binary) chosen))))))
+
+(ert-deftest a-missing-binary-is-a-question-and-the-answer-does-the-work ()
+  "The download runs from the answer, and the call that asked carries on.
+
+`noninteractive' is bound nil because batch is one of the three
+states in which the question is skipped -- the others being an
+active minibuffer and `org-semantic--may-ask'."
+  (org-semantic-tests--with-vault dir
+    (let* ((org-semantic-install-directory dir)
+           (org-semantic-executable "org-semantic")
+           (path (expand-file-name "org-semantic" dir))
+           (exec-path nil)
+           (noninteractive nil)
+           (asked nil))
+      (cl-letf (((symbol-function 'read-char-choice)
+                 (lambda (prompt &rest _) (setq asked prompt) ?d))
+                ;; Stands in for the download, leaving what it would leave.
+                ((symbol-function 'org-semantic-binary-install)
+                 (lambda (&rest _)
+                   (write-region "#!/bin/sh\n" nil path nil 'silent)
+                   (set-file-modes path #o755))))
+        (should (equal (org-semantic--binary) path))
+        ;; And each offer said what it costs, rather than listing letters.
+        (should (string-match-p "\\[d\\] Download it" asked))
+        (should (string-match-p "\\[b\\] Build it yourself" asked)))
+      ;; Declining ends the call that needed one, rather than letting it reach
+      ;; `make-process' with nothing to run.
+      (delete-file path)
+      (cl-letf (((symbol-function 'read-char-choice) (lambda (&rest _) ?q)))
+        (should-error (org-semantic--binary) :type 'user-error)))))
+
+(ert-deftest a-platform-with-no-download-is-offered-only-the-build ()
+  "An offer that would 404 is not made.
+
+There is no Intel macOS asset, so that platform is asked a question
+with one answer in it.  Building is offered either way."
+  (should (string-match-p "\\[d\\] Download it"
+                          (org-semantic--binary-prompt "org-semantic-bin.tar.gz")))
+  (should-not (string-match-p "\\[d\\]" (org-semantic--binary-prompt nil)))
+  (should (string-match-p "\\[b\\] Build it yourself"
+                          (org-semantic--binary-prompt nil))))
 
 
 ;;;; Which binary this package will work with
@@ -907,6 +948,30 @@ index up to date looks exactly like one that is working."
         (should (string-match-p "No such file" (car org-semantic-tests--said)))
         ;; And nothing is left pending, so the next save arms afresh.
         (should (= 0 (hash-table-count org-semantic-auto-reindex--timers)))))))
+
+(ert-deftest a-question-nobody-is-waiting-for-is-not-asked ()
+  "The save hook reports a missing binary; it does not ask about one.
+
+Checked by neutering: drop the `org-semantic--may-ask' binding in
+`org-semantic-auto-reindex--run' and this fails on the question
+having been asked."
+  (org-semantic-tests--with-vault dir
+    (let* ((vault (org-semantic-canonical-vault dir))
+           (org-semantic-install-directory dir)
+           (org-semantic-executable "org-semantic")
+           (org-semantic--connection nil)
+           (exec-path nil)
+           (noninteractive nil)
+           (asked nil))
+      (org-semantic-tests--saving
+        (cl-letf (((symbol-function 'read-char-choice)
+                   (lambda (&rest _) (setq asked t) ?d)))
+          (org-semantic-auto-reindex--run vault))
+        (should-not asked)
+        ;; Reported, though: once, and naming what is missing.
+        (should (= 1 (length org-semantic-tests--said)))
+        (should (string-match-p "No org-semantic binary"
+                                (car org-semantic-tests--said)))))))
 
 (ert-deftest turning-the-mode-off-drops-what-was-pending ()
   "A wait that outlives the mode would index a vault nobody asked about."

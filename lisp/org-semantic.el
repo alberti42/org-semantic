@@ -542,26 +542,78 @@ here is how to test the installed path without installing anything."
                                 org-semantic-install-directory)))
     (and (file-regular-p path) (file-executable-p path) path)))
 
+(defvar org-semantic--may-ask t
+  "Whether a missing binary may be asked about rather than only reported.
+
+Bound to nil where nobody is waiting on the answer, which is the
+save hook's timer: a question raised from there would interrupt
+whatever is being typed, and return on the next save.")
+
 (defun org-semantic--binary ()
-  "Return the org-semantic binary, or signal an error naming what was looked for.
+  "Return the org-semantic binary, or offer to get one and signal if not.
 
 Three places, in the order of how deliberately each was chosen: an
 absolute `org-semantic-executable', then our own install directory,
-then variable `exec-path'."
+then variable `exec-path'.  Finding none of them is a question
+rather than a dead end -- see `org-semantic--offer-binary'."
   (or (and (file-name-absolute-p org-semantic-executable)
            (file-executable-p org-semantic-executable)
            org-semantic-executable)
       (org-semantic--installed-binary)
       (executable-find org-semantic-executable)
-      ;; Naming the command is right here where it would be wrong in the
-      ;; server's errors: this reader is in Emacs and `M-x' is what they have.
-      ;; Both routes are named, because a binary someone else compiled is a
-      ;; thing to refuse on purpose and not only for want of a build.
-      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path.  %s, or M-x org-semantic-show-install-manual to build it yourself"
-                  org-semantic-executable org-semantic-install-directory
-                  (if (org-semantic--release-asset)
-                      "M-x org-semantic-install downloads one"
-                    "none is published for this platform"))))
+      (org-semantic--offer-binary)))
+
+(defun org-semantic--binary-prompt (asset)
+  "What to ask when there is no binary.  ASSET is the download, or nil.
+
+Nil offers the build alone: there is no asset for this platform."
+  (concat
+   "org-semantic needs its binary, and there is none installed.\n\n"
+   (when asset
+     (format "  [d] Download it — %s, checked against the release's own SHA256SUMS\n"
+             asset))
+   "  [b] Build it yourself — opens the manual; needs a Rust toolchain\n"
+   "  [q] leave it\n\nChoice: "))
+
+(defun org-semantic--offer-binary ()
+  "Ask what to do about there being no binary, and do it.
+
+Downloading returns the binary, so the call that provoked the
+question carries on.  Anything else signals, since the caller
+needs one.
+
+The question is skipped in batch, over an active minibuffer, and
+wherever `org-semantic--may-ask' is nil; the error is then the
+whole answer, so it names the command instead.
+
+`quit' is caught because this can run from a timer, where an
+escaping \\`C-g' is \"Error running timer\"."
+  (let* ((asset (org-semantic--release-asset))
+         (choice
+          (and org-semantic--may-ask
+               (not noninteractive)
+               (not (active-minibuffer-window))
+               (let ((message-log-max nil))
+                 (prog1 (condition-case nil
+                            (read-char-choice
+                             (org-semantic--binary-prompt asset)
+                             (if asset '(?d ?b ?q) '(?b ?q)))
+                          (quit ?q))
+                   ;; The minibuffer exits on the answer but its last line
+                   ;; stays in the echo area, where "Choice: d" reads as a
+                   ;; question still waiting.
+                   (message nil))))))
+    (pcase choice
+      (?d (org-semantic-binary-install)
+          (org-semantic--installed-binary))
+      (?b (browse-url org-semantic--build-url)
+          (user-error "No org-semantic binary yet: the manual on building one is open in your browser"))
+      (_ (user-error "No org-semantic binary: %s is neither in %s nor on exec-path.  %s"
+                     org-semantic-executable org-semantic-install-directory
+                     (if asset
+                         "M-x org-semantic-binary-install downloads one"
+                       (format "None is published for %s; see %s"
+                               system-configuration org-semantic--build-url)))))))
 
 (defconst org-semantic--release-url
   "https://github.com/alberti42/org-semantic/releases/download/v%s/%s"
@@ -652,19 +704,7 @@ attack, and both want the same refusal."
       (error "Checksum mismatch for %s: expected %s, got %s" asset want got))))
 
 ;;;###autoload
-(defun org-semantic-show-install-manual ()
-  "Open the manual on installing the binary yourself.
-
-For the two people the download does not serve: a platform with no
-published build, and anyone who would rather read the source and
-compile it than run an executable somebody else produced.  It
-explains both, and where to get a source archive whose checksum is
-published."
-  (interactive)
-  (browse-url org-semantic--build-url))
-
-;;;###autoload
-(defun org-semantic-install (&optional version)
+(defun org-semantic-binary-install (&optional version)
   "Download the org-semantic binary for this platform and install it.
 
 It goes in `org-semantic-install-directory', which is where
@@ -1486,16 +1526,19 @@ wait and ask again, which also folds every save made while it ran
 into the one run that follows."
   (remhash os-vault org-semantic-auto-reindex--timers)
   (condition-case error
-      (if (org-semantic-indexing-p os-vault)
-          (org-semantic-auto-reindex--arm os-vault)
-        (let ((mode (org-semantic-auto-reindex--refreshable os-vault)))
-          (if mode
-              (org-semantic-auto-reindex--start os-vault mode)
-            (org-semantic-auto-reindex--say
-             os-vault 'no-index
-             (format (concat "org-semantic: %s has no index to keep up to "
-                             "date -- M-x org-semantic-reindex builds one")
-                     (abbreviate-file-name os-vault))))))
+      ;; A missing binary is reported below rather than asked about: this
+      ;; fires a delay after a save, into whatever is being typed by then.
+      (let ((org-semantic--may-ask nil))
+        (if (org-semantic-indexing-p os-vault)
+            (org-semantic-auto-reindex--arm os-vault)
+          (let ((mode (org-semantic-auto-reindex--refreshable os-vault)))
+            (if mode
+                (org-semantic-auto-reindex--start os-vault mode)
+              (org-semantic-auto-reindex--say
+               os-vault 'no-index
+               (format (concat "org-semantic: %s has no index to keep up to "
+                               "date -- M-x org-semantic-reindex builds one")
+                       (abbreviate-file-name os-vault)))))))
     ;; A server that will not start, a binary that is not there: said once,
     ;; and never signalled.  This runs from a timer, where an error is a
     ;; backtrace nobody asked for, and it must not stop later saves trying.

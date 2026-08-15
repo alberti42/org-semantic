@@ -58,6 +58,20 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+### Changed
+
+- A missing binary is now a question rather than a message. It offers the
+  download and the build instructions, and the download runs from the answer —
+  so the search or index that asked for a binary carries on once it lands,
+  instead of ending in a sentence telling you what to type. The save hook is
+  the exception: it reports and never asks, since nobody is waiting on it.
+- `M-x org-semantic-install` is now `M-x org-semantic-binary-install`. It
+  installs the binary, not the package, and the old name left which of the two
+  to be guessed. **There is no alias**: the old name is gone.
+- `M-x org-semantic-show-install-manual` is gone. Opening the build
+  instructions is one of the answers to the question above, which is where it
+  was ever wanted — it did not need to be a command of its own.
+
 ## [0.4.0] — 2026-08-15
 
 Binary version 0.3.0, unchanged — there is nothing new to download, and an
