@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Andrea Alberti
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
@@ -41,7 +41,7 @@
 (require 'jsonrpc)
 (require 'url-handlers)
 
-(defconst org-semantic-version "0.4.0"
+(defconst org-semantic-version "0.4.1"
   "The release this package is from.
 
 It moves whenever anything here ships, including a change to one

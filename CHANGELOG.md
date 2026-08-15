@@ -58,6 +58,18 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-15
+
+Binary version 0.3.0, unchanged — there is nothing to download, and an existing
+binary keeps working. This release is the Emacs package alone.
+
+**Two commands were renamed or removed**, which a patch release would not
+normally do. It is here rather than in 0.5.0 because the package is days old and
+both names shipped in 0.4.0: `M-x org-semantic-install` becomes `M-x
+org-semantic-binary-install`, and `M-x org-semantic-show-install-manual` is gone.
+If either is in your configuration or a keybinding, update it — there is no
+alias, so an old name fails as an unknown command rather than silently.
+
 ### Changed
 
 - A missing binary is now a question rather than a message. It offers the
@@ -504,7 +516,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.1
 [0.4.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.0
 [0.3.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.2.0
