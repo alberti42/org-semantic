@@ -12,45 +12,63 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 --- over a pipe, never a port.
 
 #+begin_src console
-$ org-semantic index ~/notes --both
-951 org files
-  638 sections were divided to fit the 350-token budget
-6522 chunks · 6522 to embed · scanned in 5.0s
-model loaded in 0.8s
-  embedding 6522/6522 · 35 chunk/s · 6.9k tok/s · eta 0s
-embedded 6522 chunks in 186.8s (35/s)
-wrote ~/notes/.org-semantic/semantic/e5-small (10.0 MB of vectors) in 192.9s total
-951 org files
-lexical index: 5809 chunks written in 1.2s
+$ git clone --depth 1 https://github.com/denialbb/braindump      # 753 public org notes
+$ org-semantic index braindump/roam --both --model e5-small
+  20200924090307-elementi_di_probabilita_e_statistica.org: could not be read, so it is not indexed: stream did not contain valid UTF-8
+753 org files
+  256 sections were divided to fit the 350-token budget
+3038 chunks · 3038 to embed · scanned in 1.5s
+model loaded in 0.9s
+embedded 3038 chunks in 77.8s (39/s)
+wrote braindump/roam/.org-semantic/semantic/e5-small (4.7 MB of vectors) in 80.3s total
+  20200924090307-elementi_di_probabilita_e_statistica.org: could not be read, so it is not indexed: stream did not contain valid UTF-8
+753 org files
+lexical index: 2863 chunks written in 0.4s
 
-$ org-semantic search ~/notes "why do the atoms heat up and get lost from the trap"
+$ org-semantic search braindump/roam "what happens when a process is scheduled off the cpu" 2 --per-file 2
 
-0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Rydberg excitation
-       03 Literature review/2025-06-06 Review - Probing topological matter.org:672
-       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
-       :Literature:
-       Atoms are excited to the n=53 Rydberg state using a two-photon transition…
+0.860 (+1.7σ)  Sistemi Operativi > Gestione Processi
+       SO.org:278
+       id:5c91241d-3da3-47e6-b27a-9afe7e0b4ff0
+       :university:
+       Componente del OS: =CPU Scheduler= - Sceglie processi in coda di ready - si attiva ogni 50/100 secondi - crea…
 
-0.883 (+2.1σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Trap-induced loss
-       03 Literature review/2025-06-06 Review - Probing topological matter.org:677
-       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
-       :Literature:
-       Optical tweezers are subject to power drifts and pointing instabilities…
+0.860 (+1.7σ)  Sistemi Operativi > Gestione Processi > Scheduling > Implementazione > Scheduler
+       SO.org:628
+       id:5c91241d-3da3-47e6-b27a-9afe7e0b4ff0
+       :university:
+       anche Short Term Scheduler decide quale processo in coda di ready sara' eseguito quando: 1. il processo in esecuzione passa…
 
-0.882 (+2.0σ)  2025-06-06 Review - Probing topological matter > Observations: > Atom Loss: What causes it? > Motion and gate timing
-       03 Literature review/2025-06-06 Review - Probing topological matter.org:682
-       id:f73825a4-c877-4f69-a7e0-4ae305314b8d
-       :Literature:
-       During dynamical reconfiguration (AOD-based transport), atoms might spend too long outside…
+0.854 (+1.5σ)  Microkernel Based Systems > Kernel Level > Scheduling > in Microkernel Based Systems
+       microkernel_based_systems.org:194
+       id:ad8e431b-7af6-4eb9-99a7-41af9cd0c4ce
+       :erasmus:university:compsci:
+       Different ideas: - Brian Ford - CPU Inheritance Scheduling + event \to mk \to root scheduler \to particular scheduler +…
 
-[model load 745ms · query embed 7ms · search over 6522 vectors 2.0ms]
+0.850 (+1.4σ)  Microkernel Based Systems > Kernel Level > IPC
+       microkernel_based_systems.org:29
+       id:ad8e431b-7af6-4eb9-99a7-41af9cd0c4ce
+       :erasmus:university:compsci:
+       To send messages between threads you don't save and restore those register. The receiving end will declare beforehand to the…
+
+[model load 733ms · query embed 8ms · search over 3038 vectors 1.0ms]
 #+end_src
 
-Not one word of that query appears in the top note's title, and the passage it
-points at is 672 lines in. Finding what you can describe but cannot name is the
-whole point of org-semantic.
+Those are somebody else's public notes, so the whole thing above is
+reproducible --- [[#somebody-elses-notes][Trying it on somebody else's notes]]
+has two more of them. The question is in English, the note that answers it is in
+Italian, and its title --- /Sistemi Operativi/ --- shares no word with the
+question. Finding what you can describe but cannot name is the whole point of
+org-semantic; with a multilingual model it stops mattering which language you
+could not name it in. An English note is ranked beside the Italian ones, in the
+one list.
 
-Most of that half-second is the model loading, paid once per process. For
+One note in that vault is UTF-16 rather than UTF-8, and =index= says so --- once
+per index --- rather than passing over it in silence. A search tool that drops
+notes without mentioning it is worse than one that finds nothing.
+
+Most of that three-quarters of a second is the model loading, paid once per
+process. For
 anything interactive, run [[#driving-it-from-an-editor][=org-semantic serve=]]
 instead: it keeps the model and the vectors resident, and answers in *7--9 ms*
 by meaning or *3 ms* by word --- fast enough to search as you type.
