@@ -50,6 +50,24 @@ anything interactive, run `org-semantic serve` instead: it keeps the model and
 the vectors resident, and answers in 7–9 ms by meaning or 3 ms by word — fast
 enough to search as you type.
 
+## From Emacs
+
+![The org-semantic results buffer, showing an English question answered by Italian notes and English ones ranked together](docs/images/results-buffer.png)
+
+`M-x org-semantic-find` searches the vault the current buffer belongs to and
+draws the reply. The question there is in English, the note answering it is in
+Italian, and an English note is ranked beside it — these are the notes of a
+public [bilingual vault](https://github.com/denialbb/braindump), and a
+multilingual model does not much care which language an answer happens to be
+written in.
+
+Every hit carries its score with a σ beside it — a raw cosine cannot be read
+without one — then the note, the outline path down to the section, and the lines
+the passage came from. `RET` goes to the line under point, `n` and `p` walk the
+passages, `k` and `+` widen the list or deepen it, and `g` asks again. It is a
+`next-error` client, so `M-g M-n` walks the hits from anywhere, and `f` turns on
+follow mode, which shows each passage in its note as point reaches it.
+
 Your notes are read and never written: everything it builds goes in one
 `.org-semantic/` directory beside them, and deleting it leaves the vault exactly
 as it was. Nothing about them leaves the machine — no service, no account, no
@@ -68,6 +86,33 @@ cargo install --git https://github.com/alberti42/org-semantic
 
 Requires a Rust toolchain. Nothing else — no Python, no system ONNX Runtime, no
 package manager. The embedding model downloads on first use.
+
+### In Emacs
+
+The package is in [`lisp/`](lisp/). There are no default global bindings and
+there will not be — `C-c` and a plain letter is yours rather than a package's —
+so a recommendation is as far as this goes:
+
+```elisp
+(use-package org-semantic-results
+  :load-path "/path/to/org-semantic/lisp"
+  :custom ((org-semantic-executable "/path/to/org-semantic")
+           (org-semantic-vault-root "~/notes"))
+  :bind (("C-c n s" . org-semantic-find)
+         ("C-c n S" . org-semantic-find-at-point)
+         ("C-c n R" . org-semantic-reindex))
+  ;; Show each passage in its note as point reaches it.
+  :hook (org-semantic-results-mode . next-error-follow-minor-mode)
+  ;; Reindex a vault as its notes are saved.
+  :init (org-semantic-auto-reindex-mode 1))
+```
+
+`org-semantic-vault-root` is the one setting that has to be right: it says which
+directory your notes are, and every buffer that says nothing else — `*scratch*`,
+the agenda — searches it. With several vaults, leave it nil and let each one
+declare itself in its own `.dir-locals.el`. [Searching from
+Emacs](https://alberti42.github.io/org-semantic/#searching-from-emacs) covers
+the rest, including every key the results buffer takes.
 
 ## At a glance
 
