@@ -12,9 +12,9 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 --- over a pipe, never a port.
 
 The example below searches
-[[https://github.com/denialbb/braindump][Daniel Bias's braindump]] --- someone
-else's public vault of 753 org notes, part English and part Italian --- cloned
-into =braindump/=. So it is reproducible, and it is not anything shipped here;
+[[https://github.com/denialbb/braindump][Daniel Bias's braindump]], someone
+else's public vault of 753 org notes in English and Italian, cloned into
+=braindump/=. So you can run it as it stands;
 [[#somebody-elses-notes][Trying it on somebody else's notes]] has two more.
 
 #+begin_src console

@@ -6,10 +6,10 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
-The examples below search [Daniel Bias's
-braindump](https://github.com/denialbb/braindump) — someone else's public vault
-of 753 org notes, part English and part Italian — cloned into `braindump/`. So
-both are reproducible, and neither is anything shipped here.
+The screenshot and the commands below search [Daniel Bias's
+braindump](https://github.com/denialbb/braindump), someone else's public vault
+of 753 org notes in English and Italian, cloned into `braindump/`. So you can
+run them as they stand.
 
 ## From Emacs
 
