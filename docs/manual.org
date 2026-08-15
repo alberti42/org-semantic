@@ -203,7 +203,17 @@ the first time you index, into =$XDG_CACHE_HOME/fastembed= --- or wherever
 
 Prebuilt binaries are on the [[https://github.com/alberti42/org-semantic/releases][releases page]] for Apple Silicon macOS, Linux
 (x86_64 and arm64) and Windows. The macOS one is Developer ID signed and
-notarized. Unpack it and put =org-semantic= on your =PATH=.
+notarized. Unpack it and put =org-semantic= on your =PATH= --- or, from Emacs,
+=M-x org-semantic-install= fetches the one for your platform into
+=org-semantic-install-directory=, checks it against the release's own
+=SHA256SUMS=, and asks it for its version before saying it is installed.
+
+Every release also carries =org-semantic-<version>-src.tar.gz=, and a packager
+should pin that rather than the =Source code (tar.gz)= GitHub attaches by
+itself. GitHub generates that one on demand and has changed how it compresses
+it before, moving the checksum of archives already published; ours is built
+with =git archive= and =gzip -n=, so the same tag is the same bytes for ever,
+and its hash is in =SHA256SUMS= with the binaries.
 
 ** Intel macOS
 :PROPERTIES:

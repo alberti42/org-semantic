@@ -151,6 +151,35 @@ jobs:
           path: body.md
           if-no-files-found: error
 
+      # **A source archive of our own, because GitHub's cannot be pinned.**
+      # The "Source code (tar.gz)" GitHub attaches to every release is
+      # generated on demand by `git archive`, and GitHub has changed its gzip
+      # implementation before — silently moving the checksum of archives
+      # already published, which broke every packager that had pinned one.
+      # They reverted, and now promise notice rather than stability.  A
+      # packager needs a hash that cannot move, so this ships an archive we
+      # made and `SHA256SUMS` records it beside the binaries.
+      #
+      # Reproducible on purpose, and both halves are load-bearing: `git
+      # archive` dates every entry from the commit rather than from now, and
+      # `gzip -n` leaves the timestamp and the original name out of the gzip
+      # header.  Without `-n`, GNU gzip is free to stamp the moment it ran and
+      # the same tag would hash differently on every build — which is the exact
+      # failure this asset exists to avoid.
+      - name: Pack the source
+        env:
+          SECTION: ${{ steps.what.outputs.section }}
+          REF: ${{ github.event_name == 'push' && github.ref_name || 'HEAD' }}
+        run: |
+          git archive --format=tar --prefix="org-semantic-$SECTION/" "$REF" \
+            | gzip -9n > "org-semantic-$SECTION-src.tar.gz"
+          ls -l "org-semantic-$SECTION-src.tar.gz"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: source
+          path: org-semantic-*-src.tar.gz
+          if-no-files-found: error
+
   build:
     needs: version
     strategy:
