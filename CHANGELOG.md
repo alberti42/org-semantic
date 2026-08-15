@@ -58,6 +58,61 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-15
+
+Binary version 0.3.0, unchanged — there is nothing new to download, and an
+existing binary keeps working. This release is the Emacs package and the
+release machinery around it.
+
+Getting a binary stops being something you do outside Emacs. `M-x
+org-semantic-install` fetches the signed one for your platform, checks it
+against the release's own `SHA256SUMS`, and puts it where the package already
+looks — so a package-manager install is now the whole setup. For the two people
+that does not serve — a platform with no published build, and anyone who would
+rather compile what they run — `M-x org-semantic-show-install-manual` opens the
+instructions, and every release now carries a source archive with a published
+checksum.
+
+### Added
+
+- `M-x org-semantic-install` downloads the binary for this platform into
+  `org-semantic-install-directory`, verifies it against the release's
+  `SHA256SUMS`, and asks it for its version before reporting success. It takes
+  the release matching the package rather than the newest one, so what arrives
+  is the binary this elisp was written against.
+- `M-x org-semantic-show-install-manual` opens the manual on building it
+  yourself.
+- Every release now carries `org-semantic-<version>-src.tar.gz`, built with
+  `git archive` and `gzip -n` so a given tag is the same bytes for ever, with
+  its hash in `SHA256SUMS`. Pin it rather than the `Source code (tar.gz)`
+  GitHub attaches by itself, whose checksum GitHub has moved before. It holds
+  what builds and tests the project — not the screenshots or the vendored HTML
+  theme — and both test suites run from it unchanged.
+
+### Changed
+
+- **Release assets are renamed, and a script pinning the old names will need
+  updating.** They now carry the version and say what is inside:
+  `org-semantic-0.4.0-bin-aarch64-macos.tar.gz` rather than
+  `org-semantic-aarch64-macos.tar.gz`. Previously one filename served every
+  release, so a downloaded file could not say what it was and a `SHA256SUMS`
+  line could not be told from another release's. `bin` rather than `cli`
+  because the same binary is the server the Emacs package drives.
+- The manual gained *What it touches*, which answers what indexing does with
+  your notes before you point it at them: read and never written, nothing about
+  them leaves the machine, and the network is reached only to fetch the model
+  and the language classifier. It also lists public vaults to try it on.
+- The README leads with the Emacs interface, and its worked example is now a
+  public vault anyone can clone, so the whole thing is reproducible.
+
+### Fixed
+
+- A hit's address no longer wraps to column 0. It carried no `wrap-prefix`
+  where the passage lines below it always had one, so an outline path too long
+  for the window continued further left than anything else in the buffer and
+  read as a broken line. Deep breadcrumbs with a long tag string are what
+  reach it.
+
 ## [0.3.0] — 2026-08-14
 
 Binary version 0.3.0, and this release needs it: the package calls a `download`
@@ -435,7 +490,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.0
 [0.3.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.1.0
