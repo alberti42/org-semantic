@@ -557,12 +557,11 @@ then variable `exec-path'."
       ;; server's errors: this reader is in Emacs and `M-x' is what they have.
       ;; Both routes are named, because a binary someone else compiled is a
       ;; thing to refuse on purpose and not only for want of a build.
-      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path.  %s, or build it: %s"
+      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path.  %s, or M-x org-semantic-show-install-manual to build it yourself"
                   org-semantic-executable org-semantic-install-directory
                   (if (org-semantic--release-asset)
                       "M-x org-semantic-install downloads one"
-                    "none is published for this platform")
-                  org-semantic--build-url)))
+                    "none is published for this platform"))))
 
 (defconst org-semantic--release-url
   "https://github.com/alberti42/org-semantic/releases/download/v%s/%s"
@@ -651,6 +650,18 @@ attack, and both want the same refusal."
       (error "The release lists no checksum for %s" asset))
     (unless (equal want got)
       (error "Checksum mismatch for %s: expected %s, got %s" asset want got))))
+
+;;;###autoload
+(defun org-semantic-show-install-manual ()
+  "Open the manual on installing the binary yourself.
+
+For the two people the download does not serve: a platform with no
+published build, and anyone who would rather read the source and
+compile it than run an executable somebody else produced.  It
+explains both, and where to get a source archive whose checksum is
+published."
+  (interactive)
+  (browse-url org-semantic--build-url))
 
 ;;;###autoload
 (defun org-semantic-install (&optional version)
