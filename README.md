@@ -6,8 +6,27 @@ database, no Python. It runs as a one-shot command, or stays resident for Emacs
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
+The examples below search [Daniel Bias's
+braindump](https://github.com/denialbb/braindump) — someone else's public vault
+of 753 org notes, part English and part Italian — cloned into `braindump/`. So
+both are reproducible, and neither is anything shipped here.
+
+## From Emacs
+
+![The org-semantic results buffer, showing an English question answered by Italian notes and English ones ranked together](docs/images/results-buffer.png)
+
+`M-x org-semantic-find` searches the vault the current buffer belongs to. The
+question is in English, the note answering it is in Italian, and an English note
+is ranked beside it.
+
+`RET` goes to the line under point, `n` and `p` walk the passages, `k` and `+`
+widen the list or deepen it, `g` asks again. It is a `next-error` client, so
+`M-g M-n` walks the hits from anywhere, and `f` shows each passage in its note
+as point reaches it.
+
+## From the CLI
+
 ```console
-$ git clone --depth 1 https://github.com/denialbb/braindump      # 753 public org notes
 $ org-semantic index braindump/roam --both --model e5-small
   20200924090307-elementi_di_probabilita_e_statistica.org: could not be read, so it is not indexed: stream did not contain valid UTF-8
 753 org files
@@ -49,38 +68,18 @@ $ org-semantic search braindump/roam "what happens when a process is scheduled o
 [model load 733ms · query embed 8ms · search over 3038 vectors 1.0ms]
 ```
 
-Those are somebody else's public notes, so the whole thing above is
-reproducible. The question is in English, the note that answers it is in Italian,
-and its title — *Sistemi Operativi* — shares no word with the question. Finding
-what you can describe but cannot name is the whole point of org-semantic; with a
-multilingual model it stops mattering which language you could not name it in.
-An English note is ranked beside the Italian ones, in the one list.
+The top note's title — *Sistemi Operativi* — shares no word with the question.
+Finding what you can describe but cannot name is the whole point of
+org-semantic, and each score carries a σ because a raw cosine cannot be read
+without one.
 
-One note in that vault is UTF-16 rather than UTF-8, and `index` says so — once
-per index — rather than passing over it in silence. A search tool that drops
-notes without mentioning it is worse than one that finds nothing.
+One note in that vault is UTF-16, and `index` says so once per index rather than
+passing over it in silence.
 
 Most of that three-quarters of a second is the model loading, paid once per
-process. For
-anything interactive, run `org-semantic serve` instead: it keeps the model and
-the vectors resident, and answers in 7–9 ms by meaning or 3 ms by word — fast
-enough to search as you type.
-
-## From Emacs
-
-![The org-semantic results buffer, showing an English question answered by Italian notes and English ones ranked together](docs/images/results-buffer.png)
-
-`M-x org-semantic-find` searches the vault the current buffer belongs to and
-draws the reply. That is the same question against the same public vault as
-above, so it is the same two notes answering — one Italian, one English, ranked
-together in the one list.
-
-Every hit carries its score with a σ beside it — a raw cosine cannot be read
-without one — then the note, the outline path down to the section, and the lines
-the passage came from. `RET` goes to the line under point, `n` and `p` walk the
-passages, `k` and `+` widen the list or deepen it, and `g` asks again. It is a
-`next-error` client, so `M-g M-n` walks the hits from anywhere, and `f` turns on
-follow mode, which shows each passage in its note as point reaches it.
+process. For anything interactive, run `org-semantic serve` instead: it keeps
+the model and the vectors resident, and answers in 7–9 ms by meaning or 3 ms by
+word — fast enough to search as you type.
 
 ## What it touches
 

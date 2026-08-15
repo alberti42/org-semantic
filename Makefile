@@ -66,10 +66,11 @@ lint-elisp:
 # The output path is expanded before the buffer is opened: inside it,
 # default-directory is docs/, so a relative path would land in docs/public/.
 DOC_THEME_FILES := $(shell find docs/org-html-themes -type f)
+DOC_IMAGES := $(shell find docs/images -type f)
 
 html: public/index.html
 
-public/index.html: docs/manual.org $(DOC_THEME_FILES)
+public/index.html: docs/manual.org $(DOC_THEME_FILES) $(DOC_IMAGES)
 	@mkdir -p public
 	emacs --batch --no-init-file \
 		--eval "(progn \
@@ -90,6 +91,7 @@ public/index.html: docs/manual.org $(DOC_THEME_FILES)
 		          (with-current-buffer (find-file-noselect \"docs/manual.org\") \
 		            (org-export-to-file 'html out)))"
 	cp -R docs/org-html-themes/src public/
+	cp -R docs/images public/
 
 clean:
 	cargo clean

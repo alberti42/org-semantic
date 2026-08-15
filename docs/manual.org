@@ -11,8 +11,13 @@ Search a tree of org-mode notes by meaning or by words. One static binary, no
 database, no Python. It runs as a one-shot command, or stays resident for Emacs
 --- over a pipe, never a port.
 
+The example below searches
+[[https://github.com/denialbb/braindump][Daniel Bias's braindump]] --- someone
+else's public vault of 753 org notes, part English and part Italian --- cloned
+into =braindump/=. So it is reproducible, and it is not anything shipped here;
+[[#somebody-elses-notes][Trying it on somebody else's notes]] has two more.
+
 #+begin_src console
-$ git clone --depth 1 https://github.com/denialbb/braindump      # 753 public org notes
 $ org-semantic index braindump/roam --both --model e5-small
   20200924090307-elementi_di_probabilita_e_statistica.org: could not be read, so it is not indexed: stream did not contain valid UTF-8
 753 org files
@@ -54,14 +59,11 @@ $ org-semantic search braindump/roam "what happens when a process is scheduled o
 [model load 733ms · query embed 8ms · search over 3038 vectors 1.0ms]
 #+end_src
 
-Those are somebody else's public notes, so the whole thing above is
-reproducible --- [[#somebody-elses-notes][Trying it on somebody else's notes]]
-has two more of them. The question is in English, the note that answers it is in
-Italian, and its title --- /Sistemi Operativi/ --- shares no word with the
-question. Finding what you can describe but cannot name is the whole point of
-org-semantic; with a multilingual model it stops mattering which language you
-could not name it in. An English note is ranked beside the Italian ones, in the
-one list.
+The question is in English, the note that answers it is in Italian, and the
+title of that note --- /Sistemi Operativi/ --- shares no word with the question.
+An English note is ranked beside the Italian ones, in the one list. Finding what
+you can describe but cannot name is the whole point of org-semantic; with a
+multilingual model it stops mattering which language you could not name it in.
 
 One note in that vault is UTF-16 rather than UTF-8, and =index= says so --- once
 per index --- rather than passing over it in silence. A search tool that drops
@@ -306,6 +308,10 @@ Each model keeps its own semantic index, so several can be built side by side;
 :PROPERTIES:
 :CUSTOM_ID: searching-from-emacs
 :END:
+#+caption: =M-x org-semantic-find=, against the same public vault as above: an English question, an Italian note answering it, and an English one ranked beside it.
+#+attr_html: :alt The org-semantic results buffer, showing an English question answered by Italian notes and English ones ranked together
+[[file:images/results-buffer.png]]
+
 The package lives in =lisp/=. Put it on your ~load-path~ and tell it where the
 binary is, if it is not already on your =PATH=:
 
