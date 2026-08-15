@@ -21,8 +21,12 @@ is ranked beside it.
 
 `RET` goes to the line under point, `n` and `p` walk the passages, `k` and `+`
 widen the list or deepen it, `g` asks again. It is a `next-error` client, so
-`M-g M-n` walks the hits from anywhere, and `f` shows each passage in its note
-as point reaches it.
+`M-g M-n` walks the hits from anywhere.
+
+`f` is the one to know: **follow mode** opens each passage in its own note as
+point reaches it, without taking point out of the list — so `n` and `p` read the
+vault rather than an index of it. It is off until you press `f`, or until the
+`:hook` [below](#the-emacs-package) turns it on for every results buffer.
 
 ## From the CLI
 
