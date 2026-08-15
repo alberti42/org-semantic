@@ -51,7 +51,9 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'jka-compr)
 (require 'jsonrpc)
+(require 'url-handlers)
 
 (defconst org-semantic-version "0.3.0"
   "The release this package is from.
@@ -546,6 +548,148 @@ then variable `exec-path'."
       (executable-find org-semantic-executable)
       (user-error "No org-semantic binary: %s is neither in %s nor on exec-path"
                   org-semantic-executable org-semantic-install-directory)))
+
+(defconst org-semantic--release-url
+  "https://github.com/alberti42/org-semantic/releases/download/v%s/%s"
+  "Where a release asset is, given a version and an asset name.
+
+The tag is `v' and the release version, which is this package's own:
+the release workflow refuses a tag whose name does not equal
+`org-semantic-version', so a package always knows which release
+matches it.  That is also what makes fetching *that* release safe
+rather than fetching the newest one -- the same workflow refuses a
+release whose binary is below `org-semantic-minimum-binary-version',
+so the matching release cannot be one this package would then warn
+about.")
+
+(defun org-semantic--release-asset (&optional configuration)
+  "The release archive built for CONFIGURATION, or nil if there is none.
+
+CONFIGURATION defaults to `system-configuration', which names the
+platform Emacs itself was built for.  The names are the ones the
+release workflow publishes, and each archive holds one binary called
+`org-semantic' -- or `org-semantic.exe' -- at its top level, already
+named what it should be called on PATH.
+
+Nil is a real answer and not a failure to recognise something.
+There is deliberately no Intel macOS build: ONNX Runtime publishes
+no `x86_64-apple-darwin', so `ort' cannot link one, and an asset
+that does not exist must be refused here rather than 404 later.  On
+Apple Silicon that is also the answer for an Emacs built for x86_64
+and running under Rosetta, which reports itself as Intel and cannot
+be told apart from the real thing without asking the kernel."
+  (let* ((c (or configuration system-configuration))
+         (arm (string-match-p "\\`\\(aarch64\\|arm64\\)" c))
+         (intel (string-match-p "\\`x86_64" c)))
+    (cond ((string-match-p "darwin" c)
+           (and arm "org-semantic-aarch64-macos.tar.gz"))
+          ((string-match-p "linux" c)
+           (cond (arm "org-semantic-aarch64-linux.tar.gz")
+                 (intel "org-semantic-x86_64-linux.tar.gz")))
+          ((string-match-p "mingw\\|windows\\|msvc\\|cygwin" c)
+           (and intel "org-semantic-x86_64-windows.zip")))))
+
+(defun org-semantic--verify-checksum (file sums asset)
+  "Signal unless FILE hashes to what SUMS records for ASSET.
+
+SUMS is the release's own `SHA256SUMS', which is published beside
+the archives.  This is an executable being fetched over the network
+and then run, so the one check available is worth making; a
+mismatch is far more likely to be a truncated download than an
+attack, and both want the same refusal."
+  (let ((want (with-temp-buffer
+                (insert-file-contents sums)
+                (goto-char (point-min))
+                (when (re-search-forward
+                       (concat "^\\([0-9a-f]\\{64\\}\\) +\\*?"
+                               (regexp-quote asset) "$")
+                       nil t)
+                  (match-string 1))))
+        (got (with-temp-buffer
+               (set-buffer-multibyte nil)
+               (insert-file-contents-literally file)
+               (secure-hash 'sha256 (current-buffer)))))
+    (unless want
+      (error "The release lists no checksum for %s" asset))
+    (unless (equal want got)
+      (error "Checksum mismatch for %s: expected %s, got %s" asset want got))))
+
+;;;###autoload
+(defun org-semantic-install (&optional version)
+  "Download the org-semantic binary for this platform and install it.
+
+It goes in `org-semantic-install-directory', which is where
+`org-semantic--binary' looks before variable `exec-path' -- so
+nothing needs configuring afterwards, and a binary you installed
+for shell use is not disturbed.
+
+VERSION is the release to take, and defaults to
+`org-semantic-version', this package's own.  Taking the matching
+release rather than the newest one is what makes this predictable:
+the two ship together, so the binary that arrives is the one this
+elisp was written against.
+
+The archive is checked against the release's own `SHA256SUMS'
+before anything is unpacked, and the result is asked for its
+version before this returns -- an executable that arrived over the
+network and cannot say what it is has not been installed, it has
+merely been written to disk."
+  (interactive)
+  (let* ((version (or version org-semantic-version))
+         (asset (or (org-semantic--release-asset)
+                    (user-error
+                     "No org-semantic binary is published for %s%s"
+                     system-configuration
+                     (if (string-match-p "darwin" system-configuration)
+                         " (there is no Intel macOS build; \
+build it with `cargo install --git \
+https://github.com/alberti42/org-semantic')"
+                       ""))))
+         (destination (expand-file-name
+                       (if (eq system-type 'windows-nt)
+                           "org-semantic.exe" "org-semantic")
+                       org-semantic-install-directory))
+         (staging (make-temp-file "org-semantic-install" t)))
+    (unwind-protect
+        (let ((archive (expand-file-name asset staging))
+              (sums (expand-file-name "SHA256SUMS" staging))
+              ;; **The asset is named `.tar.gz', and that is enough to corrupt
+              ;; it.**  `url-copy-file' writes through `write-region', which
+              ;; jka-compr claims by file *name* -- so the bytes off the
+              ;; network get gzipped a second time on the way to disk, the
+              ;; checksum then fails, and the message blames the download.
+              ;; Found by a test writing a fixture and being told it was
+              ;; "compressing" it.
+              (jka-compr-inhibit t))
+          (message "org-semantic: downloading %s %s..." asset version)
+          (url-copy-file (format org-semantic--release-url version asset) archive t)
+          (url-copy-file (format org-semantic--release-url version "SHA256SUMS") sums t)
+          (org-semantic--verify-checksum archive sums asset)
+          ;; `tar -xf' reads both, since it detects the compression itself
+          ;; and the bsdtar that ships with macOS and Windows also reads
+          ;; zip.  Only Windows is published as a zip, and only Windows and
+          ;; macOS have bsdtar, so the one command covers every asset.
+          (unless (zerop (let ((default-directory (file-name-as-directory staging)))
+                           (process-file "tar" nil nil nil "-xf" archive)))
+            (error "Could not unpack %s" asset))
+          (let ((unpacked (expand-file-name (file-name-nondirectory destination) staging)))
+            (unless (file-regular-p unpacked)
+              (error "%s did not contain %s" asset (file-name-nondirectory destination)))
+            (make-directory org-semantic-install-directory t)
+            (copy-file unpacked destination t)
+            ;; The zip carries no mode bits, so the binary arrives
+            ;; unexecutable on the one platform that would not notice until
+            ;; `make-process' failed.  Set them whatever the archive said.
+            (set-file-modes destination #o755)))
+      (delete-directory staging t))
+    (let ((org-semantic-executable destination))
+      (let ((reported (org-semantic-binary-version)))
+        (unless reported
+          (error "Installed %s, but it will not report a version" destination))
+        (org-semantic--check-version reported "the binary just installed")
+        (message "org-semantic: installed %s in %s"
+                 reported org-semantic-install-directory)
+        reported))))
 
 (defun org-semantic-binary-version ()
   "Return the version of the binary on disk, or nil if it will not say.

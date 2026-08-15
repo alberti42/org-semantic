@@ -195,6 +195,80 @@ its prefix handling was being rewritten."
 
 ;;;; Which binary gets run
 
+(ert-deftest every-published-platform-maps-to-its-own-asset ()
+  "And the asset names are the ones the release workflow publishes.
+
+Read off `.github/workflows/release.yml' rather than restated, since
+a name that drifts is a 404 at the one moment a user has no binary
+to fall back on -- and the workflow is the only thing that decides
+what the names are."
+  (let ((published
+         (with-temp-buffer
+           (insert-file-contents
+            (expand-file-name ".github/workflows/release.yml"
+                              org-semantic-tests--root))
+           (let (out)
+             (goto-char (point-min))
+             (while (re-search-forward "^ *asset: +\\(org-semantic-[^ \n]+\\)$" nil t)
+               (push (match-string 1) out))
+             (nreverse out)))))
+    (should (= 4 (length published)))
+    (dolist (case '(("aarch64-apple-darwin21.6.0"  . "org-semantic-aarch64-macos.tar.gz")
+                    ("x86_64-pc-linux-gnu"         . "org-semantic-x86_64-linux.tar.gz")
+                    ("aarch64-unknown-linux-gnu"   . "org-semantic-aarch64-linux.tar.gz")
+                    ("x86_64-w64-mingw32"          . "org-semantic-x86_64-windows.zip")))
+      (should (equal (org-semantic--release-asset (car case)) (cdr case)))
+      (should (member (cdr case) published)))))
+
+(ert-deftest a-platform-with-no-build-is-refused-rather-than-guessed ()
+  "Intel macOS above all, which is the one a reader will meet.
+
+There is no such asset -- ONNX Runtime publishes no
+`x86_64-apple-darwin' -- so answering with the arm64 one would
+install a binary that cannot run, and answering with anything at
+all would 404.  Nil is the answer, and `org-semantic-install' turns
+it into a sentence naming the reason."
+  (should-not (org-semantic--release-asset "x86_64-apple-darwin21.6.0"))
+  (should-not (org-semantic--release-asset "powerpc-apple-darwin"))
+  (should-not (org-semantic--release-asset "aarch64-w64-mingw32"))
+  (should-not (org-semantic--release-asset "sparc-sun-solaris2.11")))
+
+(ert-deftest a-downloaded-archive-is-checked-against-the-release-s-own-sums ()
+  "A truncated download and a tampered one want the same refusal.
+
+The hash is over the bytes on disk, so this also pins that the file
+is read literally: reading an archive as text would decode it and
+hash something the release never published.
+
+`jka-compr-inhibit' is bound for the same reason `org-semantic-install'
+binds it -- writing to a name ending `.tar.gz' otherwise gzips what
+is written, which is how that hazard was noticed here in the first
+place."
+  (let* ((dir (make-temp-file "org-semantic-sums" t))
+         (archive (expand-file-name "org-semantic-aarch64-macos.tar.gz" dir))
+         (sums (expand-file-name "SHA256SUMS" dir)))
+    (unwind-protect
+        (let ((coding-system-for-write 'binary)
+              (jka-compr-inhibit t))
+          (write-region "\xff\xd8\xff not really a tarball" nil archive)
+          (let ((digest (with-temp-buffer
+                          (set-buffer-multibyte nil)
+                          (insert-file-contents-literally archive)
+                          (secure-hash 'sha256 (current-buffer)))))
+            (write-region (format "%s  org-semantic-aarch64-macos.tar.gz\n" digest)
+                          nil sums)
+            (should-not (org-semantic--verify-checksum
+                         archive sums "org-semantic-aarch64-macos.tar.gz"))
+            ;; An asset the release says nothing about is refused too, rather
+            ;; than passing for want of anything to compare against.
+            (should-error (org-semantic--verify-checksum archive sums "other.tar.gz"))
+            (write-region (format "%s  org-semantic-aarch64-macos.tar.gz\n"
+                                  (make-string 64 ?0))
+                          nil sums)
+            (should-error (org-semantic--verify-checksum
+                           archive sums "org-semantic-aarch64-macos.tar.gz"))))
+      (delete-directory dir t))))
+
 (ert-deftest a-binary-in-the-install-directory-needs-no-configuration ()
   "Unpack a release there and it is found, with nothing set.
 
