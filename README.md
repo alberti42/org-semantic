@@ -37,8 +37,7 @@ so a recommendation is as far as this goes:
 ```elisp
 (use-package org-semantic-results
   :load-path "/path/to/org-semantic/lisp"
-  :custom ((org-semantic-executable "/path/to/org-semantic")
-           (org-semantic-vault-root "~/notes"))
+  :custom (org-semantic-vault-root "~/notes")
   :bind (("C-c n s" . org-semantic-find)
          ("C-c n S" . org-semantic-find-at-point)
          ("C-c n R" . org-semantic-reindex))
@@ -51,7 +50,11 @@ so a recommendation is as far as this goes:
 `org-semantic-vault-root` is the one setting that has to be right: it says which
 directory your notes are, and every buffer that says nothing else — `*scratch*`,
 the agenda — searches it. With several vaults, leave it nil and let each one
-declare itself in its own `.dir-locals.el`. [Searching from
+declare itself in its own `.dir-locals.el`.
+
+There is no `org-semantic-executable` here because there need not be: a binary
+in `org-semantic-install-directory` is found on its own. Set it only to name one
+somewhere else. [Searching from
 Emacs](https://alberti42.github.io/org-semantic/#searching-from-emacs) covers
 the rest, including every key the results buffer takes.
 
@@ -137,14 +140,27 @@ offline. The
 detail, and lists more public vaults if you would rather not start with your own
 notes.
 
-## Install
+## Installing the binary
+
+Both halves need it: the Emacs package drives this binary rather than carrying
+one of its own.
+
+Prebuilt ones are on the [releases
+page](https://github.com/alberti42/org-semantic/releases) for Apple Silicon
+macOS, Linux (x86_64 and arm64) and Windows, the macOS build Developer ID signed
+and notarized. Unpack it into `org-semantic/` under your `user-emacs-directory`
+and Emacs finds it with nothing configured at all — that is
+`org-semantic-install-directory`, which is searched before `exec-path`. For
+shell use, anywhere on your `PATH` does.
+
+Or build it, which needs a Rust toolchain and nothing else — no Python, no
+system ONNX Runtime, no package manager:
 
 ```sh
 cargo install --git https://github.com/alberti42/org-semantic
 ```
 
-Requires a Rust toolchain. Nothing else — no Python, no system ONNX Runtime, no
-package manager. The embedding model downloads on first use.
+Either way the embedding model downloads on first use.
 
 
 ## Documentation
