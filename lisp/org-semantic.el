@@ -520,6 +520,14 @@ starting a second server or jumping the queue.")
        (jsonrpc-running-p org-semantic--connection)
        t))
 
+(defconst org-semantic--build-url
+  "https://alberti42.github.io/org-semantic/#build-from-source"
+  "The manual on building it yourself, which is the answer to two questions.
+
+A platform with no published binary has nowhere else to go, and
+somebody who would rather not run one they did not compile has
+asked a different question with the same answer.")
+
 (defun org-semantic--installed-binary ()
   "Return the binary under `org-semantic-install-directory', or nil.
 
@@ -545,8 +553,16 @@ then variable `exec-path'."
            org-semantic-executable)
       (org-semantic--installed-binary)
       (executable-find org-semantic-executable)
-      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path"
-                  org-semantic-executable org-semantic-install-directory)))
+      ;; Naming the command is right here where it would be wrong in the
+      ;; server's errors: this reader is in Emacs and `M-x' is what they have.
+      ;; Both routes are named, because a binary someone else compiled is a
+      ;; thing to refuse on purpose and not only for want of a build.
+      (user-error "No org-semantic binary: %s is neither in %s nor on exec-path.  %s, or build it: %s"
+                  org-semantic-executable org-semantic-install-directory
+                  (if (org-semantic--release-asset)
+                      "M-x org-semantic-install downloads one"
+                    "none is published for this platform")
+                  org-semantic--build-url)))
 
 (defconst org-semantic--release-url
   "https://github.com/alberti42/org-semantic/releases/download/v%s/%s"

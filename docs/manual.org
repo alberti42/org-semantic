@@ -208,12 +208,44 @@ notarized. Unpack it and put =org-semantic= on your =PATH= --- or, from Emacs,
 =org-semantic-install-directory=, checks it against the release's own
 =SHA256SUMS=, and asks it for its version before saying it is installed.
 
-Every release also carries =org-semantic-<version>-src.tar.gz=, and a packager
-should pin that rather than the =Source code (tar.gz)= GitHub attaches by
-itself. GitHub generates that one on demand and has changed how it compresses
-it before, moving the checksum of archives already published; ours is built
-with =git archive= and =gzip -n=, so the same tag is the same bytes for ever,
-and its hash is in =SHA256SUMS= with the binaries.
+** Building it yourself, from a release you can check
+:PROPERTIES:
+:CUSTOM_ID: build-from-source
+:END:
+A binary someone else compiled is a binary you are trusting on their word, and
+not everyone wants to. Every release carries its own source archive for that
+reason --- =org-semantic-<version>-src.tar.gz=, with its hash in the same
+=SHA256SUMS= as the binaries --- so you can verify what you downloaded, read
+it, and build it:
+
+#+begin_src sh
+V=0.3.0
+BASE=https://github.com/alberti42/org-semantic/releases/download/v$V
+curl -LO $BASE/org-semantic-$V-src.tar.gz
+curl -LO $BASE/SHA256SUMS
+
+# `shasum -a 256' on macOS, `sha256sum' on Linux; both read the same file.
+grep "org-semantic-$V-src.tar.gz" SHA256SUMS | shasum -a 256 -c -
+
+tar xzf org-semantic-$V-src.tar.gz && cd org-semantic-$V
+cargo build --release          # target/release/org-semantic
+make test                      # optional, and it all runs from the archive
+#+end_src
+
+Then put =target/release/org-semantic= on your =PATH=, or copy it into
+[[#emacs-settings][=org-semantic-install-directory=]] where Emacs finds it with nothing configured.
+
+*Pin this archive rather than the =Source code (tar.gz)= GitHub attaches by
+itself.* GitHub generates that one on demand and has changed how it compresses
+it before, moving the checksum of archives already published and breaking
+everyone who had pinned one. Ours is built with =git archive= and =gzip -n=,
+so a given tag is the same bytes for ever.
+
+It holds what builds and tests the project, and not the whole repository: the
+screenshots and the vendored HTML theme are left out, which is also what keeps
+it MIT throughout. The two test suites run from it unchanged --- which is worth
+knowing, since reading the code and then running its tests is the point of
+building this way.
 
 ** Intel macOS
 :PROPERTIES:
