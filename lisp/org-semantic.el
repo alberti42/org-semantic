@@ -51,7 +51,6 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'jka-compr)
 (require 'jsonrpc)
 (require 'url-handlers)
 
@@ -660,6 +659,12 @@ https://github.com/alberti42/org-semantic')"
               ;; checksum then fails, and the message blames the download.
               ;; Found by a test writing a fixture and being told it was
               ;; "compressing" it.
+              ;;
+              ;; No `require': the variable is preloaded and
+              ;; `auto-compression-mode' is on by default, which is what makes
+              ;; the hazard real in the first place.  Requiring `jka-compr'
+              ;; would load a file Emacs deliberately leaves until something
+              ;; opens a compressed file.
               (jka-compr-inhibit t))
           (message "org-semantic: downloading %s %s..." asset version)
           (url-copy-file (format org-semantic--release-url version asset) archive t)
