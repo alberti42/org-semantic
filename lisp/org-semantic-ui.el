@@ -11,38 +11,17 @@
 
 ;;; Commentary:
 
-;; What both ways of searching need, and neither owns.  There are two:
-;; a results buffer, in `org-semantic-results', and -- later -- narrowing
-;; in the minibuffer.  They differ in how they draw a hit and in nothing
-;; else, so what is here is everything up to the drawing: how to reach a
-;; hit, how to write its score down, how to phrase what an error asks
-;; for, and how to keep at most one search in flight.
+;; What both ways of searching need, and neither owns: the results
+;; buffer in `org-semantic-results', and a minibuffer interface later.
+;; They differ only in how they draw a hit, so everything up to the
+;; drawing is here.  How to reach a hit, how to write its score, what an
+;; error offers, and how to keep one search in flight.
 ;;
-;; It is a separate file rather than the bottom of the buffer mode
-;; because the second interface is meant to arrive without moving any of
-;; this: a file is the only structure that makes "shared" checkable.
-;;
-;; Two things here are not obvious and are the reason the file exists.
-;;
-;; A SCORE IS NOT A NUMBER YOU MAY DECORATE.  A semantic score is a
-;; cosine sitting on a large constant offset -- unrelated passages score
-;; 0.56 under one model and 0.80 under another -- so it means nothing
-;; without the `z' beside it, which says how far above that model's own
-;; floor it is.  A word score is BM25, unbounded, and comparable with
-;; nothing: not with another query's scores, not with a cosine.  So it
-;; gets no sigma, no percentage, no bar and no threshold, ever.
-;; `org-semantic-ui-score' is the one place that knows this, and both
-;; interfaces call it rather than formatting a number themselves.
-;;
-;; A FAILURE IS ANSWERED BY AN OFFER, AND WHO ASKS IS NOT DECIDED HERE.
-;; `org-semantic-ui-remedy' says what could be offered and chooses
-;; nothing: it hands back symbols, so a caller arranges what "index this
-;; vault" costs, and a test can assert on the answer where it could not
-;; assert on a closure.  The results buffer asks in the minibuffer with a
-;; key per offer; a narrowing interface will have its own moment to ask.
-;; What both need is that replies arrive asynchronously, so whoever does
-;; ask must not raise a prompt from inside the callback -- see
-;; `org-semantic-results--ask', which is where that care lives.
+;; Two rules for a caller.  Write a score with `org-semantic-ui-score'
+;; and do not format one yourself: the two rankings are on different
+;; scales, and only that function knows both.  And read a failure with
+;; `org-semantic-ui-remedy', which returns symbols and decides nothing --
+;; each interface asks in its own way.
 
 ;;; Code:
 
@@ -55,17 +34,15 @@
 (cl-defun org-semantic-ui-visit (file line &key select other-window)
   "Show FILE at LINE, and return the window it is shown in.
 
-With SELECT, the window is selected as well: OTHER-WINDOW then
-chooses between this window and another.  Without it the file is
-merely displayed -- point lands on LINE in that window and the
-selected window does not change, which is what a preview and
-`next-error-no-select' both need and what
-`org-semantic-visit-hit' cannot do.
+With SELECT, the window is selected too, and OTHER-WINDOW chooses
+between this window and another.  Without SELECT the file is only
+displayed: point moves to LINE in that window and the selected
+window does not change, which is what a preview and
+`next-error-no-select' need.
 
-The buffer is widened if it was narrowed.  Line numbers are
-counted over the whole note, so a buffer narrowed to some other
-subtree would otherwise count them from its own beginning and
-land, silently, somewhere else."
+The buffer is widened if it was narrowed.  Line numbers are counted
+over the whole note, so a narrowed buffer would count from its own
+beginning and land somewhere else."
   (let ((buffer (find-file-noselect file))
         (window nil))
     (if select
@@ -74,20 +51,15 @@ land, silently, somewhere else."
               (pop-to-buffer buffer)
             (pop-to-buffer-same-window buffer))
           (setq window (selected-window)))
-      ;; **Never in the window we were called from.**  Without
-      ;; `inhibit-same-window', `display-buffer' is free to choose the very
-      ;; window holding the list, and previewing then replaces the list with the
-      ;; note -- so walking down with `n' reached the last hit and the buffer
-      ;; you were walking was gone, which reads as the command having jumped
-      ;; into the note.  A preview must leave its own list on screen.
+      ;; `inhibit-same-window', or `display-buffer' can choose the window
+      ;; that holds the list, and the preview then replaces the list.
       (setq window (display-buffer buffer '(nil (inhibit-same-window . t)))))
     (when window
       (with-selected-window window
         (when (buffer-narrowed-p) (widen))
         (goto-char (point-min))
         (forward-line (1- (max 1 (or line 1))))
-        ;; Reached through `fboundp' rather than by requiring org: a hit
-        ;; is a line in a file, and nothing here needs org to find it.
+        ;; Through `fboundp': this package does not require org.
         (when (and (derived-mode-p 'org-mode)
                    (fboundp 'org-fold-show-set-visibility))
           (org-fold-show-set-visibility 'canonical))
@@ -100,22 +72,14 @@ land, silently, somewhere else."
 (defun org-semantic-ui-score (hit)
   "How well HIT matched, written the way its ranking allows.
 
-Two rankings with nothing in common, so two spellings.  A semantic
-score is a cosine, and the cosine of two unrelated passages is not
-zero but 0.56 under one model and 0.80 under another -- the
-informative part of the number sits on a large constant.  So it is
-shown with the `z' the server sends beside it, which is how far
-above that corpus's own floor the hit is, in its standard
-deviations, and is the only part comparable between models.
+A semantic score is a cosine, and is shown with the `z' the server
+sends beside it: the standard deviations above that corpus's own
+floor.  The cosine cannot be read alone, because two unrelated
+passages already score 0.56 or 0.80, depending on the model.
 
-A word score is BM25.  It is unbounded, it rises with how rare the
-terms are and how many of them hit, and so it is comparable with
-nothing at all -- not with another query's scores on the same
-vault, and not with a cosine.  There is no floor to stand it
-against, which is why the server sends no `z' for one.  It is
-therefore printed raw: no sigma, no percentage, no bar, no
-threshold.  Any of those would be measuring a scale that does not
-exist."
+A word score is BM25.  It has no fixed scale and no floor, so the
+server sends no `z' and this prints it raw.  Do not give one a
+sigma, a percentage, a bar or a threshold."
   (let ((score (plist-get hit :score))
         (z (plist-get hit :z)))
     (cond ((null score) "")
@@ -125,16 +89,12 @@ exist."
 (defun org-semantic-ui-candidate (hit)
   "HIT written as one line, carrying the hit itself as a property.
 
-The score and the outline path, which is what the buffer puts at
-the head of a passage and what the minibuffer will offer as a
-completion.  `org-semantic-ui-candidate-hit' reads the hit back
-off it, so a caller never has to keep a parallel list in step with
-the strings.
+The score and the outline path.  `org-semantic-ui-candidate-hit'
+reads the hit back off the string, so a caller keeps no parallel
+list.
 
-Not guaranteed unique: two passages of one section differ only in
-their lines, and both are honestly described by the same line.  A
-completion table therefore keys on the property and not on the
-string."
+The string is not unique: two passages of one section differ only
+in their lines.  A completion table must key on the property."
   (let ((line (format "%s  %s"
                       (org-semantic-ui-score hit)
                       (or (plist-get hit :heading) ""))))
@@ -149,10 +109,9 @@ string."
 (defun org-semantic-ui-annotate (hit)
   "What is worth saying about HIT besides its heading, or nil.
 
-Its TODO keyword, its priority and its tags -- the facts org
-carries that a reader recognises at a glance.  The right-hand
-column of a completion, and the right of a heading line in a
-results buffer."
+Its TODO keyword, its priority and its tags.  Shown in the
+right-hand column of a completion, and to the right of a heading
+line in a results buffer."
   (let* ((todo (plist-get hit :todo))
          (priority (plist-get hit :priority))
          (tags (append (plist-get hit :tags) nil))
@@ -186,18 +145,15 @@ Returns (KIND MESSAGE . OFFERS).  KIND is the server's label or
 nil, MESSAGE is the sentence to show, and OFFERS is a list of
 \(LABEL . ACTION) where ACTION is one of the symbols `index',
 `index-full', `lexical', `choose-model', `waive' and
-`show-changed'.  Symbols rather than functions: what \"index this
-vault\" costs is the caller's to arrange, and a symbol can be
-asserted in a test where a closure cannot.
+`show-changed'.  Symbols, not functions: the caller arranges what
+each action costs.
 
-An error with no KIND gets no offers, and that is the contract
-rather than an omission: the server labels what a client must act
-on, so the absence of a label says there is nothing to decide and
-the message is to be shown as it stands.
+An error with no KIND gets no offers.  The server labels what a
+client must act on, so no label means there is nothing to decide
+and the message is shown as it stands.
 
-The action for the labels that have one comes from `data.remedy',
-which is the machine form the server sends precisely so that
-nobody parses the prose to find out which call to make."
+An action comes from `data.remedy', the machine form, and never
+from the prose."
   (let* ((data (plist-get error-object :data))
          (kind (plist-get data :kind))
          (message (or (plist-get error-object :message) "the search failed"))
@@ -210,34 +166,19 @@ nobody parses the prose to find out which call to make."
          (offers
           (pcase kind
             ('nil nil)
-            ;; The word index costs seconds where the semantic one costs
-            ;; minutes, and is very often already built -- so a vault
-            ;; that cannot answer by meaning can usually answer now.
+            ;; The word index costs seconds, and is often already built.
             ("no-index"
              (append build
                      (unless (equal mode "lexical")
                        '(("Lexical search (by word)" . lexical)))))
-            ;; The index is here and the model that built it is not -- a vault
-            ;; copied to another machine, or a cleared cache.  Named as a
-            ;; download rather than as a build, because that is the part that
-            ;; takes the minutes: the search refuses instantly rather than
-            ;; fetching hundreds of megabytes inside a query, and `index' is the
-            ;; call that fetches, reports its size, and has the hours to do it.
+            ;; The index is here and the model is not: a vault copied to
+            ;; another machine, or a cleared cache.  A search never
+            ;; downloads, so the offer is the download itself.
             ("model-missing"
              (append
-              ;; Not offered while a run is already fetching it.  Pressing it
-              ;; then would be refused in its turn -- one index per vault -- so
-              ;; the offer would be inviting the user into a second error.  This
-              ;; is the one error that carries `indexing', because it is the one
-              ;; a client repeats: every keystroke of a search-as-you-type asks
-              ;; again, and without it the hundredth refusal reads as the first.
-              ;; And nothing is offered in its place.  "Try again" was, and it
-              ;; only re-ran the search -- which `g' does, and which any new
-              ;; search does, so it was a manual poll wearing the clothes of a
-              ;; decision.  For a fetch this client started there is a reply to
-              ;; wait for; for anyone else's there is nothing we could offer that
-              ;; the user cannot already do.  The message says a download is
-              ;; running, which is the whole of what is known.
+              ;; Not offered while a fetch is running: a second one is
+              ;; refused.  Nothing takes its place, because the message
+              ;; already says the download is in progress.
               (unless (org-semantic-true-p (plist-get data :indexing))
                 '(("Download it" . download)))
               (unless (equal mode "lexical")
@@ -269,27 +210,14 @@ nobody parses the prose to find out which call to make."
     ("Rebuild from scratch" . ?b))
   "Offers whose key is not the first letter of their label.
 
-Two reasons to be here.  A collision: `config-drift' offers \"Search
-anyway\" beside \"Show what changed\", and both begin with an S.
+Two cases.  A collision: `config-drift' offers \"Search anyway\"
+beside \"Show what changed\".  And two labels for one action: a full
+rebuild is \"Rebuild fully\" or \"Rebuild from scratch\", and answers
+to `b' in both.
 
-And: **two labels for one action answer to one key.**  A full
-rebuild is offered as \"Rebuild fully\" when a policy has drifted and
-as \"Rebuild from scratch\" when a layout is too old to read, and it
-is `b' -- building -- in both, the same letter as \"Build it\".  `r'
-would suggest the letter told a *rebuild* from a *build*, which it
-cannot, because no failure ever offers both: one says there is no
-index, the other that the one there is cannot be used.  An imagined
-distinction is worse than none.
-
-Everything else takes its initial, which is the whole point:
-`[d] Download it' can be read without being learned, where a key
-chosen for the *call* rather than for the label gives
-`[i] Download it' and asks the reader to hold the mapping in their
-head.  The cost is that rewording a label moves its key, so keep
-the two in step -- and note that the failure is caught rather than
-silent: `org-semantic-ui-offer-keys-are-unambiguous' walks every
-failure a client can meet and asserts that no two offers in any of
-them answer to the same key.")
+Every other offer takes its own initial, so rewording a label moves
+its key.  Keep the two in step.
+`org-semantic-ui-offer-keys-are-unambiguous' fails on a collision.")
 
 (defun org-semantic-ui-offer-key (offer)
   "The key that answers OFFER, which is one (LABEL . ACTION) pair.
@@ -307,19 +235,11 @@ The label's own initial, downcased, unless
                (:copier nil))
   "One search in flight, the next one wanted, and nothing queued between.
 
-Nothing on the server supersedes a search: ten keystrokes are ten
-replies, every one of them answered, in arrival order.  Managing
-that on the server was considered and refused -- it would have to
-read ahead over a channel that also carries cancellations to know
-which search replaced which, and two searches differing in vault
-or mode are no such thing.
-
-So the client bounds the queue at one instead, with no protocol at
-all: keep a single request in flight, hold the latest parameters
-wanted, and fire them from the previous reply.  It needs nothing
-from the far side, it self-adapts when searches slow to seconds
-during a rebuild, and it removes the timeouts, which are the thing
-that actually goes wrong."
+The server answers every search and supersedes none, so ten
+keystrokes get ten replies.  This keeps one request in flight,
+holds the most recent parameters wanted, and sends them from the
+previous reply.  A slow search therefore delays the next request
+instead of causing a timeout."
   (request nil :documentation "The id of the request in flight, or nil.")
   (pending nil :documentation "The parameters wanted next, or nil.")
   (epoch 0 :documentation "\
@@ -352,30 +272,26 @@ what is waiting is always the most recent thing asked for."
 (defun org-semantic-ui-driver-abandon (driver)
   "Make DRIVER forget what it wanted and ignore what is still coming.
 
-For a results buffer being killed, or pointed at another vault:
-the reply for a search nobody is waiting for now has nowhere to
-go.  Deliberately not called when firing a newer search -- a reply
-overtaken by a later query is still the best thing anyone has, and
-dropping it would leave the screen blank for a round trip that
-buys nothing."
+For a results buffer that is killed, or pointed at another vault.
+
+Do not call it when a newer search is sent.  A reply overtaken by a
+later query is still the best result available, and dropping it
+would leave the buffer empty for one round trip."
   (cl-incf (org-semantic-ui-driver-epoch driver))
   (setf (org-semantic-ui-driver-request driver) nil
         (org-semantic-ui-driver-pending driver) nil))
 
 (defun org-semantic-ui--fire (driver params)
   "Send PARAMS on DRIVER now, and send whatever is pending from the reply."
-  ;; `os-' throughout, as everywhere a callback outlives the call that
-  ;; made it: a name someone has `defvar'-ed anywhere in their
-  ;; configuration binds dynamically instead of lexically, and is
-  ;; unwound again long before the reply arrives.  See
-  ;; `org-semantic--call-async', where this cost a silent bug once.
+  ;; `os-' prefixes, as everywhere a callback outlives its call.  A name
+  ;; that anything has `defvar'-ed binds dynamically, and is unwound
+  ;; before the reply arrives.
   (let* ((os-driver driver)
          (os-epoch (org-semantic-ui-driver-epoch driver))
          (os-settle
           (lambda (reply error)
-            ;; Cleared first, and on both paths: a failure that left this
-            ;; set would wedge the driver as permanently in flight, and
-            ;; nothing would ever be asked again.
+            ;; Cleared first, and on both paths.  A failure that left it
+            ;; set would hold the driver in flight for ever.
             (setf (org-semantic-ui-driver-request os-driver) nil)
             (when (= os-epoch (org-semantic-ui-driver-epoch os-driver))
               (if error
@@ -387,9 +303,8 @@ buys nothing."
                   (org-semantic-ui--fire os-driver next)))))))
     ;; PARAMS is the whole truth about this search, including the absence
     ;; of a policy.  `org-semantic-search-async' otherwise falls back to
-    ;; the setting, which would make a waived `config-drift' unwaivable:
-    ;; the caller drops `:config' to say "search the index as it stands"
-    ;; and the global would put it straight back.
+    ;; the setting, and a waived `config-drift' could not be waived: the
+    ;; caller drops `:config', and the setting puts it back.
     (let ((org-semantic-config (plist-get params :config)))
       (setf (org-semantic-ui-driver-request driver)
             (apply #'org-semantic-search-async

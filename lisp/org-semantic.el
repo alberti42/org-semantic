@@ -17,36 +17,23 @@
 ;; buffer, no as-you-type search.  That belongs in a layer above this
 ;; one, and this file is what it will be built on.
 ;;
-;; Four things are worth knowing before reading further, because each is
-;; a decision the server has already made for us.
+;; Four rules the server sets, which everything here follows.
 ;;
-;; ONE PROCESS, EVERY VAULT.  The embedding model is loaded once and
-;; shared, so a second vault costs a couple of megabytes rather than the
-;; ~229 MB a second process would pay for its own copy of the weights.
-;; Hence `org-semantic--connection' is a single global, and a vault is a
-;; parameter on every request rather than a server of its own.  Send
-;; `close' when the last buffer visiting a vault is gone.
+;; One process serves every vault.  The model is loaded once and shared,
+;; so a second vault costs a few megabytes.  `org-semantic--connection'
+;; is therefore a single global, and every request names its vault.
 ;;
-;; INDEXING IS MINUTES, AND `jsonrpc-default-request-timeout' IS TEN
-;; SECONDS.  Progress notifications do not reset it -- neither LSP nor
-;; jsonrpc.el has such a rule -- so an `index' sent with
-;; `jsonrpc-request' gives up long before the work finishes and the
-;; reply arrives for an id nothing is waiting on.  Every `index' here is
+;; An index takes minutes and `jsonrpc-default-request-timeout' is ten
+;; seconds.  Progress reports do not reset it.  Every `index' here is
 ;; asynchronous and carries `org-semantic-index-timeout'.
 ;;
-;; SEARCH WORKS DURING A REINDEX, AND SAYS SO.  A search sent while an
-;; index runs is answered from the version committed before it, with
-;; `indexing' true in the result.  It is also slower: the query waits
-;; out the embedding batch in flight, a p90 of about two seconds on a
-;; full rebuild.  Do not build search-as-you-type on top of that; check
-;; the flag and say the list is a version behind.
+;; A search sent during an index is answered from the version committed
+;; before it, with `indexing' true in the result.  It is also slower,
+;; because the query waits for the embedding batch in flight.
 ;;
-;; ERRORS COME LABELLED, AND THE LABEL IS WHAT TO BRANCH ON.  A failure
-;; a client must act on carries `kind' in the JSON-RPC `data' member:
-;; `no-index', `config-drift', `indexing', and so on.  Absence of a
-;; label is itself meaningful -- an error with no `data' is one to show,
-;; not one to decide anything from.  `org-semantic-error' carries both,
-;; so a caller reads `org-semantic-error-kind' and never the prose.
+;; A failure a client must act on carries `kind' in the JSON-RPC `data'
+;; member.  Branch on `org-semantic-error-kind', never on the message.
+;; No label means there is nothing to decide: show the message.
 
 ;;; Code:
 
@@ -57,42 +44,22 @@
 (defconst org-semantic-version "0.4.0"
   "The release this package is from.
 
-The release version, which is the package's: it moves whenever
-anything here ships, including a change to this file alone.  It is
-*not* what the binary reports, and the two are compared through
-`org-semantic-minimum-binary-version' rather than for equality.")
+It moves whenever anything here ships, including a change to one
+file.  It is not what the binary reports; the two are compared
+through `org-semantic-minimum-binary-version'.")
 
 (defconst org-semantic-minimum-binary-version "0.3.0"
   "The oldest binary this package knows how to talk to.
 
-Bump this when the elisp starts needing something the server did
-not have -- a new method, a new field, a changed reply shape -- and
-also when a release *documents* behaviour that only the newer binary
-provides and the older one gets **silently wrong**.
+Raise it when the elisp needs something the server did not have: a
+new method, a new field, or a changed reply shape.  Raise it also
+when a release documents behaviour that only the newer binary
+provides, and that the older one gets wrong without saying so.
 
-0.3.0 raised it for the first reason: `org-semantic-download' calls
-a `download' method that 0.2.0 has no answer for at all.  That
-arrived while the tree said 0.2.1, which no release ever carried, so
-the floor names the release it actually shipped in.
-
-0.2.0 raised it for the second, which is worth keeping as the
-example, because nothing in that release called anything new: 0.1.0
-has no negated predicates, so it reads `-dir:archive' as
-`dir:archive' and answers with the opposite of the request.  A user
-reading those notes and keeping the old binary would be quietly
-served wrong results.  The floor exists to prevent silence, not
-merely to gate method calls.
-
-*Why a minimum and not the release version.* They ship from one
-repository, but they do not change together: an elisp-only release
-is common and a rebuild of the binary is 40 MB the user has no
-reason to fetch.  Comparing for equality made every such release
-warn that one of them was stale, when nothing was.
-
-A binary *newer* than this package is not a problem and is not
-mentioned: the protocol only gains things, so an old client and a
-new server understand each other by construction.  What breaks is
-the other direction, which is what this catches.")
+A minimum, not an equality.  The two versions ship together and do
+not change together, so an elisp-only release must not condemn a
+binary that is still correct.  A newer binary is not reported: the
+protocol only gains things.")
 
 
 ;;;; Settings
@@ -116,48 +83,40 @@ in `org-semantic-install-directory' first and on variable
   (expand-file-name "org-semantic/" user-emacs-directory)
   "Where org-semantic keeps a binary of its own, and looks for one first.
 
-Unpack a release here -- the file named `org-semantic' -- and
-nothing needs configuring; this is also where the installer will
-put one.
+`org-semantic-binary-install' puts one here.  Unpacking a release
+here has the same effect, and needs no other setting.
 
-*Outside the package manager's tree on purpose.* A straight or
-elpaca rebuild deletes and repopulates the package directory, which
-would take the binary out from under a server that is running from
-it.
+Keep it outside the package manager's tree.  A straight or elpaca
+rebuild repopulates the package directory, and would delete the
+binary while a server runs from it.
 
-It is searched *before* variable `exec-path', so that installing a
-copy for shell use -- `cargo install' puts one on PATH -- cannot
-silently move Emacs onto a different build than the one it was
-given.  To run the one on PATH deliberately, either leave this
-directory empty or set `org-semantic-executable' to an absolute
-path."
+It is searched before variable `exec-path', so a copy installed for
+shell use cannot move Emacs onto a different build.  To run the one
+on PATH, leave this directory empty or set
+`org-semantic-executable' to an absolute path."
   :type 'directory)
 
 (defcustom org-semantic-cache-home nil
   "Where the server downloads its models, or nil to inherit the environment.
 
-The embedding model and the language classifier are the only
-things written outside a vault, and a model is 128 MB for the
-small English one and up to 2.24 GB for the large multilingual
-ones.  They go under `$XDG_CACHE_HOME' -- in practice
-~/.cache/fastembed and ~/.cache/org-semantic.  Set this to put
-them somewhere else: an external disk, or a directory shared
-between accounts.
+The embedding model and the language classifier are the only files
+written outside a vault.  A model is 128 MB for the small English
+one, and up to 2.24 GB for the large multilingual ones.  They go
+under `$XDG_CACHE_HOME', which is ~/.cache/fastembed and
+~/.cache/org-semantic.  Set this to keep them elsewhere, on an
+external disk or in a shared directory.
 
-Nil, the default, sends nothing and lets the server resolve the
-path as it always would, which is also what a shell inherits.
+Nil, the default, sends nothing, and the server resolves the path
+from its own environment.
 
-The value is passed to the server as ORG_SEMANTIC_CACHE_HOME,
-which replaces `$XDG_CACHE_HOME' for org-semantic alone; the
-layout beneath it is unchanged, so moving an existing cache is a
-`mv' of those two directories.
+The value is sent as ORG_SEMANTIC_CACHE_HOME, which replaces
+`$XDG_CACHE_HOME' for org-semantic alone.  The layout below it does
+not change, so moving a cache is a `mv' of those two directories.
 
-*It applies to servers this Emacs starts, and to nothing else.*
-A shell `org-semantic index' reads its own environment, so if you
-run the binary from a terminal as well, set the variable there
-too -- otherwise the model is downloaded a second time into the
-default location, which nothing will report, because both runs
-are behaving correctly."
+It applies only to servers this Emacs starts.  A shell
+`org-semantic index' reads its own environment.  If you use the
+binary from a terminal, set the variable there too, or the model is
+downloaded a second time into the default location."
   :type '(choice (const :tag "Inherit from the environment" nil)
                  (directory :tag "Directory")))
 
@@ -185,17 +144,17 @@ seconds."
 (defcustom org-semantic-conserve-memory nil
   "Whether an index may load a second copy of the model.
 
-Off, the default, lets a long rebuild load its own weights so that
-searching and indexing proceed side by side -- at the cost of about
-229 MB on the small English model, and a couple of gigabytes on the
-large multilingual ones.  Note that the process keeps that
-footprint until it exits: it is not a cost that ends with the run.
+Off, the default, lets a long rebuild load its own weights, so that
+searching and indexing run side by side.  This costs about 229 MB
+on the small English model, and some gigabytes on the large
+multilingual ones.  The process keeps that memory until it exits.
 
-On, the two share one model and take turns on it, so a query
-landing mid-embed waits out the batch in flight.  It is
-concurrency against memory, not speed against memory: it changes
-nothing while no index is running, and nothing at all for lexical
-search, which touches no model."
+On, the two share one model and take turns.  A query that arrives
+during an embedding batch then waits for it.
+
+It is concurrency against memory, not speed against memory.  It
+changes nothing while no index runs, and nothing at all for lexical
+search, which uses no model."
   :type 'boolean)
 
 (defcustom org-semantic-config nil
@@ -223,21 +182,22 @@ there is something to say."
 (defcustom org-semantic-timeout 30
   "Seconds to wait for anything but an index.
 
-Generous rather than tight: a warm search is under ten
-milliseconds, but the first one against a vault loads the model,
-which is 0.12 s for the small English model and 1.6 s for the
-multilingual ones."
+Generous, not tight.  A warm search takes under ten milliseconds,
+but the first search against a vault loads the model, which takes
+0.12 s for the small English model and 1.6 s for the multilingual
+ones."
   :type 'natnum)
 
 (defcustom org-semantic-index-timeout 7200
   "Seconds to wait for an index.
 
-A full semantic index of a thousand notes is minutes, and of a
-large vault on a large model can be much longer; only the first
-one is, since every later run touches the notes that changed.
-This exists because jsonrpc.el needs a number, not because the
-number means anything -- progress reports say what is happening,
-and `org-semantic-cancel' is how a run is stopped."
+A full semantic index of a thousand notes takes minutes, and a
+large vault on a large model takes longer.  Only the first run
+does: a later run touches the notes that changed.
+
+The number is large because jsonrpc.el needs one.  Progress
+reports say what is happening, and `org-semantic-cancel' stops a
+run."
   :type 'natnum)
 
 
@@ -276,27 +236,21 @@ that already tracks which collection of notes is current:
         (lambda () (and vulpea-vault-directory
                         (expand-file-name vulpea-vault-directory))))
 
-It is asked on every question about a vault, so keep it to a
-variable lookup; and it is your code, so an error in it is left to
-signal rather than quietly treated as \"no vault\".  Returning nil
-is how it says there is nothing open.
+It is called for every question about a vault, so keep it to a
+variable lookup.  It is your code, so an error in it signals.
+Return nil to say that no vault is open.
 
-A function is deliberately legal only here, never in a
-`.dir-locals.el': `safe-local-variable' refuses one, since a
-directory you merely visit could otherwise run whatever it liked.
-A declaration says which directory, never how to work it out.
+A function is legal only here, never in a `.dir-locals.el'.
+`safe-local-variable' refuses one, because a directory you visit
+must not run code.  A declaration says which directory, never how
+to work it out.
 
-Those, and the `.org-semantic' directory is *not* consulted: it
-holds derived data, its location is not the vault's to promise, and
-a vault found that way would be found on one machine and not on
-another that keeps its indexes elsewhere -- silently answering with
-a different vault rather than with none."
-  ;; `t' and a relative directory are here because Emacs checks a
-  ;; directory-local value against this type and warns when it does not fit --
-  ;; so a type that admitted only what makes sense *globally* complained about
-  ;; the very declaration the docstring above tells a vault to write, on merely
-  ;; visiting a note.  What is legal where is the docstring's business; this is
-  ;; the set of values that exist.
+The `.org-semantic' directory is not consulted.  It holds derived
+data and may sit anywhere, so the same notes would be a vault on
+one machine and not on another."
+  ;; `t' and a relative directory are in the type because Emacs checks a
+  ;; directory-local value against it and warns on a value it does not
+  ;; admit.  Which values are legal where is the docstring's business.
   :type '(choice (const :tag "No vault unless one declares itself" nil)
                  (directory :tag "This vault, unless one declares itself")
                  (function :tag "Worked out by this function (globally only)")
@@ -307,63 +261,46 @@ a different vault rather than with none."
   "Return the vault root BUFFER belongs to, or nil.
 
 BUFFER defaults to the current one.  The answer is absolute and has
-no trailing slash, which is also how it is spelled on the wire: the
-server keys what it holds by that string, so `close' and `status'
-find a vault only when it is named the same way every time.
+no trailing slash, which is how it is spelled on the wire.  The
+server keys what it holds by that string.
 
 Two ways to be a vault, in this order.  The buffer carries
-`org-semantic-vault-root', because Emacs applied the vault's
-`.dir-locals.el' when the note was opened -- or when Dired opened
-the directory, which does the same.  Failing that, the global value
-of the same setting, which is the one-vault answer and the
-somewhere-else answer at once, and which may be a function when the
-answer has to be worked out -- see that variable.
+`org-semantic-vault-root', which Emacs applied from the vault's
+`.dir-locals.el'.  Failing that, the global value of the same
+setting, which may be a function.
 
-A function that signals is left to signal.  It is the caller's own
-code and a broken vault is worth seeing, so there is nothing here
-that quietly falls back to another answer.
+A function that signals is left to signal.  Nothing here falls back
+to another answer.
 
-Nothing here searches the filesystem for a vault; see
-`org-semantic-vault-root' for why the `.org-semantic' directory is
-not evidence."
+Nothing here searches the filesystem for a vault."
   (let* ((buffer (or buffer (current-buffer)))
-         ;; A *declaration* is what counts, and `buffer-local-value'
-         ;; cannot say whether there is one: with a global value set it
-         ;; answers with that, which would claim the default vault for
-         ;; every note in every undeclared one.
+         ;; `local-variable-p' first: `buffer-local-value' cannot tell a
+         ;; declaration from the global value, and would give the default
+         ;; vault to every note in an undeclared one.
          (declared (and (local-variable-p 'org-semantic-vault-root buffer)
                         (buffer-local-value 'org-semantic-vault-root buffer)))
-         ;; A declaration says *where*, never how to work it out, so a
-         ;; function is not one.  `safe-local-variable' already refuses to
-         ;; apply one from a file; this covers the value being marked safe
-         ;; by hand, where the branch below would otherwise read a function
-         ;; as t and answer with the declaring directory.
+         ;; A function is not a declaration.  `safe-local-variable' refuses
+         ;; one from a file; this covers a value marked safe by hand, which
+         ;; the branch below would read as t.
          (declared (unless (functionp declared) declared))
-         ;; The global value, and `default-value' is what says so.  Reading
-         ;; the variable plainly would answer with the buffer-local binding
-         ;; whenever there is one -- which is exactly the case reached here,
-         ;; a declaration that was not one, where it would then consult the
-         ;; very value just refused.
+         ;; `default-value', not the variable: reading it plainly answers
+         ;; with the buffer-local binding, which is the value just refused.
          (global (default-value 'org-semantic-vault-root)))
     (cond
-     ;; Both declared forms are relative to where the declaration came
-     ;; from -- the nearest `.dir-locals.el', which is the only one Emacs
-     ;; reads: it uses that file and does not merge.  Resolving a
-     ;; relative root against the buffer's own directory instead would
-     ;; name notes/notes when asked about a note in notes/.
+     ;; Both declared forms are relative to the nearest `.dir-locals.el',
+     ;; which is the only one Emacs reads.  Resolving against the buffer's
+     ;; own directory would answer notes/notes for a note in notes/.
      (declared
       (let* ((dir (with-current-buffer buffer default-directory))
              (home (locate-dominating-file dir ".dir-locals.el")))
         (cond
          ((stringp declared)
           (org-semantic-canonical-vault (expand-file-name declared (or home dir))))
-         ;; t can mean nothing else, so with no file to have said it
-         ;; there is no vault to name.
+         ;; With no file to have said t, there is no vault to name.
          (home (org-semantic-canonical-vault home)))))
-     ;; Asked before the string case, since a function is not one.  What it
-     ;; returns is read exactly as a global string would be -- expanded, so a
-     ;; caller may answer `~/notes' -- and nil is "no vault here", which is a
-     ;; real answer rather than a failure: a client with nothing open says so.
+     ;; Before the string case, because a function is not a string.  What
+     ;; it returns is expanded, so it may answer `~/notes', and nil means
+     ;; that no vault is open.
      ((functionp global)
       (let ((answer (funcall global)))
         (when (stringp answer)
@@ -374,19 +311,16 @@ not evidence."
 (defun org-semantic-notes-root (vault)
   "Where VAULT's notes are: VAULT itself, or what its `vault.json' says.
 
-A vault directory is where its *index* lives, and the notes are
-inside it unless `.org-semantic/vault.json' names somewhere else --
-for notes in a synced folder that should not have vectors rewritten
-under it, or for several vaults keeping their indexes together.
+A vault directory holds the index.  The notes are inside it unless
+`.org-semantic/vault.json' names another directory, which is for
+notes in a synced folder, or for several vaults that keep their
+indexes together.
 
-The server is the authority on this and answers it in `status'.
-This reads the one key instead, because the caller is
-`after-save-hook': a round trip there would start the server for any
-org file saved anywhere, and the question being asked is only
-whether to bother it at all.  Anything absent, unreadable or silent
-answers VAULT, which is the default the server applies too.
-
-Nothing here decides what is indexed.  It decides what we ask about."
+The server is the authority and answers this in `status'.  This
+reads the one key instead, because the caller is `after-save-hook',
+where a round trip would start the server for any org file saved
+anywhere.  A file that is absent, unreadable or silent answers
+VAULT, which is also the server's default."
   (let ((said (expand-file-name ".org-semantic/vault.json" vault)))
     (or (and (file-readable-p said)
              (ignore-errors
@@ -405,8 +339,8 @@ Nothing here decides what is indexed.  It decides what we ask about."
   "Return the vault BUFFER belongs to, or signal an error saying it has none.
 BUFFER is as in `org-semantic-vault'."
   (or (org-semantic-vault buffer)
-      ;; Naming the setting rather than the state, because the state is
-      ;; that nothing was set: there is no file to go and look at.
+      ;; The message names the setting, because nothing was set: there
+      ;; is no file to go and look at.
       (user-error
        (concat "No org-semantic vault for %s: set org-semantic-vault-root, "
                "or declare it in the vault's .dir-locals.el")
@@ -416,17 +350,12 @@ BUFFER is as in `org-semantic-vault'."
   "Return DIR as the server will be asked about it.
 
 Resolved through `file-truename' and left without a trailing
-slash, so that one vault reached two ways -- through a symlink,
-say, or as /tmp against /private/tmp -- is one key rather than
-two.
+slash, so that one vault reached two ways is one key.  A symlink,
+or /tmp against /private/tmp, is the usual case.
 
-Public because an integration needs it: the server keys everything
-it holds by the string it was given, so `org-semantic-close' and
-`org-semantic-status' find a vault only when it is spelled the way
-`org-semantic-vault' spelled it.  A caller naming a vault of its own
--- from a project root, a bookmark, or a vault some other package
-knows about -- has to agree with that, and the only alternative to
-this function is a second copy of it that can fall out of step."
+Public because an integration needs it.  The server keys what it
+holds by the string it was given, so a caller that names a vault of
+its own must spell it the same way."
   (directory-file-name (file-truename (expand-file-name dir))))
 
 (define-obsolete-function-alias 'org-semantic--canonical
@@ -448,9 +377,9 @@ Branch on this and never on the message.  The kinds, and what
 each promises to carry in `org-semantic-error-data':
 
   no-index      target, remedy, and built/model where known
-  model-missing target, model, remedy -- the index is here and the
-                model that built it is not downloaded, so the search
-                refused rather than fetching it inside your query
+  model-missing target, model, remedy.  The index is here and its
+                model is not downloaded, so the search refused
+                instead of fetching it
   index-layout  target, found, expected, remedy
   index-corrupt target, chunks, vectors, remedy
   config-drift  target, changed (setting names), remedy
@@ -458,8 +387,8 @@ each promises to carry in `org-semantic-error-data':
   ambiguous-model  built
   indexing      remedy (\"wait\")
 
-`remedy' is the machine form -- \"index\", \"reindex-full\" or
-\"wait\" -- so a client never parses prose to know which call to
+`remedy' is the machine form, \"index\", \"reindex-full\" or
+\"wait\", so a client never parses prose to find which call to
 offer.  Nil means there is nothing to decide: show the message."
   (nth 2 err))
 
@@ -502,11 +431,11 @@ is.")
 (defvar org-semantic--starting nil
   "Non-nil while the handshake is in flight.
 
-The server's transport accepts nothing between the `initialize'
-request and the `initialized' notification -- anything else is a
-protocol error and it exits -- so the handshake is done
-synchronously and this keeps a timer that fires inside it from
-starting a second server or jumping the queue.")
+The server accepts nothing between the `initialize' request and
+the `initialized' notification: anything else is a protocol error
+and it exits.  The handshake is therefore synchronous, and this
+stops a timer that fires inside it from starting a second server
+or sending a request first.")
 
 (defvar org-semantic--watchers (make-hash-table :test 'eql)
   "Progress callbacks, keyed by the request id they report under.")
@@ -522,20 +451,19 @@ starting a second server or jumping the queue.")
 
 (defconst org-semantic--build-url
   "https://alberti42.github.io/org-semantic/#build-from-source"
-  "The manual on building it yourself, which is the answer to two questions.
+  "The manual on building the binary yourself.
 
-A platform with no published binary has nowhere else to go, and
-somebody who would rather not run one they did not compile has
-asked a different question with the same answer.")
+The answer for a platform with no published build, and for anyone
+who prefers to compile what they run.")
 
 (defun org-semantic--installed-binary ()
   "Return the binary under `org-semantic-install-directory', or nil.
 
-`file-regular-p' as well as `file-executable-p', because the latter
-says yes to a *directory* -- so a stray directory of that name would
-otherwise be handed to `make-process' as the program to run.  It
-follows symlinks, which is the point: linking a development build in
-here is how to test the installed path without installing anything."
+`file-regular-p' as well as `file-executable-p': the second answers
+t for a directory, which `make-process' would then try to run.
+
+Symlinks are followed.  Link a development build in here to test
+the installed path without installing anything."
   (let ((path (expand-file-name (if (eq system-type 'windows-nt)
                                     "org-semantic.exe"
                                   "org-semantic")
@@ -552,10 +480,9 @@ whatever is being typed, and return on the next save.")
 (defun org-semantic--binary ()
   "Return the org-semantic binary, or offer to get one and signal if not.
 
-Three places, in the order of how deliberately each was chosen: an
-absolute `org-semantic-executable', then our own install directory,
-then variable `exec-path'.  Finding none of them is a question
-rather than a dead end -- see `org-semantic--offer-binary'."
+Three places, in order: an absolute `org-semantic-executable', the
+install directory, then variable `exec-path'.  Finding none of them
+raises a question; see `org-semantic--offer-binary'."
   (or (and (file-name-absolute-p org-semantic-executable)
            (file-executable-p org-semantic-executable)
            org-semantic-executable)
@@ -619,14 +546,9 @@ escaping \\`C-g' is \"Error running timer\"."
   "https://github.com/alberti42/org-semantic/releases/download/v%s/%s"
   "Where a release asset is, given a version and an asset name.
 
-The tag is `v' and the release version, which is this package's own:
-the release workflow refuses a tag whose name does not equal
-`org-semantic-version', so a package always knows which release
-matches it.  That is also what makes fetching *that* release safe
-rather than fetching the newest one -- the same workflow refuses a
-release whose binary is below `org-semantic-minimum-binary-version',
-so the matching release cannot be one this package would then warn
-about.")
+The tag is `v' and the release version, which is this package's
+own.  The release workflow refuses a tag that does not equal
+`org-semantic-version', so the matching release always exists.")
 
 (defun org-semantic--release-platform (&optional configuration)
   "The platform token this release names its binary for, or nil.
@@ -635,13 +557,10 @@ CONFIGURATION defaults to `system-configuration', which names the
 platform Emacs itself was built for.  The tokens are the ones in the
 release workflow's build matrix.
 
-Nil is a real answer and not a failure to recognise something.
-There is deliberately no Intel macOS build: ONNX Runtime publishes
-no `x86_64-apple-darwin', so `ort' cannot link one, and an asset
-that does not exist must be refused here rather than 404 later.  On
-Apple Silicon that is also the answer for an Emacs built for x86_64
-and running under Rosetta, which reports itself as Intel and cannot
-be told apart from the real thing without asking the kernel."
+Nil is an answer, not a failure.  There is no Intel macOS build,
+because ONNX Runtime publishes no `x86_64-apple-darwin'.  Nil is
+also the answer for an Emacs built for x86_64 and running under
+Rosetta, which reports itself as Intel."
   (let* ((c (or configuration system-configuration))
          (arm (string-match-p "\\`\\(aarch64\\|arm64\\)" c))
          (intel (string-match-p "\\`x86_64" c)))
@@ -654,23 +573,18 @@ be told apart from the real thing without asking the kernel."
 (defun org-semantic--release-asset (&optional configuration version)
   "The release archive built for CONFIGURATION, or nil if there is none.
 
-VERSION defaults to `org-semantic-version'.  Every asset carries it,
-so a downloaded file says which release it is from and a
-`SHA256SUMS' line is unambiguous between releases.
+VERSION defaults to `org-semantic-version'.  Every asset carries
+it, so a file says which release it came from and a `SHA256SUMS'
+line is unambiguous between releases.
 
-`bin' rather than `cli': the same binary is the server the Emacs
-package drives, and this project calls Emacs and the CLI two ways of
-using it -- so a name mentioning the CLI would read as the download
-an Emacs user does not need, when it is the only thing that makes
-their package work.  `bin' against `src' says what is inside and
-claims nothing about which interface it is for.
+The name says `bin' against `src', and not `cli': the same binary
+is the server this package drives.
 
-Each archive holds one binary called `org-semantic' -- or
-`org-semantic.exe' -- at its top level, already named what it should
-be called on PATH.
+Each archive holds one binary at its top level, called
+`org-semantic' or `org-semantic.exe'.
 
-Nil when this platform has no build; see
-`org-semantic--release-platform', which decides that."
+Nil when this platform has no build.  See
+`org-semantic--release-platform'."
   (let ((platform (org-semantic--release-platform configuration)))
     (when platform
       (format "org-semantic-%s-bin-%s.%s"
@@ -681,11 +595,9 @@ Nil when this platform has no build; see
 (defun org-semantic--verify-checksum (file sums asset)
   "Signal unless FILE hashes to what SUMS records for ASSET.
 
-SUMS is the release's own `SHA256SUMS', which is published beside
-the archives.  This is an executable being fetched over the network
-and then run, so the one check available is worth making; a
-mismatch is far more likely to be a truncated download than an
-attack, and both want the same refusal."
+SUMS is the release's own `SHA256SUMS', published beside the
+archives.  A mismatch is more often a truncated download than an
+attack, and both get the same refusal."
   (let ((want (with-temp-buffer
                 (insert-file-contents sums)
                 (goto-char (point-min))
@@ -707,22 +619,19 @@ attack, and both want the same refusal."
 (defun org-semantic-binary-install (&optional version)
   "Download the org-semantic binary for this platform and install it.
 
-It goes in `org-semantic-install-directory', which is where
-`org-semantic--binary' looks before variable `exec-path' -- so
-nothing needs configuring afterwards, and a binary you installed
-for shell use is not disturbed.
+It goes in `org-semantic-install-directory', which
+`org-semantic--binary' searches before variable `exec-path'.
+Nothing needs configuring afterwards, and a binary installed for
+shell use is not touched.
 
 VERSION is the release to take, and defaults to
-`org-semantic-version', this package's own.  Taking the matching
-release rather than the newest one is what makes this predictable:
-the two ship together, so the binary that arrives is the one this
-elisp was written against.
+`org-semantic-version'.  The matching release is used, not the
+newest one, so the binary that arrives is the one this elisp was
+written against.
 
 The archive is checked against the release's own `SHA256SUMS'
-before anything is unpacked, and the result is asked for its
-version before this returns -- an executable that arrived over the
-network and cannot say what it is has not been installed, it has
-merely been written to disk."
+before it is unpacked, and the result is asked for its version
+before this returns."
   (interactive)
   (let* ((version (or version org-semantic-version))
          (asset (or (org-semantic--release-asset nil version)
@@ -742,28 +651,22 @@ https://github.com/alberti42/org-semantic')"
     (unwind-protect
         (let ((archive (expand-file-name asset staging))
               (sums (expand-file-name "SHA256SUMS" staging))
-              ;; **The asset is named `.tar.gz', and that is enough to corrupt
-              ;; it.**  `url-copy-file' writes through `write-region', which
-              ;; jka-compr claims by file *name* -- so the bytes off the
-              ;; network get gzipped a second time on the way to disk, the
-              ;; checksum then fails, and the message blames the download.
-              ;; Found by a test writing a fixture and being told it was
-              ;; "compressing" it.
+              ;; The asset is named `.tar.gz', which is enough to corrupt
+              ;; it: `url-copy-file' writes through `write-region', and
+              ;; jka-compr claims the file by name and gzips the bytes a
+              ;; second time.  The checksum then fails.
               ;;
-              ;; No `require': the variable is preloaded and
-              ;; `auto-compression-mode' is on by default, which is what makes
-              ;; the hazard real in the first place.  Requiring `jka-compr'
-              ;; would load a file Emacs deliberately leaves until something
+              ;; No `require': the variable is preloaded, and requiring
+              ;; `jka-compr' would load a file Emacs leaves until something
               ;; opens a compressed file.
               (jka-compr-inhibit t))
           (message "org-semantic: downloading %s %s..." asset version)
           (url-copy-file (format org-semantic--release-url version asset) archive t)
           (url-copy-file (format org-semantic--release-url version "SHA256SUMS") sums t)
           (org-semantic--verify-checksum archive sums asset)
-          ;; `tar -xf' reads both, since it detects the compression itself
-          ;; and the bsdtar that ships with macOS and Windows also reads
-          ;; zip.  Only Windows is published as a zip, and only Windows and
-          ;; macOS have bsdtar, so the one command covers every asset.
+          ;; `tar -xf' reads both formats: it detects the compression, and
+          ;; the bsdtar on macOS and Windows also reads zip.  Only Windows
+          ;; is published as a zip, so one command covers every asset.
           (unless (zerop (let ((default-directory (file-name-as-directory staging)))
                            (process-file "tar" nil nil nil "-xf" archive)))
             (error "Could not unpack %s" asset))
@@ -772,9 +675,8 @@ https://github.com/alberti42/org-semantic')"
               (error "%s did not contain %s" asset (file-name-nondirectory destination)))
             (make-directory org-semantic-install-directory t)
             (copy-file unpacked destination t)
-            ;; The zip carries no mode bits, so the binary arrives
-            ;; unexecutable on the one platform that would not notice until
-            ;; `make-process' failed.  Set them whatever the archive said.
+            ;; The zip carries no mode bits, so the binary arrives without
+            ;; the execute bit.  Set the modes whatever the archive said.
             (set-file-modes destination #o755)))
       (delete-directory staging t))
     (let ((org-semantic-executable destination))
@@ -789,8 +691,9 @@ https://github.com/alberti42/org-semantic')"
 (defun org-semantic-binary-version ()
   "Return the version of the binary on disk, or nil if it will not say.
 
-The question to ask *before* starting anything, and a different
-one from `org-semantic--server-version'."
+Ask this before starting a server.  `org-semantic--server-version'
+answers for a process that is already running, which can be a
+different release."
   (with-temp-buffer
     (when (zerop (process-file (org-semantic--binary) nil t nil "--version"))
       (string-trim (buffer-string)))))
@@ -798,17 +701,15 @@ one from `org-semantic--server-version'."
 (defun org-semantic--too-old-p (found)
   "Whether FOUND is a binary version older than this package can use.
 
-Nil for a version at or above the minimum, and nil for nil: a
-binary that will not say what it is has not said it is too old,
-and refusing to work with it on that basis would be guessing."
+Nil for a version at or above the minimum, and nil for nil.  A
+binary that will not say what it is has not said it is too old."
   (and found (ignore-errors (version< found org-semantic-minimum-binary-version))))
 
 (defun org-semantic--check-version (found where)
   "Warn when FOUND is too old for this package.  WHERE says what was asked.
 
-Only the lower bound is checked; see
-`org-semantic-minimum-binary-version' for why a newer binary is
-silent rather than suspicious."
+Only the lower bound is checked.  A newer binary is not reported;
+see `org-semantic-minimum-binary-version'."
   (when (org-semantic--too-old-p found)
     (display-warning
      'org-semantic
@@ -840,17 +741,14 @@ The only one it sends is `$/progress'."
 (defun org-semantic--process-environment ()
   "`process-environment' for the server, honouring `org-semantic-cache-home'.
 
-Its own function so a test can hold the two things that are easy
-to get wrong and impossible to notice.
+The path is expanded here, because the server does not expand it.
+The variable becomes a `PathBuf' verbatim, so a literal \"~/cache\"
+would create a directory named \"~\" in the server's working
+directory and succeed.
 
-The path is expanded, because the server does not do it: the
-variable becomes a `PathBuf' verbatim, so a literal \"~/cache\"
-would create a directory *named* \"~\" beside wherever the server
-happened to be started, download gigabytes into it, and succeed.
-
-Nil sends nothing rather than an empty value.  Setting it to \"\"
-would not mean \"inherit\" on the far side -- it would resolve the
-cache against the current directory."
+Nil sends nothing.  An empty value would not mean \"inherit\" on
+the far side: it would resolve the cache against the current
+directory."
   (if org-semantic-cache-home
       (cons (concat "ORG_SEMANTIC_CACHE_HOME="
                     (expand-file-name org-semantic-cache-home))
@@ -861,12 +759,9 @@ cache against the current directory."
   "Start a server, complete its handshake, and return the connection."
   (let* ((binary (org-semantic--binary))
          (name "org-semantic")
-         ;; jsonrpc.el creates the stderr buffer under exactly this name
-         ;; before it calls us, and expects `make-process' to pick that
-         ;; buffer up -- an undocumented coupling it says so about
-         ;; itself.  Nothing writes to stderr under `serve', but a
-         ;; merged stream would splice bytes into the Content-Length
-         ;; framing, so this is worth getting right rather than lucky.
+         ;; jsonrpc.el creates the stderr buffer under this name and
+         ;; expects `make-process' to use it.  A merged stream would put
+         ;; bytes into the Content-Length framing.
          (stderr (format "*%s stderr*" name))
          connection)
     (org-semantic--check-version (org-semantic-binary-version) binary)
@@ -889,15 +784,14 @@ cache against the current directory."
                              :stderr (get-buffer-create stderr)
                              :noquery t)))))
     ;; Synchronously, and before this connection is visible to anything
-    ;; else: `initialized' has to be the very next message the server
-    ;; reads, so no request may slip in front of it.
+    ;; else.  `initialized' must be the next message the server reads, so
+    ;; no request may go in front of it.
     (let ((org-semantic--starting t))
       (condition-case err
           (let ((info (jsonrpc-request
                        connection "initialize"
-                       ;; Nothing is negotiated here; the handshake is a
-                       ;; session start, and where the server says which
-                       ;; release it is.
+                       ;; Nothing is negotiated.  The handshake starts the
+                       ;; session and reports the server's release.
                        (list :capabilities (make-hash-table :test 'equal))
                        :timeout org-semantic-timeout)))
             (jsonrpc-notify connection "initialized" :jsonrpc-omit)
@@ -922,17 +816,15 @@ cache against the current directory."
 (defun org-semantic-quit (&optional hard)
   "Stop the server, letting an index in flight finish first.
 
-`shutdown' and `exit' are two steps and the wait is the first
-one: it lets a run still going answer under its own id before the
-process ends.  With HARD, or a prefix argument, only `exit' is
-sent, which ends the process at once and abandons any run --
-which is safe, since an index is committed by a single rename, so
-an abandoned run leaves the previous one exactly as it was.
+`shutdown' and `exit' are two steps.  The first lets a run that is
+still going answer under its own id.  With HARD, or a prefix
+argument, only `exit' is sent: the process ends at once and
+abandons any run.  That is safe, because an index is committed by
+one rename, so an abandoned run leaves the previous index as it
+was.
 
-Even a hard quit sends something, rather than deleting the
-process: `exit' is what makes the server's reader stop, so it ends
-cleanly instead of on a signal.  A server that has stopped reading
-is deleted anyway, with a warning, by jsonrpc.el."
+A hard quit still sends `exit' rather than deleting the process.
+`exit' stops the server's reader, so it ends cleanly."
   (interactive "P")
   ;; `os-' again: read by the callbacks below, after this has returned.
   (let ((os-connection org-semantic--connection))
@@ -971,11 +863,10 @@ costs no model load."
 (defun org-semantic--params (&rest pairs)
   "Build a JSON object from PAIRS, dropping every key whose value is nil.
 
-Dropped rather than sent as null, so the server applies its own
-default: a nil `config' would arrive as JSON null and fail to
-parse, where an absent one means \"whatever the index was built
-under\".  Booleans that are meant to be false must therefore be
-`:json-false', which is why the callers here spell them out."
+Dropped, not sent as null, so the server applies its own default.
+A nil `config' would arrive as JSON null and fail to parse, where
+an absent one means \"whatever the index was built under\".  A
+boolean that must be false is therefore `:json-false'."
   (let (out)
     (while pairs
       (let ((key (pop pairs)) (value (pop pairs)))
@@ -994,9 +885,9 @@ JSON false arrives as `:json-false', which is not nil."
 (defun org-semantic--call (method params &optional timeout)
   "Send METHOD with PARAMS and wait TIMEOUT seconds for the reply.
 
-Synchronous, so this blocks Emacs -- fine for a search, which is
-milliseconds, and never right for an index.  A failure arrives as
-`org-semantic-error', labelled."
+Synchronous, so it blocks Emacs.  Use it for a search, which takes
+milliseconds, and never for an index.  A failure arrives as a
+labelled `org-semantic-error'."
   (condition-case err
       (jsonrpc-request (org-semantic-connection) method params
                        :timeout (or timeout org-semantic-timeout))
@@ -1016,15 +907,12 @@ rather than dropped.  PROGRESS, if given, is called with each
 
 The id is what `$/cancelRequest' names, so a caller that may want
 to stop the work keeps it."
-  ;; The variables these callbacks close over are spelled `os-' on
-  ;; purpose.  A callback outlives the call that made it, so what it
-  ;; closes over has to be lexical -- and a name someone has `defvar'-ed
-  ;; anywhere in their configuration is dynamic instead, and unbound
-  ;; again by the time the reply arrives.  `vault' and `id' are exactly
-  ;; the names a note-taking configuration is likely to have taken, and
-  ;; the failure is silent: the request is answered, the bookkeeping just
-  ;; keys itself on whatever the global happened to hold.  Found this way
-  ;; by a script that had `(defvar vault ...)' at the top.
+  ;; `os-' prefixes: a callback outlives the call, so what it closes over
+  ;; must be lexical.  A name that anything has `defvar'-ed is dynamic
+  ;; instead, and unbound again before the reply arrives.  `vault' and
+  ;; `id' are names a note-taking configuration is likely to have taken,
+  ;; and the failure is silent: the request is answered, and the
+  ;; bookkeeping keys itself on whatever the global held.
   (let* ((connection (org-semantic-connection))
          (os-id nil)
          (os-forget (lambda () (remhash os-id org-semantic--watchers))))
@@ -1044,10 +932,8 @@ to stop the work keeps it."
                                (list :message (format "%s timed out" method))
                                failure)))))
     ;; Registered after the request went out, which is the only order
-    ;; available: jsonrpc.el assigns the id.  A report that beats this
-    ;; line is therefore dropped -- which is within the contract, since
-    ;; reports may be dropped anyway and the reply is what always
-    ;; arrives.
+    ;; available: jsonrpc.el assigns the id.  A report that arrives
+    ;; before this line is dropped, which the contract allows.
     (when progress (puthash os-id progress org-semantic--watchers))
     os-id))
 
@@ -1066,29 +952,27 @@ to stop the work keeps it."
   "Search VAULT for QUERY and return the reply, waiting for it.
 
 The reply is a plist: `:hits', a vector of hits, and `:indexing',
-true when an index was running -- in which case the list is the
-version committed before it and about two seconds slower than a
-warm query.  `org-semantic-hits' unpacks the first;
-`org-semantic-true-p' reads the second.
+true when an index was running.  The list is then the version
+committed before that index, and the search is slower.
+`org-semantic-hits' unpacks the first, `org-semantic-true-p' reads
+the second.
 
 VAULT defaults to the current buffer's.  MODE is \"semantic\"
-\(the default) or \"lexical\"; the two take the same request and
-return the same shape, so a command can offer them as one with a
-toggle and never branch on the reply.
+\(the default) or \"lexical\".  The two take the same request and
+return the same shape, so a caller never branches on the reply.
 
-K bounds how many notes may appear, PER-FILE how many passages
-any one of them may contribute.  Both matter: count only notes
-and a vault kept in three large files answers a K of 50 with nine
-hits that no argument can raise.
+K bounds how many notes may appear, PER-FILE how many passages any
+one of them may contribute.  Set both: with PER-FILE at its
+default, a vault kept in three large files answers a K of 50 with
+nine hits.
 
 MERGE-BY-SECTION folds a section that answered as several
 passages into one hit.  ANY makes a lexical query match notes
 carrying any of its terms rather than all.  MODEL and CONFIG
 default to `org-semantic-model' and `org-semantic-config'.
 
-An empty QUERY returns no hits rather than an error, so it is
-safe to send on every keystroke; debouncing is the caller's
-business."
+An empty QUERY returns no hits and is not an error, so it is safe
+to send on every keystroke.  Debouncing is the caller's business."
   (org-semantic--call
    "search"
    (org-semantic--params
@@ -1107,12 +991,10 @@ business."
 Arguments are as in `org-semantic-search'; FAILURE is called with
 the error object if there is one.  Returns the request id.
 
-Nothing on the server supersedes a search: ten keystrokes are ten
-replies, all of them answered, in order.  So the caller keeps at
-most one search in flight and holds the latest query, firing it
-from the previous reply -- which bounds the queue at one with no
-protocol at all, and is the only thing that behaves during a
-rebuild, where each search waits out an embedding batch."
+The server supersedes no search: ten keystrokes get ten replies,
+in order.  Keep one search in flight, hold the latest query, and
+send it from the previous reply.  See `org-semantic-ui-driver',
+which does this."
   (org-semantic--call-async
    "search"
    (org-semantic--params
@@ -1136,11 +1018,10 @@ rebuild, where each search waits out an embedding batch."
   "The line to go to for HIT.
 
 The heading that owns the passage, counted over the raw file, so
-arriving there is arriving on the section -- org supplies the
-subtree, the properties and anything else from the buffer.  This
-plus `org-semantic-hit-file' is the whole address of a hit; `:id'
-is an extra for vaults that carry ids, and in a file of many
-notes every hit may carry the same one."
+point lands on the section and org supplies the subtree and the
+properties.  This and `org-semantic-hit-file' are the whole address
+of a hit.  Do not use `:id': in a file of many notes, every hit can
+carry the same one."
   (or (plist-get hit :headingLine) 1))
 
 (defun org-semantic-hit-path (hit)
@@ -1151,11 +1032,9 @@ What to show; `org-semantic-hit-file' is what to open."
 (defun org-semantic-hit-title (hit)
   "The name of the note HIT is in.
 
-Its `#+title:' when it has one, and otherwise its filename without
-the extension -- the server settles that, since it is the same
-substitution it makes when building the heading breadcrumb.  Empty
-where a note is somehow both untitled and unnamed, so treat it as a
-string that may be blank rather than as one that is always there."
+Its `#+title:' if it has one, and otherwise its filename without
+the extension.  The server decides this.  It can be empty, so
+treat it as a string that may be blank."
   (plist-get hit :title))
 
 (defun org-semantic-hit-start-line (hit)
@@ -1169,26 +1048,24 @@ string that may be blank rather than as one that is always there."
 (defun org-semantic-hit-text (hit)
   "The passage HIT matched on, as the note's own lines.
 
-Read back from the note when the search was answered rather than
-stored in the index, so it is the text as it is now, code blocks
-and all.  It is exactly the lines `org-semantic-hit-start-line' to
-`org-semantic-hit-end-line' joined with newlines -- so its nth
-line is line START-LINE + n of the note, which is what lets a
-client number them, jump to one, or write one back.
+Read from the note when the search was answered, not stored in the
+index, so it is the text as it is now.  It is the lines
+`org-semantic-hit-start-line' to `org-semantic-hit-end-line'
+joined with newlines: its nth line is line START-LINE + n of the
+note.  A client can therefore number the lines, jump to one, or
+write one back.
 
-Empty when the note has since been cut shorter than the span.
-That is the one case where the correspondence fails, and the
-caller has to notice it: an empty string against a span of several
-lines is not a passage of one blank line."
+Empty when the note has been cut shorter than the span.  The
+caller must test for this: an empty string against a span of
+several lines is not a passage of one blank line."
   (plist-get hit :text))
 
 ;;;###autoload
 (defun org-semantic-visit-hit (hit &optional other-window)
   "Open HIT: its file, at its heading.  In OTHER-WINDOW if non-nil.
 
-Deliberately a jump to a line rather than a search for a heading:
-the text was recorded before the user's last edit, and the line
-was not."
+It goes to a line, and does not search for a heading: the recorded
+text can be older than the note."
   (let ((buffer (find-file-noselect (org-semantic-hit-file hit))))
     (if other-window (pop-to-buffer buffer) (pop-to-buffer-same-window buffer))
     (goto-char (point-min))
@@ -1212,25 +1089,24 @@ also how a changed policy is agreed to; REHASH re-reads every
 note rather than trusting its timestamp.  MODEL, CONFIG and
 CONSERVE-MEMORY default to the corresponding settings.
 
-SUCCESS is called with what each index did, as numbers, plus any
-`remarks' -- warnings that did not stop the run, which ride the
-reply because stderr does not reach us.  FAILURE is called with
-the error object.  PROGRESS is called with each report; pass
+SUCCESS is called with what each index did, as numbers, and with
+any `remarks': warnings that did not stop the run, which travel on
+the reply because stderr does not reach us.  FAILURE is called
+with the error object.  PROGRESS is called with each report; pass
 `org-semantic-report-message' to say where the run has got to in
 the echo area.
 
-Only one index per vault runs at a time: a second is refused with
-kind `indexing' rather than queued, so coalesce on this side and
-re-fire from the reply.  A different vault is not refused --
-though rebuilding several at once costs about 665 MB each and
-takes about as long as doing them one after another, so send one,
-wait, send the next.
+Only one index per vault runs at a time.  A second is refused with
+kind `indexing', and is not queued, so coalesce on this side and
+send again from the reply.  A different vault is not refused, but
+rebuilding several at once costs about 665 MB each and is no
+faster than one after another.
 
 The reply ends the run, whatever happened.  Do not wait for a
-final report: reports are thinned by a send-rate floor and any of
-them may be dropped."
-  ;; `os-' for the same reason as in `org-semantic--call-async': these
-  ;; two are read by a callback, long after this call has returned.
+final report: reports are thinned by a send-rate floor, and any of
+them can be dropped."
+  ;; `os-' as in `org-semantic--call-async': a callback reads these two
+  ;; after this call has returned.
   (let* ((os-vault (or vault (org-semantic-vault-or-error)))
          (os-id nil)
          (os-release
@@ -1267,26 +1143,23 @@ them may be dropped."
 (cl-defun org-semantic-download (&key model success failure progress)
   "Fetch MODEL's weights, without waiting, and return the request id.
 
-MODEL is a name from `org-semantic-models' and is required: a
-download belongs to a model rather than to a vault, and the
-`model-missing' error that asks for one carries the name in its
-`data'.
+MODEL is a name from `org-semantic-models' and is required.  A
+download belongs to a model, not to a vault, and the
+`model-missing' error carries the name in its `data'.
 
-SUCCESS is called with `model' and `downloaded' -- the latter nil
-when the weights were already there, so a client can say \"already
-had it\" rather than claiming a download it did not make.  FAILURE
-is called with the error object; PROGRESS with each report, of
-which there is one, announcing the size before the wait.
+SUCCESS is called with `model' and `downloaded'.  The second is
+nil when the weights were already there, so a client does not
+report a download it did not make.  FAILURE is called with the
+error object.  PROGRESS is called with each report, of which there
+is one, giving the size before the wait.
 
-Nothing else happens: no index is built, no vault is touched.
-Search again afterwards, and a vault whose index is missing will
-say so then, as its own question.
+Nothing else happens: no index is built and no vault is touched.
+Search again afterwards.
 
 A second fetch of the same model is refused with kind
-`downloading' rather than queued.  And it cannot be cancelled --
-that wait has no unit boundaries to check a flag between -- so
-give it `org-semantic-index-timeout' rather than the ordinary one:
-a large model is minutes."
+`downloading', and is not queued.  A download cannot be cancelled,
+and a large model takes minutes, so this uses
+`org-semantic-index-timeout'."
   (org-semantic--call-async
    "download"
    (org-semantic--params :model (or model (error "Which model to download?")))
@@ -1298,9 +1171,9 @@ a large model is minutes."
 (defun org-semantic-indexing-p (&optional vault)
   "The id of the index this client started for VAULT, or nil.
 
-About what *we* asked for.  A run started elsewhere -- another
-Emacs, a shell -- is not here; `org-semantic-status' answers that
-about the vault itself."
+About what this client asked for.  A run started by another Emacs
+or by a shell is not here.  `org-semantic-status' answers about the
+vault itself."
   (gethash (or vault (org-semantic-vault-or-error)) org-semantic--runs))
 
 ;;;###autoload
@@ -1308,14 +1181,12 @@ about the vault itself."
   "Stop the index this client started for VAULT.
 
 A run stops at a note boundary and writes nothing, so the index
-already committed is left exactly as it was.  A cancellation for
-a run that has already answered does nothing, rather than
-stopping the next one -- the request carries the id it answers
-under.
+already committed is unchanged.  The request carries the id it
+answers under, so a cancellation for a run that has already
+answered does nothing and cannot stop the next one.
 
-Nothing is cancellable while a model is downloading: that wait
-has no unit boundaries to check a flag between.  Killing the
-process is the only answer there."
+A model download cannot be cancelled.  Killing the process is the
+only answer there."
   (interactive)
   (let* ((vault (or vault (org-semantic-vault-or-error)))
          (id (gethash vault org-semantic--runs)))
@@ -1330,11 +1201,8 @@ process is the only answer there."
 (defun org-semantic-report-message (report)
   "Show REPORT, one `$/progress' value, in the echo area.
 
-Built from the fields that are present rather than from a match
-on the phase, which is how the server prints it too: a phase
-carrying token counts gets a rate, one that cannot be counted at
-all gets its size and a spinner, and neither has to know which
-phases exist."
+Built from the fields that are present, and not from a match on
+the phase, so it needs no list of the phases that exist."
   (let* ((target (plist-get report :target))
          (phase (plist-get report :phase))
          (unit (plist-get report :unit))
@@ -1355,23 +1223,20 @@ phases exist."
 (defun org-semantic--reindex-flags (arg)
   "Return (REHASH . FULL) for the raw prefix argument ARG.
 
-Ordered by what each one costs, since that is what a second `C-u'
-should mean:
+Ordered by what each one costs:
 
-  plain      trust every note's timestamp and size; 0.03 s when
+  plain      trust every note's timestamp and size.  0.03 s when
              nothing changed.
-  \\[universal-argument]        rehash -- read and hash every note, and re-embed the
-             ones whose *content* moved without their stamp
-             moving.  0.09 s of reading on a thousand notes, and
-             the backstop for a timestamp-preserving restore,
-             `rsync --times' or `touch -r'.
-  \\[universal-argument] \\[universal-argument]    full -- rebuild from scratch, which is minutes, and
-             the only thing that re-embeds a corpus.
+  \\[universal-argument]        rehash: read and hash every note, and re-embed the
+             ones whose content moved but whose stamp did not.
+             0.09 s of reading on a thousand notes.  Use it after
+             a timestamp-preserving restore, `rsync --times' or
+             `touch -r'.
+  \\[universal-argument] \\[universal-argument]    full: rebuild from scratch, which takes minutes.
 
-Rehash is not a small full rebuild: it re-reads everything and
-then still re-embeds only what really differs, so it cannot pick
-up a changed policy or a changed language set.  Those are `full',
-and nothing else will do.
+Rehash is not a small full rebuild.  It re-reads every note and
+still re-embeds only what differs, so it cannot pick up a changed
+policy or a changed language set.  Use full for those.
 
 FULL implies rehashing, so the two are never both sent."
   (let ((level (prefix-numeric-value arg)))
@@ -1384,10 +1249,9 @@ FULL implies rehashing, so the two are never both sent."
   "Index the current buffer's vault, reporting progress in the echo area.
 
 Plain, this is incremental: a note whose timestamp and size are
-unchanged is not even read.  ARG escalates that, and the prefixes
-are ordered by cost -- one `C-u' rehashes, two rebuild from
-scratch.  See `org-semantic--reindex-flags' for what each means
-and what only a full rebuild can do."
+unchanged is not read.  ARG does more, and the prefixes are
+ordered by cost: one `C-u' rehashes, two rebuild from scratch.
+See `org-semantic--reindex-flags'."
   (interactive "P")
   ;; `os-' again: read by the callbacks below, after this has returned.
   (let* ((os-vault (org-semantic-vault-or-error))
@@ -1432,24 +1296,20 @@ and what only a full rebuild can do."
 (defcustom org-semantic-auto-reindex-delay 2.0
   "Seconds of quiet after a save before `org-semantic-auto-reindex-mode' runs.
 
-Each save restarts the wait, so saving fifty notes -- which is what
-`save-some-buffers' does -- costs one run rather than fifty.  A run
-of one changed note is about 70 ms, so there is nothing to be
-gained by waiting longer than it takes to stop typing."
+Each save restarts the wait, so `save-some-buffers' over fifty
+notes costs one run.  A run of one changed note takes about 70 ms,
+so a longer delay gains nothing."
   :type 'number)
 
 (defcustom org-semantic-auto-reindex-quietly t
   "Whether `org-semantic-auto-reindex-mode' keeps quiet about having worked.
 
-The point of an automatic reindex is that nobody has to think about
-it, and a line in the echo area after every save is thinking about
-it.
+An automatic reindex should not need attention, and a line in the
+echo area after every save asks for it.
 
-Only about *success*.  A vault with no index to refresh, or a run
-that failed, is said once -- an automatic feature that has stopped
-working is otherwise indistinguishable from one that is working, and
-there is no keystroke that came back empty to make anybody
-suspicious."
+This applies to success only.  A vault with no index to refresh,
+and a run that failed, are said once: an automatic feature that has
+stopped working looks the same as one that is working."
   :type 'boolean)
 
 (defvar org-semantic-auto-reindex--timers (make-hash-table :test 'equal)
@@ -1461,14 +1321,13 @@ suspicious."
 (defun org-semantic-auto-reindex--say (os-vault what message)
   "Say MESSAGE about OS-VAULT once, and remember it as WHAT.
 
-Latched per vault, because everything worth saying here holds until
-somebody acts on it: a vault with no index has none at the next save
-either.  Unlatched, `save-some-buffers' over fifty notes says the
-same sentence fifty times, which is the distraction this mode exists
-not to be.
+Latched per vault, because each condition holds until somebody acts
+on it: a vault with no index still has none at the next save.
+Unlatched, `save-some-buffers' over fifty notes says the same
+sentence fifty times.
 
 WHAT is compared, not the sentence, so a different condition still
-speaks; a run that works clears it."
+speaks.  A run that works clears it."
   (unless (eq what (gethash os-vault org-semantic-auto-reindex--said))
     (puthash os-vault what org-semantic-auto-reindex--said)
     (message "%s" message)))
@@ -1476,17 +1335,16 @@ speaks; a run that works clears it."
 (defun org-semantic-auto-reindex--refreshable (vault)
   "Which of VAULT's indexes an automatic run may refresh, or nil.
 
-Only the ones that already exist.  Saving a note is not a request to
-spend minutes embedding a corpus, and with `org-semantic-index-mode'
-at its default of \"both\" that is exactly what the first automatic
-run in an unindexed vault would be -- with the echo area silenced,
-for a keystroke that was about saving a file.  So a vault with only
-the word index refreshes that one, and a vault with nothing built is
-left to `org-semantic-reindex'.
+Only the indexes that already exist.  Saving a note must not start
+minutes of embedding, which is what the first automatic run in an
+unindexed vault would be with `org-semantic-index-mode' at its
+default of \"both\".  A vault with only the word index refreshes
+that one, and a vault with nothing built is left to
+`org-semantic-reindex'.
 
-Costs one `status', which is milliseconds, and asks every time: a
-negative answer must not be remembered, or building the index would
-not be noticed."
+It costs one `status', which is milliseconds, and asks every time.
+A negative answer must not be cached, or a new index would not be
+noticed."
   (let* ((status (org-semantic-status vault))
          (built-semantic (> (length (append (plist-get status :semantic) nil)) 0))
          (built-lexical (org-semantic-true-p (plist-get status :lexical)))
@@ -1520,10 +1378,9 @@ not be noticed."
 (defun org-semantic-auto-reindex--run (os-vault)
   "Reindex OS-VAULT now, or find out why not.
 
-A run of its own may be in flight -- the server refuses a second one
-per vault rather than queueing it -- and the answer to that is to
-wait and ask again, which also folds every save made while it ran
-into the one run that follows."
+A run may be in flight, and the server refuses a second one per
+vault.  The answer is to wait and ask again, which also folds
+every save made during that run into the run that follows."
   (remhash os-vault org-semantic-auto-reindex--timers)
   (condition-case error
       ;; A missing binary is reported below rather than asked about: this
@@ -1539,9 +1396,9 @@ into the one run that follows."
                (format (concat "org-semantic: %s has no index to keep up to "
                                "date -- M-x org-semantic-reindex builds one")
                        (abbreviate-file-name os-vault)))))))
-    ;; A server that will not start, a binary that is not there: said once,
-    ;; and never signalled.  This runs from a timer, where an error is a
-    ;; backtrace nobody asked for, and it must not stop later saves trying.
+    ;; A server that will not start, or a binary that is not there: said
+    ;; once, and never signalled.  This runs from a timer, and an error
+    ;; there would also stop later saves from trying.
     (error (org-semantic-auto-reindex--say
             os-vault 'broken
             (format "org-semantic: %s" (error-message-string error))))))
@@ -1559,21 +1416,19 @@ into the one run that follows."
   "Arm a reindex, if what was just saved is a note in a vault.
 
 On `after-save-hook', which runs for every save in Emacs, so the
-cheap questions come first.  The vault is worked out from scratch
-each time rather than cached: it is a handful of file names, next to
-nothing beside the write that has just happened, and a cache would
+cheap questions come first.  The vault is worked out each time and
+not cached: it costs a few file-name operations, and a cache would
 answer for the vault this buffer belonged to when it was opened.
 
-Containment is the last question and not a formality.  With
-`org-semantic-vault-root' set globally, *every* buffer resolves to
-that vault -- which is what makes a search from `*scratch*' work --
-so without it, saving a README in a code repository would reindex
-your notes and report success.
+Containment is the last question, and it is necessary.  With
+`org-semantic-vault-root' set globally, every buffer resolves to
+that vault, which is what makes a search from `*scratch*' work.
+Without this test, saving a README in a code repository would
+reindex your notes and report success.
 
-And it is containment in the *notes*, which are not always in the
-vault: a vault directory may hold nothing but the index.  Asking the
-wrong one of the two would make this mode do nothing at all for
-exactly the vaults that keep their notes elsewhere."
+The test is containment in the notes, which are not always in the
+vault: a vault directory can hold nothing but the index.  Testing
+the vault instead would do nothing for those vaults."
   (let ((file (buffer-file-name)))
     (when (and file (string-suffix-p ".org" file))
       (let ((vault (org-semantic-vault)))
@@ -1584,22 +1439,21 @@ exactly the vaults that keep their notes elsewhere."
 (define-minor-mode org-semantic-auto-reindex-mode
   "Keep a vault's indexes up to date as its notes are saved.
 
-Incremental, so it costs about what one changed note costs: a note
-whose timestamp and size are unchanged is not even read, and the
-passages of one that changed are re-embedded only where the text
-they were made of moved.  `org-semantic-auto-reindex-delay' is how
-long saving must stop for, and `org-semantic-auto-reindex-quietly'
-whether a run that worked says so.
+Incremental, so a run costs about what one changed note costs.  A
+note whose timestamp and size are unchanged is not read, and a note
+that changed re-embeds only the passages whose text moved.
+`org-semantic-auto-reindex-delay' is how long saving must stop for,
+and `org-semantic-auto-reindex-quietly' whether a run that worked
+says so.
 
-What it will not do is build an index that does not exist -- that is
-minutes of embedding, and a decision, so it says once which vault
-needs `org-semantic-reindex' and leaves it there.  Notes changed
-outside Emacs are not seen either: a sync, a `git pull', a rename in
-Dired -- nothing here watches the filesystem, only saves made in this
-Emacs.  Something that does watch it can say so with
-`org-semantic-auto-reindex-touch', and failing that
-`org-semantic-reindex' catches up; nothing is lost by being behind,
-since a search says when an index is a version old."
+It does not build an index that does not exist.  That takes minutes
+of embedding, so it says once which vault needs
+`org-semantic-reindex'.
+
+It does not see notes changed outside Emacs: a sync, a `git pull',
+a rename in Dired.  Nothing here watches the filesystem.  A package
+that does watch it can call `org-semantic-auto-reindex-touch', and
+`org-semantic-reindex' catches up at any time."
   :global t
   :group 'org-semantic
   (clrhash org-semantic-auto-reindex--said)
@@ -1615,30 +1469,27 @@ since a search says when an index is a version old."
   "Arm a reindex of VAULT, as saving one of its notes would.
 
 For the changes a save cannot report: a note renamed or deleted in
-Dired, a `git pull', a folder arriving from a sync.  Something else
-is watching the tree -- a file watcher, a version control command,
-another package's index -- and this is how it says so.
+Dired, a `git pull', a folder arriving from a sync.  Call it from
+whatever watches the tree.
 
-WHICH file changed is deliberately not asked for.  A run is a
-vault-wide incremental scan, so it needs to know that something
-changed and not what: a rename is caught by the arrival of the new
-name alone, since the same scan finds the old one gone.  That also
-makes this cheap to over-call -- fifty touches inside
-`org-semantic-auto-reindex-delay' are one run, the same way fifty
-saves are.
+It does not take the file that changed.  A run is a vault-wide
+incremental scan, so it is enough to know that something changed:
+a rename is caught by the arrival of the new name, because the same
+scan finds the old one gone.  It is therefore cheap to over-call.
+Fifty touches inside `org-semantic-auto-reindex-delay' are one run,
+as fifty saves are.
 
-VAULT is a vault root spelled as `org-semantic-vault' spells it, and
-defaults to the one the current buffer is in -- which is rarely what
-a caller wants here, since a watcher's callback runs in whatever
-buffer happened to be current.  Nil, and no vault, is a silent no-op.
+VAULT is a vault root, spelled as `org-semantic-vault' spells it.
+It defaults to the current buffer's vault, which is rarely what a
+caller wants, because a watcher's callback runs in whatever buffer
+is current.  Nil, and no vault, does nothing.
 
-Independent of `org-semantic-auto-reindex-mode', and NOT gated on it.
-That mode is one trigger -- `after-save-hook' -- and not the policy:
-a configuration whose file watcher already reports saves wants this
-without it, and gating would make it turn on the very hook it makes
-redundant.  What the two share is `org-semantic-auto-reindex-delay',
-`org-semantic-auto-reindex-quietly' and the rule that an index which
-does not exist is not built."
+It is independent of `org-semantic-auto-reindex-mode' and is not
+gated on it.  That mode is one trigger, `after-save-hook', and a
+configuration whose watcher already reports saves does not want it.
+The two share `org-semantic-auto-reindex-delay',
+`org-semantic-auto-reindex-quietly', and the rule that an index
+which does not exist is not built."
   (when-let* ((vault (or vault (org-semantic-vault))))
     (org-semantic-auto-reindex--arm vault)))
 
@@ -1647,18 +1498,15 @@ does not exist is not built."
 (defun org-semantic-status (&optional vault)
   "Return what VAULT has: its built indexes, and whether one is being built.
 
-Every field is about that vault -- which models have a semantic
-index, whether a lexical one exists, whether its index is
-resident here (so the next search is warm rather than a model
-load), and whether an index is running.  Which release the server
-is comes from the handshake, not from here.
+Every field is about that vault: which models have a semantic
+index, whether a lexical one exists, whether the index is resident
+here, and whether an index is running.  The server's release comes
+from the handshake, not from here.
 
-Each entry in `:semantic' carries `:cached', which is whether the
+Each entry in `:semantic' carries `:cached', which says whether the
 model that built that index is still downloaded on this machine.
-An index outlives it -- a vault copied elsewhere, a cleared
-cache -- and a search of one that is not cached refuses rather than
-downloading inside the query, so this is how to know before
-asking."
+An index outlives its model, and a search refuses when the model is
+gone, so ask this before searching."
   (org-semantic--call
    "status"
    (org-semantic--params :vault (or vault (org-semantic-vault-or-error)))))
@@ -1672,15 +1520,15 @@ asking."
          (models (append (plist-get status :semantic) nil)))
     (message "%s%s: semantic [%s], lexical %s, %s%s"
              (abbreviate-file-name vault)
-             ;; Only when they differ, and then it is most of the answer: the
-             ;; directory named no longer says what is indexed.
+             ;; Only when they differ.  The vault directory then does not
+             ;; say which notes are indexed.
              (let ((notes (plist-get status :notes)))
                (if (and notes (not (equal notes vault)))
                    (format " (notes in %s)" (abbreviate-file-name notes))
                  ""))
-             ;; A model whose weights are gone is named as such: the index is
-             ;; there and unsearchable, which is otherwise indistinguishable
-             ;; from a working one until a search refuses.
+             ;; A model whose weights are gone is named as such.  The index
+             ;; is there and cannot be searched, which otherwise looks the
+             ;; same as a working one until a search refuses.
              (mapconcat (lambda (m)
                           (if (org-semantic-true-p (plist-get m :cached))
                               (plist-get m :name)
@@ -1695,11 +1543,10 @@ asking."
 (defun org-semantic-memory ()
   "Return what the process is holding, in bytes.
 
-Honest rather than complete: `rss' is the whole of it, and
-`vaults' and `models' are the parts that can be counted exactly.
-There is deliberately no figure for the ONNX runtime, which
-cannot be asked about from inside, and nothing derived -- a caller
-that wants what is unaccounted for subtracts."
+`rss' is the total.  `vaults' and `models' are the parts that can
+be counted exactly.  There is no figure for the ONNX runtime,
+which cannot be asked about from inside the process, and nothing
+is derived: a caller that wants the remainder subtracts."
   (org-semantic--call "memory" :jsonrpc-omit))
 
 ;;;###autoload
@@ -1716,10 +1563,9 @@ that wants what is unaccounted for subtracts."
 (defun org-semantic-reload ()
   "Make the server forget the indexes it has cached.
 
-The escape hatch for an index rebuilt *outside* this session -- a
-shell run, another Emacs: a version the server was never handed
-is one nothing else can tell it to look for.  An index it built
-itself needs none of this, since it adopts what it wrote."
+For an index rebuilt outside this session, by a shell run or
+another Emacs.  An index the server built itself needs none of
+this: it adopts what it wrote."
   (interactive)
   (org-semantic--call "reload" :jsonrpc-omit)
   (message "org-semantic: cached indexes dropped"))
@@ -1732,18 +1578,14 @@ Its chunk table and vectors are dropped, and the model with them
 if no other vault is using it.  Worth sending when the last
 buffer visiting a vault is gone.
 
-Expect a ceiling rather than a refund: the memory returns to the
-system on the allocator's own schedule, so do not wait for the
-number to fall.  What this buys is that N vaults on one model cost
-about 262 MB rather than 255 plus 143 for each one after the
-first.
+Expect a ceiling, not a refund.  The memory returns to the system
+on the allocator's schedule, so do not wait for the number to fall.
+What this buys is that N vaults on one model cost about 262 MB,
+and not 255 MB plus 143 MB for each vault after the first.
 
-Returns how many entries were dropped, and **says so only when
-called as a command**.  The caller with a reason to send this is one
-that knows a vault has been left -- a vault switch, the last buffer
-of one being killed -- and neither is an occasion for a line in the
-echo area, least of all \"0 entry/entries dropped\" for a vault the
-server never held.  A client that wants to report it has the number."
+Returns how many entries were dropped, and says so only when called
+as a command.  A caller that sends this knows a vault has been
+left, which is not an occasion for a line in the echo area."
   (interactive)
   (let* ((vault (or vault (org-semantic-vault-or-error)))
          (result (and (org-semantic-running-p)
