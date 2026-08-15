@@ -276,6 +276,43 @@ blank gutter as a grey block marking a margin that carries nothing."
     (should (eq (get-text-property (point) 'face) 'org-semantic-results-duplicate)))
   (should-not (eq (face-attribute 'org-semantic-results-gutter :inherit) 'line-number)))
 
+(ert-deftest an-address-too-long-for-the-window-wraps-under-its-path ()
+  "The head wraps like a passage line does, and not to column 0.
+
+A passage line has carried a `wrap-prefix' from the start; the head
+above it did not, so an address longer than the window continued at
+column 0 -- further left than anything else in the buffer, and
+directly above passage lines wrapping correctly.  It read as a
+rendering fault rather than as a wrapped line.
+
+Nothing saw it because every other fixture here has a short path and
+no tags, so no head has ever been long enough to wrap.  A screenshot
+of a real vault showed it twice on one screen.
+
+The width is asserted against where the address actually starts
+rather than against a number, so re-spelling the score cannot leave
+this passing while the alignment drifts."
+  (org-semantic-results-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :path "01 University/notes/sistemi-operativi.org"
+             :title "Sistemi Operativi"
+             :heading
+             "Sistemi Operativi > Gestione Processi > Scheduling > Implementazione > Scheduler"
+             :tags ["erasmus" "university" "compsci"]))
+    (goto-char (point-min))
+    ;; The head is the line carrying the hit without a gutter; a passage line
+    ;; carries both.
+    (while (or (not (get-text-property (line-beginning-position) 'org-semantic-hit))
+               (get-text-property (line-beginning-position) 'occur-prefix))
+      (forward-line 1))
+    (let* ((bol (line-beginning-position))
+           (prefix (get-text-property bol 'wrap-prefix))
+           (address (next-single-property-change
+                     bol 'org-semantic-target nil (line-end-position))))
+      (should (stringp prefix))
+      (should (string-match-p "\\` +\\'" prefix))
+      (should (= (length prefix) (- address bol))))))
+
 (ert-deftest hidden-lines-are-counted-and-not-also-elided-by-emacs ()
   "One statement of what was folded away, in the right place.
 

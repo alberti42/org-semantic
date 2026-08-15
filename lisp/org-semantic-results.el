@@ -1184,9 +1184,20 @@ the four it will pick.
 Only the leading passage of a section carries the address; the
 ones after it name their line alone, since the path is already
 above them and only the line has changed."
-  (let* ((props (list 'org-semantic-item item
+  (let* ((score (org-semantic-ui-score hit))
+         (props (list 'org-semantic-item item
                       'org-semantic-hit hit
                       'org-semantic-file (org-semantic-results--item-file item)
+                      ;; Decoration, exactly as on a passage line, and for the
+                      ;; same reason.  An address too long for the window
+                      ;; continues under the path rather than at column 0 --
+                      ;; which is further left than anything else in the
+                      ;; buffer, so it reads as a broken line rather than as a
+                      ;; wrapped one, and does it right beside passage lines
+                      ;; that wrap correctly.  Deep breadcrumbs and a long tag
+                      ;; string are what reach it, which is why no short
+                      ;; fixture ever showed it.
+                      'wrap-prefix (make-string (+ 4 (length score)) ?\s)
                       'read-only t))
          (start (org-semantic-results--item-line item))
          (from (org-semantic-hit-start-line hit))
@@ -1205,7 +1216,7 @@ above them and only the line has changed."
     (insert
      (concat
       (funcall plain "  " 'default)
-      (funcall plain (org-semantic-ui-score hit) 'org-semantic-results-score)
+      (funcall plain score 'org-semantic-results-score)
       (funcall plain "  " 'default)
       (when first
         (concat
