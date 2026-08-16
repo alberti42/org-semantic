@@ -1115,7 +1115,7 @@ so, since the buffer would simply stop changing."
 to be: a run answers the request that started it.  So the held
 search goes out exactly once, when the run ends, and not before."
   (let ((sent nil) (waited 0)
-        (org-semantic-wait-for-index t)
+        (org-semantic-require-fresh-index t)
         (org-semantic--runs (make-hash-table :test 'equal))
         (org-semantic-index-finished-functions nil))
     (cl-letf (((symbol-function 'org-semantic-search-async)
@@ -1147,17 +1147,17 @@ search goes out exactly once, when the run ends, and not before."
                (lambda (query &rest _) (push query sent) 1)))
       (puthash "/v" 7 org-semantic--runs)
       ;; Off by default, whatever is running.
-      (let ((org-semantic-wait-for-index nil)
+      (let ((org-semantic-require-fresh-index nil)
             (driver (org-semantic-ui-driver-create)))
         (org-semantic-ui-ask driver '(:query "off" :vault "/v"))
         (should (equal sent '("off"))))
       ;; A vault nothing is indexing is never held, even when it is on.
-      (let ((org-semantic-wait-for-index t)
+      (let ((org-semantic-require-fresh-index t)
             (driver (org-semantic-ui-driver-create)))
         (org-semantic-ui-ask driver '(:query "idle" :vault "/other"))
         (should (equal (car sent) "idle")))
       ;; A failed run releases it too.  Only success would wait for ever.
-      (let* ((org-semantic-wait-for-index t)
+      (let* ((org-semantic-require-fresh-index t)
              (driver (org-semantic-ui-driver-create)))
         (org-semantic-ui-ask driver '(:query "failed" :vault "/v"))
         (should-not (equal (car sent) "failed"))
@@ -1167,7 +1167,7 @@ search goes out exactly once, when the run ends, and not before."
       ;; And an abandoned buffer stops waiting rather than firing later.
       (puthash "/v" 8 org-semantic--runs)
       (let ((driver (org-semantic-ui-driver-create))
-            (org-semantic-wait-for-index t))
+            (org-semantic-require-fresh-index t))
         (org-semantic-ui-ask driver '(:query "killed" :vault "/v"))
         (org-semantic-ui-driver-abandon driver)
         (should-not org-semantic-index-finished-functions)
@@ -1189,7 +1189,7 @@ to ask again.
 `run-at-time' is stubbed to fail, so a retry cannot creep back in
 unnoticed."
   (let* ((sent nil) (settle nil) (told nil)
-         (org-semantic-wait-for-index t)
+         (org-semantic-require-fresh-index t)
          (org-semantic--runs (make-hash-table :test 'equal))
          (org-semantic-index-finished-functions nil))
     (cl-letf (((symbol-function 'org-semantic-search-async)
@@ -1267,7 +1267,7 @@ hook.  A run that ends in between fires the hook before we are on
 it, and without the second check nothing would ever release the
 search -- a hang with no error and no message."
   (let ((sent nil)
-        (org-semantic-wait-for-index t)
+        (org-semantic-require-fresh-index t)
         (org-semantic--runs (make-hash-table :test 'equal))
         (org-semantic-index-finished-functions nil))
     (cl-letf (((symbol-function 'org-semantic-search-async)

@@ -252,7 +252,7 @@ Called with the raw JSON-RPC error plist, which is what a failure
 callback is handed -- not a signalled `org-semantic-error'.")
   (on-waiting #'ignore :documentation "\
 Called when a search is not sent, or not shown, because the vault
-is being indexed.  Only under `org-semantic-wait-for-index'.
+is being indexed.  Only under `org-semantic-require-fresh-index'.
 
 Two arguments: the vault, and whether this driver will resume by
 itself.  It resumes for a run this Emacs started, because that run
@@ -263,25 +263,26 @@ The function waiting on `org-semantic-index-finished-functions',
 or nil.  Removed by a newer query and by
 `org-semantic-ui-driver-abandon'."))
 
-(defcustom org-semantic-wait-for-index nil
-  "Whether a search waits for an index this Emacs is building.
+(defcustom org-semantic-require-fresh-index nil
+  "Whether a search may answer from an index that is being rebuilt.
 
 Off, the default, answers from the version committed before the
 run started.  The reply says the index is a version behind, and
 the results buffer marks the list.
 
 On, no stale list is shown.  Use it when a wrong answer is worse
-than no answer.  What happens then depends on who is indexing.
+than no answer.  The setting states the requirement; how it is met
+depends on who is indexing, and only one of the two is a wait.
 
-A run this Emacs started is held, and sent when that run replies.
-The results appear by themselves.  This costs nothing and cannot
-hang: the reply arrives whether the run works or fails.
+A run this Emacs started is held, and the search is sent when that
+run replies.  The results appear by themselves.  This costs nothing
+and cannot hang: the reply arrives whether the run works or fails.
 
 A run in another process -- a shell, a cron job, another Emacs --
 is refused.  This Emacs can neither hear the end of that run nor
-stop it, so it says who is busy and asks you to search again.  It
-does not wait, because a process that stalls would leave the search
-open with nothing to report."
+stop it, so the buffer says who is busy and asks you to search
+again.  It does not wait, because a process that stalls would leave
+the search open with nothing to report."
   :type 'boolean
   :group 'org-semantic)
 
@@ -357,7 +358,7 @@ waiting for ever."
 (defun org-semantic-ui--fire (driver params)
   "Send PARAMS on DRIVER now, and send whatever is pending from the reply.
 
-Under `org-semantic-wait-for-index', a search for a vault this
+Under `org-semantic-require-fresh-index', a search for a vault this
 Emacs is indexing is held instead of sent, and goes out when the
 run replies.  Only that vault: the server reports its own runs, so
 an index in another process is not visible and cannot be waited
@@ -370,7 +371,7 @@ for."
     ;; The vault must come from PARAMS.  `org-semantic-indexing-p' falls back
     ;; to the current buffer's, which in a results buffer is not the vault
     ;; being searched, and which raises when there is none.
-    (if (and org-semantic-wait-for-index vault (org-semantic-indexing-p vault))
+    (if (and org-semantic-require-fresh-index vault (org-semantic-indexing-p vault))
         (org-semantic-ui--hold driver params vault)
       (org-semantic-ui--send driver params))))
 
@@ -400,7 +401,7 @@ for."
                ;; asking for ever with nothing to say why.  So the result
                ;; is withheld -- it is the stale list the setting exists to
                ;; refuse -- and the reader is told to ask again.
-               ((and org-semantic-wait-for-index
+               ((and org-semantic-require-fresh-index
                      (org-semantic-true-p (plist-get reply :indexing)))
                 (funcall (org-semantic-ui-driver-on-waiting os-driver)
                          (plist-get os-params :vault) nil))

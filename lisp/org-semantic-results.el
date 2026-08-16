@@ -1478,7 +1478,7 @@ The search results will appear here by themselves when downloading has finished.
 (defun org-semantic-results--render-waiting (resumes)
   "Say that the vault is being indexed, so no list is shown.
 
-Under `org-semantic-wait-for-index' a stale list must not be drawn,
+Under `org-semantic-require-fresh-index' a stale list must not be drawn,
 so whatever was here is replaced rather than marked.
 
 RESUMES says whether this buffer will answer by itself.  It will

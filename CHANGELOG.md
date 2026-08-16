@@ -72,17 +72,20 @@ it.
 
 ### Added
 
-- `org-semantic-wait-for-index`. Off by default. Set it and a search for a vault
-  this Emacs is indexing is held, and sent when the run replies, so what you read
-  is never a version behind. The buffer says it is waiting.
+- `org-semantic-require-fresh-index`. Off by default. Set it and no list is drawn
+  from an index that is being rebuilt. It states that requirement; how it is met
+  depends on who is indexing, and only one of the two is a wait.
 
-  A run this Emacs started needs nothing from the server: the run answers the
-  request that started it, and that reply is the notification.
-  `org-semantic-index-finished-functions` is the new hook it runs, on success and
-  on failure alike. A run in another process is **refused** rather than waited
-  for — the buffer says the vault is being indexed elsewhere and asks you to
-  search again. Nothing polls: this Emacs can neither hear that run end nor stop
-  it, so a timer would wait on a process that might stall.
+  A run this Emacs started is waited for, and the search is sent when the run
+  replies, so the results appear by themselves. This needs nothing from the
+  server: the run answers the request that started it, and that reply is the
+  notification. `org-semantic-index-finished-functions` is the new hook it runs,
+  on success and on failure alike.
+
+  A run in another process is **refused** rather than waited for — the buffer
+  says the vault is being indexed elsewhere and asks you to search again. Nothing
+  polls: this Emacs can neither hear that run end nor stop it, so a timer would
+  wait on a process that might stall.
 
 ### Fixed
 
