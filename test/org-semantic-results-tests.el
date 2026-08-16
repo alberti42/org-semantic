@@ -1175,6 +1175,34 @@ search goes out exactly once, when the run ends, and not before."
         (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
         (should-not (equal (car sent) "killed"))))))
 
+(ert-deftest a-new-query-replaces-the-one-held-for-the-index ()
+  "Typing again while waiting replaces the query.  It does not queue it.
+
+Nothing is in flight while a search is held, so `org-semantic-ui-ask'
+reaches `--fire', which releases the old closure before deciding
+again.  Keep that release: without it both closures sit on
+`org-semantic-index-finished-functions', the run's reply fires both,
+and two searches go out.  The older reply can then land last and
+draw a list for a query the user has already replaced."
+  (let* ((sent nil)
+         (org-semantic-require-fresh-index t)
+         (org-semantic--runs (make-hash-table :test 'equal))
+         (org-semantic-index-finished-functions nil))
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (query &rest _) (push query sent) 1)))
+      (puthash "/v" 7 org-semantic--runs)
+      (let ((driver (org-semantic-ui-driver-create)))
+        (org-semantic-ui-ask driver '(:query "first" :vault "/v"))
+        (org-semantic-ui-ask driver '(:query "second" :vault "/v"))
+        (org-semantic-ui-ask driver '(:query "third" :vault "/v"))
+        (should-not sent)
+        ;; One waiter, not three.
+        (should (= 1 (length org-semantic-index-finished-functions)))
+        (remhash "/v" org-semantic--runs)
+        (run-hook-with-args 'org-semantic-index-finished-functions "/v" '(:semantic nil))
+        ;; And it is the last thing asked for, sent once.
+        (should (equal sent '("third")))))))
+
 (ert-deftest another-process-s-index-is-refused-and-not-waited-for ()
   "A run this Emacs cannot hear the end of is refused, never polled.
 
