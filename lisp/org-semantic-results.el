@@ -686,10 +686,10 @@ the header would say \"semantic\" over results found by word."
                  (with-current-buffer buffer
                    (org-semantic-results--render-error error-object))))
              :on-waiting
-             (lambda (_vault)
+             (lambda (_vault resumes)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (org-semantic-results--render-waiting))))))))
+                   (org-semantic-results--render-waiting resumes))))))))
   (setq org-semantic-results--asked-mode (or mode org-semantic-results--mode))
   ;; A new search is a new question.  The latch stops one reply being
   ;; asked about twice.  Left uncleared, it stops every later search in
@@ -1475,22 +1475,32 @@ The search results will appear here by themselves when downloading has finished.
              'read-only t))
     (goto-char (point-min))))
 
-(defun org-semantic-results--render-waiting ()
-  "Say that the search is held until the index finishes.
+(defun org-semantic-results--render-waiting (resumes)
+  "Say that the vault is being indexed, so no list is shown.
 
-Under `org-semantic-wait-for-index' the old hits must not be shown,
-so they are replaced rather than marked.  The search is sent from
-the run's reply, and the results appear here."
+Under `org-semantic-wait-for-index' a stale list must not be drawn,
+so whatever was here is replaced rather than marked.
+
+RESUMES says whether this buffer will answer by itself.  It will
+for a run this Emacs started, because that run replies here.  It
+will not for a run in another process, which this Emacs can neither
+hear nor stop, so that reader is asked to try again instead of
+being left in front of a buffer that may never change."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (org-semantic-results--insert-header nil nil)
     (insert (propertize
-             "  please wait: this vault is being indexed.\n  \
+             (if resumes
+                 "  please wait: this vault is being indexed.\n  \
 The search results will appear here by themselves when indexing has finished.\n"
+               (substitute-command-keys
+                "  this vault is being indexed by another program.\n  \
+Its results would be out of date, so they are not shown.  \
+Press \\[org-semantic-results-revert] to search again when that has finished.\n"))
              'face 'org-semantic-results-location
              'read-only t))
     (goto-char (point-min)))
-  (setq mode-line-process " [waiting for the index]")
+  (setq mode-line-process (if resumes " [waiting for the index]" " [indexed elsewhere]"))
   (force-mode-line-update))
 
 (defun org-semantic-results--reindex (full)

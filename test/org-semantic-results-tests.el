@@ -1122,7 +1122,11 @@ search goes out exactly once, when the run ends, and not before."
                (lambda (query &rest _) (push query sent) 1)))
       (puthash "/v" 7 org-semantic--runs)   ; a run of ours is in flight
       (let ((driver (org-semantic-ui-driver-create
-                     :on-waiting (lambda (_vault) (cl-incf waited)))))
+                     ;; `resumes' is t: this run replies here, so the buffer
+                     ;; may promise that the results will arrive.
+                     :on-waiting (lambda (_vault resumes)
+                                   (should resumes)
+                                   (cl-incf waited)))))
         (org-semantic-ui-ask driver '(:query "a" :vault "/v"))
         (should-not sent)
         (should (= waited 1))
@@ -1171,14 +1175,20 @@ search goes out exactly once, when the run ends, and not before."
         (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
         (should-not (equal (car sent) "killed"))))))
 
-(ert-deftest another-process-s-index-is-waited-for-by-asking-again ()
-  "A run we cannot hear the end of is the one case that polls.
+(ert-deftest another-process-s-index-is-refused-and-not-waited-for ()
+  "A run this Emacs cannot hear the end of is refused, never polled.
 
-Our own run is held before the search is sent, so reaching the
-reply with `indexing' true means a shell, a cron job or another
-Emacs holds the lock.  There is no reply here to wait for, so the
-search is sent again until the vault is free."
-  (let* ((sent nil) (settle nil) (waited 0) (timer nil)
+Our own run is held before the search is sent, so a reply with
+`indexing' true means a shell, a cron job or another Emacs holds
+the lock.  This Emacs can neither hear that run end nor stop it, so
+a timer here would wait on a process that may stall and would leave
+the buffer asking for ever.  The list is withheld -- it is the
+stale answer the setting exists to refuse -- and the reader is told
+to ask again.
+
+`run-at-time' is stubbed to fail, so a retry cannot creep back in
+unnoticed."
+  (let* ((sent nil) (settle nil) (told nil)
          (org-semantic-wait-for-index t)
          (org-semantic--runs (make-hash-table :test 'equal))
          (org-semantic-index-finished-functions nil))
@@ -1188,24 +1198,22 @@ search is sent again until the vault is free."
                  (setq settle (plist-get keys :success))
                  1))
               ((symbol-function 'run-at-time)
-               (lambda (_secs _rep fn &rest args)
-                 (setq timer (cons fn args))
-                 'a-timer))
-              ((symbol-function 'cancel-timer) #'ignore))
+               (lambda (&rest _) (error "Polled a process we do not control"))))
       (let ((driver (org-semantic-ui-driver-create
-                     :on-reply (lambda (_r) (error "Rendered a stale list while waiting"))
-                     :on-waiting (lambda (_v) (cl-incf waited)))))
+                     :on-reply (lambda (_r) (error "Rendered a stale list"))
+                     :on-waiting (lambda (_v resumes) (push resumes told)))))
         ;; Nothing of ours is running, so it goes out at once.
         (org-semantic-ui-ask driver '(:query "a" :vault "/v"))
         (should (equal sent '("a")))
         ;; The server says somebody else is indexing.
         (funcall settle '(:hits [] :indexing t))
-        (should (= waited 1))
-        (should (org-semantic-ui-driver-retry driver))
-        ;; The timer asks again, and the vault is free this time.
-        (apply (car timer) (cdr timer))
-        (should (equal (car sent) "a"))
-        (should (= 2 (length sent)))))))
+        ;; Told once, and told that nothing will resume by itself.
+        (should (equal told '(nil)))
+        ;; Nothing is left holding the driver, so the next query goes out.
+        (should-not (org-semantic-ui-driver-held driver))
+        (should-not (org-semantic-ui-driver-request driver))
+        (org-semantic-ui-ask driver '(:query "b" :vault "/v"))
+        (should (equal (car sent) "b"))))))
 
 (ert-deftest a-run-announces-that-it-ended-however-it-ended ()
   "`org-semantic-index' runs the hook on success and on failure.

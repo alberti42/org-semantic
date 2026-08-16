@@ -58,10 +58,41 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Needs the new binary. An older one gets the first two entries below silently
-wrong: it still loads a second model on a long rebuild, and it still loads a
-model to discover that an index it cannot read is unreadable. Raise the floor
-when this is released.
+## [0.5.0] — 2026-08-16
+
+Binary version 0.4.0, and this release needs it. The floor moves to 0.4.0 with
+it, because an older binary gets the first two entries below **silently** wrong:
+it still loads a second model on a long rebuild, and it still loads a model to
+discover that an index it cannot read is unreadable. Nothing about either is
+visible from Emacs, which is what the floor is for.
+
+One setting is removed. If `org-semantic-conserve-memory` is in your
+configuration, delete it — see below for what it did and why nothing replaces
+it.
+
+### Added
+
+- `org-semantic-wait-for-index`. Off by default. Set it and a search for a vault
+  this Emacs is indexing is held, and sent when the run replies, so what you read
+  is never a version behind. The buffer says it is waiting.
+
+  A run this Emacs started needs nothing from the server: the run answers the
+  request that started it, and that reply is the notification.
+  `org-semantic-index-finished-functions` is the new hook it runs, on success and
+  on failure alike. A run in another process is **refused** rather than waited
+  for — the buffer says the vault is being indexed elsewhere and asks you to
+  search again. Nothing polls: this Emacs can neither hear that run end nor stop
+  it, so a timer would wait on a process that might stall.
+
+### Fixed
+
+- `indexing` now reports a run in **any** process, not only one this server
+  started. A `serve` is spawned per editor, so an index run by a shell, a cron
+  job or another Emacs was invisible: a search during one answered
+  `indexing: false`, and told the client its results were current while the index
+  underneath was being rewritten. The vault's lock file is the one thing those
+  processes share, so that is what is read, using the same staleness rule
+  `Claim` already applies — a lock whose owner has died is not a run.
 
 ### Changed
 
@@ -549,7 +580,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.5.0
 [0.4.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.1
 [0.4.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.0
 [0.3.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.3.0
