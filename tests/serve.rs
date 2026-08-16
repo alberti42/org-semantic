@@ -643,11 +643,10 @@ fn a_semantic_search_answers_from_the_old_version_during_a_rebuild() {
 
     // A note the rebuild will pick up and the committed version cannot know.
     std::fs::write(v.join("hare.org"), "#+title: Hare\n* Hare on a bicycle\nIt pedals.\n").unwrap();
-    // The run shares the resident model, which is now the only thing it can do:
-    // the searcher and the indexer really do contend for one `TextEmbedding`,
-    // and this is the test that covers it. It used to need `conserveMemory:
-    // true` to reach this path, because a run this long would otherwise have
-    // loaded a private model and proved less.
+    // The run shares the resident model, which is the only thing it can do now.
+    // The searcher and the indexer contend for one `TextEmbedding`, and this is
+    // the test that covers it.  It needed `conserveMemory: true` to reach this
+    // path before, because a run this long loaded a private model instead.
     s.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
                     "params": { "vault": v, "full": true } }));
     let first = read_one(&mut s.stdout).expect("it reports before it finishes");
@@ -1095,17 +1094,16 @@ fn a_missing_model_sends_the_client_to_download() {
 
 /// A search that cannot be answered must not load a model to find that out.
 ///
-/// `Server::semantic` took the model first and read the index second, so a vault
-/// left behind by an `INDEX_VERSION` bump paid a 0.12–0.64 s load on the message
-/// loop and then threw the model away: nothing owns the `Arc` until the entry is
-/// inserted, and `Server::models` keeps only a `Weak`. The error was right and
-/// the cost was invisible — and it was paid **per search**, which is why this
-/// asks twice.
+/// `Server::semantic` took the model first and read the index second.  A vault
+/// left behind by an `INDEX_VERSION` bump then paid a 0.12–0.64 s load on the
+/// message loop and discarded the model: nothing owns the `Arc` until the entry
+/// is inserted, and `Server::models` keeps only a `Weak`.  The error was correct,
+/// so the cost was invisible.  It was paid on each search, which is why this test
+/// searches twice.
 ///
-/// Timing is the only witness, since both orders answer `index-layout`. The
+/// Timing is the only witness, because both orders answer `index-layout`.  The
 /// margin is two orders of magnitude, so the threshold is loose and still
-/// discriminates: put the two lines back and each reply takes longer than all of
-/// this allows.
+/// discriminates.  Restore the old order and each reply exceeds it.
 #[test]
 #[ignore = "needs an embedding model in the cache"]
 fn an_unreadable_index_is_refused_without_loading_a_model() {

@@ -4337,10 +4337,10 @@ fn cmd_index(
     m: &Model,
     cfg: &Config,
     j: &mut Journal,
-    // The resident model to share, when the caller has one.  `Some` for `serve`
-    // on a vault something has already searched; `None` for the CLI, and for a
-    // vault nothing has searched, where there is nothing to share and this loads
-    // a model of its own.  **Never a second one** — see the match below.
+    // The resident model to share.  `Some` for `serve` on a vault that something
+    // has already searched.  `None` for the CLI, and for a vault that nothing has
+    // searched: there is no model to share, so this loads one.  This never loads
+    // a second model.  See the match below.
     lend: Option<&Mutex<TextEmbedding>>,
     stop: &Cancel,
 ) -> Result<Indexed> {
@@ -4642,20 +4642,16 @@ fn cmd_index(
     if pending.is_empty() {
         writeln!(j.out, "no new text to embed; rewriting the manifest")?;
     } else {
-        // Share the caller's model, or load one because there is none to share.
-        // **Never load a second one**, which this did above a chunk-count
-        // threshold: a long run took a private model so that the resident one
-        // stayed exclusively the searcher's.  That bought a p90 of 41 ms against
-        // 1.7 s for a query arriving mid-rebuild, and cost 229 MB on the smallest
-        // model — permanently, because RSS does not fall when a run ends.  It
-        // could also only ever apply to a vault whose index was readable *and*
-        // already searched: no index, a layout bump or a new model each leave
-        // nothing resident, so the run loaded its own regardless.  A rare gain,
-        // a lasting cost, and a rule nobody could predict the effect of.
+        // Share the caller's model, or load one if there is none to share.  This
+        // never loads a second model.  It did so above a chunk-count threshold,
+        // to keep the resident model for searches alone.  That gave a p90 of
+        // 41 ms instead of 1.7 s for a query during a rebuild.  It cost 229 MB on
+        // the smallest model, and it kept that memory until the process exited.
+        // See CLAUDE.md for why the trade was refused.
         //
-        // Behind a `Mutex` either way, so there is one path rather than two.
-        // Uncontended that costs ~20 ns against a batch of seconds; contended, it
-        // is the whole point — see the loop below.
+        // The model is behind a `Mutex` in both cases, so there is one path and
+        // not two.  An uncontended lock costs ~20 ns against a batch of seconds.
+        // A contended one is the point of the loop below.
         let t1 = Instant::now();
         let owned;
         let model: &Mutex<TextEmbedding> = match lend {
@@ -7276,9 +7272,9 @@ mod tests {
         );
     }
 
-    /// `USAGE` is copied into the manual, and a copy nobody diffs is a copy that
-    /// rots: adding `--version` left the manual describing a tool without one,
-    /// and only a hand-run `diff` noticed.
+    /// `USAGE` is copied into the manual.  Nobody diffs that copy by hand, so it
+    /// goes stale: adding `--version` left the manual describing a tool that had
+    /// none.
     #[test]
     fn both_documents_quote_the_usage_the_binary_prints() {
         let org = include_str!("../docs/manual.org");
@@ -7299,17 +7295,15 @@ mod tests {
         assert_eq!(cfg, Config::default());
     }
 
-    /// **A scratch name is a lock on a directory, and two tests may not share
-    /// one.** `scratch` opens with `remove_dir_all`, so a shared name means
-    /// whichever test starts second deletes the other's vault mid-run — and the
-    /// panic then lands wherever that test next touches the directory, which is
-    /// nowhere near the cause. Two tests did share `restamp`, and it cost a
-    /// puzzled look twice — the first time it was written off as an unexplained
+    /// A scratch name is a lock on a directory.  Two tests must not share one.
+    ///
+    /// `scratch` starts with `remove_dir_all`.  If two tests share a name, the
+    /// one that starts second deletes the other's vault while it runs.  The panic
+    /// then occurs where that test next uses the directory, which is far from the
+    /// cause.  Two tests did share `restamp`, and the failure looked twice like a
     /// flake.
     ///
-    /// Reading our own source is the only way to check this. The alternative —
-    /// a registry every test must remember to use — is one more thing to forget,
-    /// and forgetting it would restore exactly this failure.
+    /// This test reads its own source, because there is no other way to check it.
     #[test]
     fn no_two_tests_share_a_scratch_directory() {
         let src = include_str!("main.rs");

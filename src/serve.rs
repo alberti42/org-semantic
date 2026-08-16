@@ -143,81 +143,52 @@ struct Plan {
 }
 
 impl Server {
-    /// Refuse a search that would have to fetch a model — before anything slow
+    /// Refuse a search that would have to fetch a model, before anything slow
     /// happens.
     ///
-    /// **A search may not fetch a model.** Indexing loads its own when there is
-    /// nothing resident to share, so `model` below is the only place `serve`
-    /// loads one for a *query*, and this is the check that stands in front of it.
+    /// A search must not fetch a model.  `model` below is the only place `serve`
+    /// loads one for a query, and this check stands in front of it.  A search is
+    /// answered on the message loop, so a download there blocks the whole server
+    /// for the length of the fetch: 487 MB for `e5-small`, over 2 GB for the large
+    /// multilingual models.  A download has no unit boundaries, so
+    /// `$/cancelRequest` cannot stop it.  This refuses in about a millisecond
+    /// instead, and `remedy` sends the client to `download`.
     ///
-    /// Not a timeout problem, though that is how it shows up: a search is
-    /// answered *on the message loop*, and `model_with` would block it for the
-    /// length of the download — 487 MB for `e5-small`, over 2 GB for the large
-    /// multilingual ones. Nothing else would be read meanwhile: not a lexical
-    /// search, not `status`, not `$/cancelRequest`, not `shutdown`. And a
-    /// download has no unit boundaries to check a cancel flag between, so the
-    /// only way out would be killing the process. It is silent as well, since
-    /// `download` progress comes from the callers holding a `Journal` and this
-    /// path holds none.
+    /// It is separate from `model` so that `semantic` can call it first.  That
+    /// keeps `model-missing` ahead of the index errors, and it costs microseconds
+    /// because the test is file existence.  `model` calls it again, so the rule
+    /// holds for the function that could break it.  It also takes no lock while
+    /// `models` is held.
     ///
-    /// So it is refused in about a millisecond, labelled, and `remedy` sends the
-    /// client to `download`. Fetching is a thing you ask for, not a thing a query
-    /// does to you.
+    /// It uses `weights_cached` and not `weight_bytes`.  A byte count answers yes
+    /// to any `.onnx*` file, and `e5-large` fetches a 546 kB `model.onnx` before a
+    /// 2.2 GB `model.onnx_data`.  Between the two, a byte count reports the model
+    /// as cached, and the query then waits five seconds in hf-hub's flock retry
+    /// (hf-hub sync.rs:86-100, 810-818) to reach an unlabelled error.
     ///
-    /// **It is separate from `model` so that `semantic` can ask it first.** The
-    /// test is file existence, so asking early costs microseconds — and it is
-    /// what keeps `model-missing` ahead of the index errors now that the index is
-    /// read before the model is loaded. `model` asks it again: the rule belongs
-    /// with the function that could break it, not with the one that happens to
-    /// call it today.
+    /// The check is not exact.  `ModelInfo` names the ONNX artifacts only, and
+    /// fastembed hardcodes four more files in its loader (common.rs:44-48).  A
+    /// cache with the weights but no `tokenizer.json` passes here and fetches
+    /// ~17 MB on the loop.
     ///
-    /// Taking no lock of its own but `fetching` and `run` also unpicks a nesting:
-    /// this used to run with `models` held, which was the one place two of these
-    /// locks were held at once.
+    /// Keep the bias towards "cached".  A run that loads a model of its own does
+    /// not populate `Server::models`, so a wrong refusal repeats after the very
+    /// run that was asked for, and does not correct itself.
     ///
-    /// **`weights_cached` and not `weight_bytes`, and the difference is a
-    /// download already in flight.** Summing the `.onnx*` bytes answers yes to
-    /// *any* of them, and `e5-large` is a 546 kB `model.onnx` beside a 2.2 GB
-    /// `model.onnx_data` fetched after it. For the minutes between the two, a
-    /// byte count calls that cached, this check passes, and the query walks into
-    /// `model_with` — where hf-hub finds the second file missing, cannot take the
-    /// flock the running index holds, retries five times a second apart and fails
-    /// (hf-hub sync.rs:86-100, 810-818). No second download, because that lock is
-    /// exactly what prevents one — but five seconds of the loop, spent to arrive
-    /// at an error with no `kind` on it.
-    ///
-    /// It still cannot be exact, and the residue is the tokenizer: `ModelInfo`
-    /// names the ONNX artifacts alone, while the four files fastembed also
-    /// fetches are hardcoded in its loader (common.rs:44-48) and appear in no
-    /// metadata. A cache holding the weights but not `tokenizer.json` therefore
-    /// passes and fetches ~17 MB on the loop. Seconds, not minutes, and closing
-    /// it would mean curating those four names — the one thing this path refuses,
-    /// since they are fastembed's to change.
-    ///
-    /// Whatever is done here, **keep the bias**: this must fail towards "cached".
-    /// The refusal is not self-correcting — a run that loads a model of its own
-    /// never populates `Server::models` — so a search that says "missing" about a
-    /// model that is present says it again after the very run it asked for, and
-    /// for ever.
-    ///
-    /// VAULT is not used to find the model — one model serves every vault — but
-    /// to say, when refusing, whether a run that will fetch it is already going.
+    /// VAULT does not select the model.  One model serves every vault.  It says
+    /// whether a run that will fetch this model is already in flight.
     fn require_weights(&self, m: &'static Model, vault: &Path) -> Result<()> {
         if weights_cached(m) {
             return Ok(());
         }
-        // **Whether a fetch is already going, on an error reply.** `indexing`
-        // otherwise rides `answer`, which only ever wraps a *result*, so a client
-        // repeating a search — and a search-as-you-type client repeats it per
-        // keystroke — could not tell the first refusal from the hundredth and
-        // would go on offering to start what is already running. Nothing would
-        // break, since a second `index` on one vault is refused in its turn, but
-        // the offer would be a lie.
-        // True when *anything* that fetches this model is already going: a
-        // `download` of it, or an index of this vault that will load it on the
-        // way. The field's job is to stop a client offering to start what is
-        // already running, so it asks that question rather than naming one
-        // mechanism.
+        // `indexing` usually rides `answer`, which wraps a result, so an error
+        // reply carries none.  This error needs it: a search-as-you-type client
+        // repeats the search on each keystroke, and without the flag it cannot
+        // tell the hundredth refusal from the first.  It would keep offering to
+        // start a download that is already running.
+        //
+        // True when anything that fetches this model is in flight: a `download`,
+        // or an index of this vault that will load the model on the way.
         let fetching = lock(&self.fetching).contains(m.name) || self.indexing(vault);
         Err(fault(
             "model-missing",
@@ -226,33 +197,29 @@ impl Server {
             if fetching {
                 format!("the {} model is being downloaded now", m.name)
             } else {
-                // Says what is true and stops there. It used to end "— indexing
-                // this vault will fetch it", which was accurate only while
-                // `index` was the one call that could: an incremental run on an
-                // unchanged vault embeds nothing, so it loaded no model, fetched
-                // nothing, and reported success — after which the next search
-                // refused in exactly these words. `download` exists because of
-                // that, and `remedy` now names it.
+                // States the fact and stops.  It used to add "indexing this vault
+                // will fetch it", which is false for an incremental run on an
+                // unchanged vault: that embeds nothing, loads no model, and
+                // reports success.  `remedy` names `download` instead.
                 format!("the {} model is not downloaded yet", m.name)
             },
         ))
     }
 
-    /// The loaded model for M, shared with whoever else is using it.
+    /// The loaded model for M, shared with every other user of it.
     ///
-    /// The load (0.12–0.64 s) happens with this map locked, which is the one slow
-    /// thing under a lock here. Releasing it around the load would buy a race in
-    /// which two copies load for one name — the very waste this exists to remove.
+    /// The load takes 0.12–0.64 s and holds `models`.  This is the one slow
+    /// operation under a lock here.  Releasing the lock around the load would let
+    /// two threads load one model, which is the waste this map exists to prevent.
     ///
-    /// VAULT is only for `require_weights`, which refuses rather than fetching.
+    /// VAULT is only for `require_weights`, which refuses instead of fetching.
     fn model(&self, m: &'static Model, vault: &Path) -> Result<Arc<Mutex<TextEmbedding>>> {
         if let Some(loaded) = lock(&self.models).get(m.name).and_then(std::sync::Weak::upgrade) {
             return Ok(loaded);
         }
-        // Before `models` is taken, so the two locks it needs are not nested
-        // under it. Its callers have usually asked already; the repeat is a
-        // file-existence test, and it is what makes the rule true of this
-        // function rather than of its call sites.
+        // Called before `models` is taken, so the two locks it needs are not
+        // nested under it.  Callers have usually asked already, and the repeat is
+        // a file-existence test.
         self.require_weights(m, vault)?;
         let mut models = lock(&self.models);
         // Another thread may have loaded it while the check ran.
@@ -267,26 +234,26 @@ impl Server {
 
     /// Load a vault's semantic index once, then keep it.
     ///
-    /// **Cheapest refusal first, and the model loaded last.** The order is
-    /// weights-present, then the index, then the 0.12–0.64 s load — so a vault
-    /// whose index cannot be read costs a file read rather than a model. It was
-    /// the other way round, which meant a vault left behind by an `INDEX_VERSION`
-    /// bump loaded a model on the message loop and then threw it away, on **every
-    /// search**: nothing owns the `Arc` until the entry is inserted, and
-    /// `Server::models` holds only a `Weak`, so the next query paid it again.
+    /// The order of the three steps is load-bearing.  Keep it: weights present,
+    /// then the index, then the 0.12–0.64 s model load.
     ///
-    /// `require_weights` runs ahead of `Index::read` rather than being left to
-    /// `model` because the precedence is deliberate: a vault with neither must
-    /// report `model-missing` and its `download` remedy, and hear about the index
-    /// on the search after. One question at a time.
+    /// The model comes last so that a vault whose index cannot be read costs a
+    /// file read and not a model load.  The model came first until 2026-08-16.  A
+    /// vault left behind by an `INDEX_VERSION` bump then loaded a model on the
+    /// message loop and discarded it, on every search: nothing owns the `Arc`
+    /// until the entry is inserted, and `Server::models` holds only a `Weak`.
     ///
-    /// Two critical sections rather than one, and never nested: the map is
-    /// released before `model` reaches for `models`. The second lookup is not
-    /// redundant — another thread may have inserted this key meanwhile, and
-    /// without the re-check both would install an entry and one would be orphaned
-    /// along with any index a run later adopted into it. Both would also have
-    /// read the index, which is waste and not a fault; holding the map across
-    /// `model` to prevent it would nest the two locks.
+    /// `require_weights` comes before `Index::read` to keep the error precedence.
+    /// A vault with neither must report `model-missing` and its `download`
+    /// remedy, and report the index on the next search.
+    ///
+    /// There are two critical sections and they are never nested: the map is
+    /// released before `model` takes `models`.  The second lookup is needed
+    /// because another thread may have inserted this key in between.  Without it,
+    /// both threads insert an entry and one is orphaned, together with any index
+    /// a run later adopts into it.  Both threads also read the index, which wastes
+    /// a read.  Holding the map across `model` would prevent that and nest the two
+    /// locks.
     fn semantic(&self, vault: &Path, want: Option<&'static Model>) -> Result<Arc<Semantic>> {
         let m = choose_index(vault, want)?;
         let key = (vault.to_path_buf(), m.name);
@@ -507,9 +474,9 @@ impl Server {
         };
         let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
-        // `conserveMemory` was read here. It said whether a long run might load
-        // a second model, and nothing loads one now, so an older client sending
-        // it is ignored like any other unknown key rather than refused.
+        // `conserveMemory` was read here.  It said whether a long run could load
+        // a second model.  Nothing loads one now, so an older client that sends
+        // the key is ignored, like any other unknown key, and not refused.
         //
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
@@ -721,17 +688,16 @@ impl Server {
             // journal: a flag is something you can forget to clear, a mark is
             // not.
             let mark = j.remarks.len();
-            // Hand over the resident model if this vault's index is loaded, and
-            // it is always taken: the run holds it one batch at a time, so a
-            // query waits for a batch rather than for the run. A vault nobody has
-            // searched has no entry and no model to hand over, so the run loads
-            // one of its own and drops it; the first search after it reads the
-            // committed index from disk, as it always did.
+            // Give the run the resident model if this vault's index is loaded.
+            // The run always takes it, and holds it for one batch at a time, so a
+            // query waits for a batch and not for the run.  A vault that nothing
+            // has searched has no entry and no model to give, so the run loads one
+            // and drops it.  The first search after that reads the committed index
+            // from disk.
             //
-            // **This process never holds two sets of weights.** A long run used
-            // to take a private model, and `conserveMemory: true` was how a
-            // client declined that. Both are gone — see the match in `cmd_index`
-            // for what the trade was and why it was not worth its permanent cost.
+            // This process never holds two sets of weights.  A long run took a
+            // private model until 2026-08-16, and `conserveMemory: true` declined
+            // that.  Both are removed.  See the match in `cmd_index`.
             let loaded = lock(&self.semantic).get(&key).cloned();
             let lend = loaded.as_ref().map(|s| s.model.as_ref());
             let out = cmd_index(&vault, full, rehash, want, &cfg, j, lend, stop)?;
