@@ -718,6 +718,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-auto-reindex-delay~    | =2.0=          | seconds of quiet after a save before it runs                |
 | ~org-semantic-auto-reindex-quietly~  | =t=            | whether a run that worked says so                           |
 | ~org-semantic-config~                | =nil=          | the indexing policy to send --- below                       |
+| ~org-semantic-wait-for-index~        | =nil=          | wait for a reindex rather than answer from the old index --- below |
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
 | ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
@@ -1267,6 +1268,20 @@ reply says so:
 
 Grey the list, or label it; the next search after the run replies will be current.
 =status= carries the same flag for a client that wants to ask before searching.
+
+*Or wait for it, with =org-semantic-wait-for-index=.* Set it and a search for a
+vault this Emacs is indexing is not sent at all. It is held, and goes out when
+the run replies, so what you read is never a version behind. The buffer says it
+is waiting, and the results appear by themselves. Use it when a stale answer is
+worse than a slow one --- and remember that a full rebuild is minutes.
+
+It needs nothing from the server, because the run already answers the request
+that started it: that reply /is/ the notification, and
+=org-semantic-index-finished-functions= is where it arrives. Which is also its
+one limit. A run in another process --- a shell, a cron job, another Emacs ---
+belongs to a different server, and this one neither knows nor reports it, so
+there is nothing to wait for. Searches during such a run answer as they always
+did.
 
 A few things worth knowing before you build on this.
 

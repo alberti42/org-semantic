@@ -249,7 +249,33 @@ hearing about the search it asked for.")
   (on-reply #'ignore :documentation "Called with each reply plist.")
   (on-error #'ignore :documentation "\
 Called with the raw JSON-RPC error plist, which is what a failure
-callback is handed -- not a signalled `org-semantic-error'."))
+callback is handed -- not a signalled `org-semantic-error'.")
+  (on-waiting #'ignore :documentation "\
+Called with the vault when a search is held for an index, and
+called again from the reply that releases it.  Only under
+`org-semantic-wait-for-index'.")
+  (held nil :documentation "\
+The function waiting on `org-semantic-index-finished-functions',
+or nil.  Removed by a newer query and by
+`org-semantic-ui-driver-abandon'."))
+
+(defcustom org-semantic-wait-for-index nil
+  "Whether a search waits for an index this Emacs is building.
+
+Off, the default, answers from the version committed before the
+run started.  The reply says the index is a version behind, and
+the results buffer marks the list.
+
+On, the search is held and sent when the run replies.  Use it when
+a stale answer is worse than a slow one.  A rebuild takes minutes,
+so the buffer says what it is waiting for.
+
+It covers the runs this Emacs started, which is what
+`org-semantic-reindex' and `org-semantic-auto-reindex-mode' make.
+A run in another process -- a shell, a cron job, another Emacs --
+is invisible to this server and cannot be waited for."
+  :type 'boolean
+  :group 'org-semantic)
 
 (defconst org-semantic-ui--search-keys
   '(:vault :k :per-file :merge-by-section :mode :model :any :config)
@@ -278,11 +304,70 @@ Do not call it when a newer search is sent.  A reply overtaken by a
 later query is still the best result available, and dropping it
 would leave the buffer empty for one round trip."
   (cl-incf (org-semantic-ui-driver-epoch driver))
+  (org-semantic-ui--release driver)
   (setf (org-semantic-ui-driver-request driver) nil
         (org-semantic-ui-driver-pending driver) nil))
 
+(defun org-semantic-ui--release (driver)
+  "Stop DRIVER waiting for an index, if it is."
+  (when-let* ((fn (org-semantic-ui-driver-held driver)))
+    (remove-hook 'org-semantic-index-finished-functions fn)
+    (setf (org-semantic-ui-driver-held driver) nil)))
+
+(defun org-semantic-ui--hold (driver params vault)
+  "Hold PARAMS on DRIVER until the index of VAULT ends, then send them.
+
+The run answers the request that started it, so there is nothing to
+poll and no notification to invent: this waits on
+`org-semantic-index-finished-functions', which that reply runs.
+
+Both outcomes release it.  A run that fails must not leave a search
+waiting for ever."
+  ;; `os-' prefixes: the closure outlives this call, and a name that
+  ;; anything has `defvar'-ed would bind dynamically and be unwound.
+  (let* ((os-driver driver)
+         (os-params params)
+         (os-vault vault)
+         (os-epoch (org-semantic-ui-driver-epoch driver))
+         (os-done nil))
+    (setq os-done
+          (lambda (finished &rest _)
+            (when (equal finished os-vault)
+              (org-semantic-ui--release os-driver)
+              (when (= os-epoch (org-semantic-ui-driver-epoch os-driver))
+                (org-semantic-ui--fire os-driver os-params)))))
+    (setf (org-semantic-ui-driver-held driver) os-done)
+    (add-hook 'org-semantic-index-finished-functions os-done)
+    (funcall (org-semantic-ui-driver-on-waiting driver) vault)
+    ;; The run can end between the check that sent us here and the line
+    ;; above.  Its hook then fired before we were on it, and nothing would
+    ;; ever release this.  Asking again after registering closes that, and
+    ;; costs a hash lookup.
+    (unless (org-semantic-indexing-p vault)
+      (funcall os-done vault))))
+
 (defun org-semantic-ui--fire (driver params)
-  "Send PARAMS on DRIVER now, and send whatever is pending from the reply."
+  "Send PARAMS on DRIVER now, and send whatever is pending from the reply.
+
+Under `org-semantic-wait-for-index', a search for a vault this
+Emacs is indexing is held instead of sent, and goes out when the
+run replies.  Only that vault: the server reports its own runs, so
+an index in another process is not visible and cannot be waited
+for."
+  ;; Whatever this driver was waiting for, it is not waiting for it now:
+  ;; either we are about to send, or `--hold' is about to wait afresh.
+  ;; Left on the hook, the old closure would fire a superseded query.
+  (org-semantic-ui--release driver)
+  (let ((vault (plist-get params :vault)))
+    ;; The vault must come from PARAMS.  `org-semantic-indexing-p' falls back
+    ;; to the current buffer's, which in a results buffer is not the vault
+    ;; being searched, and which raises when there is none.
+    (if (and org-semantic-wait-for-index vault (org-semantic-indexing-p vault))
+        (org-semantic-ui--hold driver params vault)
+      (org-semantic-ui--send driver params))))
+
+(defun org-semantic-ui--send (driver params)
+  "Send PARAMS on DRIVER, and send whatever is pending from the reply."
   ;; `os-' prefixes, as everywhere a callback outlives its call.  A name
   ;; that anything has `defvar'-ed binds dynamically, and is unwound
   ;; before the reply arrives.

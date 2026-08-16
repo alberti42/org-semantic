@@ -684,7 +684,12 @@ the header would say \"semantic\" over results found by word."
              (lambda (error-object)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (org-semantic-results--render-error error-object))))))))
+                   (org-semantic-results--render-error error-object))))
+             :on-waiting
+             (lambda (_vault)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (org-semantic-results--render-waiting))))))))
   (setq org-semantic-results--asked-mode (or mode org-semantic-results--mode))
   ;; A new search is a new question.  The latch stops one reply being
   ;; asked about twice.  Left uncleared, it stops every later search in
@@ -1469,6 +1474,24 @@ The search results will appear here by themselves when downloading has finished.
              'face 'org-semantic-results-location
              'read-only t))
     (goto-char (point-min))))
+
+(defun org-semantic-results--render-waiting ()
+  "Say that the search is held until the index finishes.
+
+Under `org-semantic-wait-for-index' the old hits must not be shown,
+so they are replaced rather than marked.  The search is sent from
+the run's reply, and the results appear here."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (org-semantic-results--insert-header nil nil)
+    (insert (propertize
+             "  please wait: this vault is being indexed.\n  \
+The search results will appear here by themselves when indexing has finished.\n"
+             'face 'org-semantic-results-location
+             'read-only t))
+    (goto-char (point-min)))
+  (setq mode-line-process " [waiting for the index]")
+  (force-mode-line-update))
 
 (defun org-semantic-results--reindex (full)
   "Index this buffer's vault, then search again.  FULL rebuilds from scratch."

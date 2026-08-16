@@ -427,6 +427,24 @@ or sending a request first.")
 (defvar org-semantic--runs (make-hash-table :test 'equal)
   "The id of the index in flight for each vault, so it can be cancelled.")
 
+(defvar org-semantic-index-finished-functions nil
+  "Abnormal hook run when an index this client started has ended.
+
+Each function is called with two arguments: the vault, and the
+result plist, or nil if the run failed or was cancelled.  It runs
+after the vault leaves `org-semantic--runs', so
+`org-semantic-indexing-p' already answers nil.
+
+This is how a caller learns that a run is over without asking
+again.  The server sends no such notification and needs to send
+none: a run answers the request that started it, and only the
+process that started it has one to answer.  A run in a shell or in
+another Emacs is a different server, and nothing here hears about
+it.
+
+Both outcomes are reported, because a caller waiting for a run
+must not wait for ever when the run fails.")
+
 (defun org-semantic-running-p ()
   "Whether a server is running."
   (and org-semantic--connection
@@ -1094,11 +1112,17 @@ them can be dropped."
   (let* ((os-vault (or vault (org-semantic-vault-or-error)))
          (os-id nil)
          (os-release
-          (lambda ()
+          (lambda (result)
             ;; Only if it is still ours: a reply that arrives after the
             ;; next run has started must not retire that one's entry.
             (when (equal os-id (gethash os-vault org-semantic--runs))
-              (remhash os-vault org-semantic--runs)))))
+              (remhash os-vault org-semantic--runs))
+            ;; After the entry is gone, so a function that asks
+            ;; `org-semantic-indexing-p' is told the run is over.  Run on
+            ;; both outcomes: a waiter that heard only about success would
+            ;; wait for ever on a run that failed.
+            (run-hook-with-args 'org-semantic-index-finished-functions
+                                os-vault result))))
     (setq os-id
           (org-semantic--call-async
            "index"
@@ -1111,10 +1135,10 @@ them can be dropped."
            :timeout org-semantic-index-timeout
            :progress progress
            :success (lambda (result)
-                      (funcall os-release)
+                      (funcall os-release result)
                       (when success (funcall success result)))
            :failure (lambda (error-object)
-                      (funcall os-release)
+                      (funcall os-release nil)
                       (org-semantic--failed error-object failure))))
     (puthash os-vault os-id org-semantic--runs)
     os-id))

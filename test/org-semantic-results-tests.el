@@ -1107,6 +1107,136 @@ so, since the buffer would simply stop changing."
         (org-semantic-ui-ask driver '(:query "b" :vault "/v"))
         (should (equal (nreverse sent) '("a" "b")))))))
 
+(ert-deftest a-search-waits-for-the-index-this-emacs-is-building ()
+  "The run's own reply releases the search.  Nothing polls.
+
+`org-semantic-index-finished-functions' is run by the reply to the
+`index' request, which is the only notification there is or needs
+to be: a run answers the request that started it.  So the held
+search goes out exactly once, when the run ends, and not before."
+  (let ((sent nil) (waited 0)
+        (org-semantic-wait-for-index t)
+        (org-semantic--runs (make-hash-table :test 'equal))
+        (org-semantic-index-finished-functions nil))
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (query &rest _) (push query sent) 1)))
+      (puthash "/v" 7 org-semantic--runs)   ; a run of ours is in flight
+      (let ((driver (org-semantic-ui-driver-create
+                     :on-waiting (lambda (_vault) (cl-incf waited)))))
+        (org-semantic-ui-ask driver '(:query "a" :vault "/v"))
+        (should-not sent)
+        (should (= waited 1))
+        (should (org-semantic-ui-driver-held driver))
+        ;; The run ends the way `org-semantic-index' ends it.
+        (remhash "/v" org-semantic--runs)
+        (run-hook-with-args 'org-semantic-index-finished-functions "/v" '(:semantic nil))
+        (should (equal sent '("a")))
+        (should-not (org-semantic-ui-driver-held driver))
+        (should-not org-semantic-index-finished-functions)))))
+
+(ert-deftest waiting-for-an-index-is-off-and-bounded ()
+  "Three ways it must not hold a search, each of which would look like a hang."
+  (let ((sent nil)
+        (org-semantic--runs (make-hash-table :test 'equal))
+        (org-semantic-index-finished-functions nil))
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (query &rest _) (push query sent) 1)))
+      (puthash "/v" 7 org-semantic--runs)
+      ;; Off by default, whatever is running.
+      (let ((org-semantic-wait-for-index nil)
+            (driver (org-semantic-ui-driver-create)))
+        (org-semantic-ui-ask driver '(:query "off" :vault "/v"))
+        (should (equal sent '("off"))))
+      ;; A vault nothing is indexing is never held, even when it is on.
+      (let ((org-semantic-wait-for-index t)
+            (driver (org-semantic-ui-driver-create)))
+        (org-semantic-ui-ask driver '(:query "idle" :vault "/other"))
+        (should (equal (car sent) "idle")))
+      ;; A failed run releases it too.  Only success would wait for ever.
+      (let* ((org-semantic-wait-for-index t)
+             (driver (org-semantic-ui-driver-create)))
+        (org-semantic-ui-ask driver '(:query "failed" :vault "/v"))
+        (should-not (equal (car sent) "failed"))
+        (remhash "/v" org-semantic--runs)
+        (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
+        (should (equal (car sent) "failed")))
+      ;; And an abandoned buffer stops waiting rather than firing later.
+      (puthash "/v" 8 org-semantic--runs)
+      (let ((driver (org-semantic-ui-driver-create))
+            (org-semantic-wait-for-index t))
+        (org-semantic-ui-ask driver '(:query "killed" :vault "/v"))
+        (org-semantic-ui-driver-abandon driver)
+        (should-not org-semantic-index-finished-functions)
+        (remhash "/v" org-semantic--runs)
+        (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
+        (should-not (equal (car sent) "killed"))))))
+
+(ert-deftest a-run-announces-that-it-ended-however-it-ended ()
+  "`org-semantic-index' runs the hook on success and on failure.
+
+The failure half is the one that matters.  A waiter released only
+by success waits for ever on a run that failed, and the failure has
+already been reported elsewhere, so nothing says why the search
+never came back.
+
+Driven through `org-semantic-index' rather than by firing the hook,
+because what is under test is that *it* fires the hook."
+  (let* ((heard nil) (success nil) (failure nil)
+         (org-semantic--runs (make-hash-table :test 'equal))
+         ;; `let*`: the hook closes over `heard`, which a parallel `let`
+         ;; would not have bound yet.
+         (still nil)
+         (org-semantic-index-finished-functions
+          (list (lambda (vault result)
+                  ;; The order is load-bearing, not tidiness.  A hook that
+                  ;; runs while the vault is still in `org-semantic--runs'
+                  ;; releases a held search into a `--fire' that sees a run
+                  ;; in flight and holds it again -- for ever, because the
+                  ;; hook has already fired.
+                  (push (org-semantic-indexing-p vault) still)
+                  (push (cons vault result) heard)))))
+    (cl-letf (((symbol-function 'org-semantic--call-async)
+               (lambda (_method _params &rest keys)
+                 (setq success (plist-get keys :success)
+                       failure (plist-get keys :failure))
+                 42)))
+      (org-semantic-index :vault "/v")
+      (should (eq 42 (org-semantic-indexing-p "/v")))
+      (funcall success '(:semantic (:chunks 3)))
+      (should (equal (car heard) '("/v" :semantic (:chunks 3))))
+      (should-not (org-semantic-indexing-p "/v"))
+
+      (org-semantic-index :vault "/v")
+      ;; `org-semantic--failed' warns about an error nobody handles; the
+      ;; hook must run all the same.
+      (cl-letf (((symbol-function 'display-warning) #'ignore))
+        (funcall failure '(:message "no")))
+      (should (equal (car heard) '("/v")))
+      (should-not (org-semantic-indexing-p "/v"))
+      (should (equal still '(nil nil))))))
+
+(ert-deftest a-run-that-ends-before-we-are-listening-still-releases-us ()
+  "The window between the check and the hook is closed by asking again.
+
+`--fire' tests `org-semantic-indexing-p', then `--hold' adds to the
+hook.  A run that ends in between fires the hook before we are on
+it, and without the second check nothing would ever release the
+search -- a hang with no error and no message."
+  (let ((sent nil)
+        (org-semantic-wait-for-index t)
+        (org-semantic--runs (make-hash-table :test 'equal))
+        (org-semantic-index-finished-functions nil))
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (query &rest _) (push query sent) 1))
+              ;; True once, for `--fire', and false by the time `--hold'
+              ;; asks again: the run ended in the window.
+              ((symbol-function 'org-semantic-indexing-p)
+               (let ((asked 0)) (lambda (&rest _) (cl-incf asked) (= asked 1)))))
+      (let ((driver (org-semantic-ui-driver-create)))
+        (org-semantic-ui-ask driver '(:query "raced" :vault "/v"))
+        (should (equal sent '("raced")))
+        (should-not (org-semantic-ui-driver-held driver))))))
+
 (ert-deftest an-abandoned-driver-answers-nobody ()
   "A killed buffer's reply has nowhere to go, so it is dropped.
 
