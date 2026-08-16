@@ -1175,6 +1175,33 @@ search goes out exactly once, when the run ends, and not before."
         (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
         (should-not (equal (car sent) "killed"))))))
 
+(ert-deftest waiting-for-an-index-replaces-the-old-list-and-says-which-wait-it-is ()
+  "The two waits read differently, and neither leaves a stale list behind.
+
+The point of `org-semantic-require-fresh-index' is that an old list
+is not shown, so both messages must *replace* what is on screen and
+not merely sit above it.
+
+They differ in what they promise.  A run this Emacs started replies
+here, so the buffer may say the results will arrive.  A run in
+another program does not, so the buffer must ask the reader to
+search again instead of promising something it cannot deliver."
+  (dolist (case '((t   . "by themselves")
+                  (nil . "search again")))
+    (org-semantic-results-tests--drawn
+        ;; Three lines, because the fixture's span is 4..6 and a passage
+        ;; whose text does not match its span draws as unreadable instead.
+        (vector (org-semantic-results-tests--hit
+                 :text "one\nmust not survive the wait\nthree"))
+      (should (string-match-p "must not survive" (buffer-string)))
+      (org-semantic-results--render-waiting (car case))
+      (let ((shown (buffer-string)))
+        (should-not (string-match-p "must not survive" shown))
+        (should (string-match-p "being indexed" shown))
+        (should (string-match-p (cdr case) shown))
+        ;; And the other case's wording is not also present.
+        (should-not (string-match-p (if (car case) "search again" "by themselves") shown))))))
+
 (ert-deftest a-new-query-replaces-the-one-held-for-the-index ()
   "Typing again while waiting replaces the query.  It does not queue it.
 

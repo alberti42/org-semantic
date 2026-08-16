@@ -8155,6 +8155,55 @@ mod tests {
         assert_eq!((a.mean, a.sd), (b.mean, b.sd), "the same vectors give the same floor");
     }
 
+    /// A run given a model uses it, and loads no second one.
+    ///
+    /// This is the whole of what replaced `Lend`, and it is one edit from being
+    /// undone: reinstate a chunk-count threshold and a long run quietly holds a
+    /// second set of weights again — 229 MB on the smallest model, and never
+    /// returned, because RSS does not fall when a run ends.  Nothing about that
+    /// is visible in a reply, so only this says it.
+    ///
+    /// `cmd_index` prints "model loaded" exactly where it loads one, so the
+    /// journal is the witness.  The `None` half is what makes it a gate rather
+    /// than an assertion about a string that might have moved: the same run,
+    /// lent nothing, must say it.
+    ///
+    /// `--ignored` because both halves embed for real.
+    #[test]
+    #[ignore = "needs an embedding model in the cache"]
+    fn a_run_given_a_model_does_not_load_another() {
+        let v = scratch("lent-model");
+        // Comfortably more chunks than the threshold that used to send a long
+        // run off to load its own model (`4 * BATCH`).  A smaller vault cannot
+        // tell the two behaviours apart: the old code shared for short runs too,
+        // so the test would pass with the threshold back in place.
+        for i in 0..100 {
+            fs::write(v.join(format!("n{i:03}.org")), format!("#+title: N{i}\n* S{i}\nAtoms.\n"))
+                .unwrap();
+        }
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let said = |lend: Option<&Mutex<TextEmbedding>>| {
+            let log = v.join("run.log");
+            let mut j =
+                Journal::with(Box::new(fs::File::create(&log).unwrap()), Box::new(io::sink()));
+            cmd_index(&v, true, false, m, &Config::default(), &mut j, lend, &Cancel::default())
+                .unwrap();
+            drop(j);
+            fs::read_to_string(&log).unwrap()
+        };
+
+        let ours = Mutex::new(model_with(m.which.clone(), None, false).unwrap());
+        assert!(
+            !said(Some(&ours)).contains("model loaded"),
+            "lent a model, the run must embed with it and load nothing"
+        );
+        assert!(
+            said(None).contains("model loaded"),
+            "and lent none it must load one, or the check above passes on a \
+             message that simply moved"
+        );
+    }
+
     /// The batch order changes nothing about the index it produces.
     ///
     /// Two seeds, one vault, two full rebuilds, and `vectors.f32` compared byte
