@@ -58,6 +58,33 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+Needs the new binary. An older one gets both entries below silently wrong: it
+still loads a second model on a long rebuild, and it still loads a model to
+discover that an index it cannot read is unreadable. Raise the floor when this
+is released.
+
+### Changed
+
+- The server never holds two copies of the embedding model. An indexing run
+  shares the resident one, however long the run is. A search during a rebuild
+  waits for at most one embedding batch, which is a p90 of about 1.7 seconds.
+- A search that cannot be answered no longer loads a model to find that out. A
+  vault left behind by an index-layout change refused each search in about
+  190 ms, and did it again on every search. It is now about 1 ms.
+
+### Removed
+
+- `conserveMemory` on the `index` request, and `org-semantic-conserve-memory` in
+  Emacs. The option chose between one model and two; there is only one now.
+  Sending it does nothing rather than failing, so an older client is not broken.
+
+  It bought a p90 of 41 ms instead of 1.7 seconds for a search during a long
+  rebuild. It cost 229 MB on the small English model and more on the larger ones,
+  and that memory was never returned — the process stayed at its high mark until
+  restarted. It also could not apply at all unless the vault's index was both
+  readable and already searched, so the cases where a rebuild is most likely — no
+  index yet, a layout change, a new model — never reached it.
+
 ## [0.4.1] — 2026-08-15
 
 Binary version 0.3.0, unchanged — there is nothing to download, and an existing

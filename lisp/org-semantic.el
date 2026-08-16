@@ -141,22 +141,6 @@ seconds."
                  (const :tag "Semantic only" "semantic")
                  (const :tag "Lexical only" "lexical")))
 
-(defcustom org-semantic-conserve-memory nil
-  "Whether an index may load a second copy of the model.
-
-Off, the default, lets a long rebuild load its own weights, so that
-searching and indexing run side by side.  This costs about 229 MB
-on the small English model, and some gigabytes on the large
-multilingual ones.  The process keeps that memory until it exits.
-
-On, the two share one model and take turns.  A query that arrives
-during an embedding batch then waits for it.
-
-It is concurrency against memory, not speed against memory.  It
-changes nothing while no index runs, and nothing at all for lexical
-search, which uses no model."
-  :type 'boolean)
-
 (defcustom org-semantic-config nil
   "The indexing policy to send with every request, or nil to send none.
 
@@ -1080,14 +1064,14 @@ text can be older than the note."
 ;;;; Indexing
 
 (cl-defun org-semantic-index (&key vault mode full rehash model config
-                                   conserve-memory success failure progress)
+                                   success failure progress)
   "Index VAULT, without waiting, and return the request id.
 
 MODE is \"semantic\", \"lexical\" or \"both\", and defaults to
 `org-semantic-index-mode'.  FULL rebuilds from scratch, which is
 also how a changed policy is agreed to; REHASH re-reads every
-note rather than trusting its timestamp.  MODEL, CONFIG and
-CONSERVE-MEMORY default to the corresponding settings.
+note rather than trusting its timestamp.  MODEL and CONFIG
+default to the corresponding settings.
 
 SUCCESS is called with what each index did, as numbers, and with
 any `remarks': warnings that did not stop the run, which travel on
@@ -1123,12 +1107,7 @@ them can be dropped."
             :mode (or mode org-semantic-index-mode)
             :full (and full t) :rehash (and rehash t)
             :model (or model org-semantic-model)
-            :config (or config org-semantic-config)
-            ;; Spelled out, since the point of sending it at all is to
-            ;; say which of the two it is.
-            :conserveMemory (org-semantic--bool
-                             (or conserve-memory
-                                 org-semantic-conserve-memory)))
+            :config (or config org-semantic-config))
            :timeout org-semantic-index-timeout
            :progress progress
            :success (lambda (result)

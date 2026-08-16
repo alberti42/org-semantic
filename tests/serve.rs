@@ -643,12 +643,13 @@ fn a_semantic_search_answers_from_the_old_version_during_a_rebuild() {
 
     // A note the rebuild will pick up and the committed version cannot know.
     std::fs::write(v.join("hare.org"), "#+title: Hare\n* Hare on a bicycle\nIt pedals.\n").unwrap();
-    // `conserveMemory`, so this run *shares* the resident model rather than
-    // loading its own — the path where the searcher and the indexer really do
-    // contend for one `TextEmbedding`, which is what this test is here to cover.
-    // The default path leaves them independent and would prove less.
+    // The run shares the resident model, which is now the only thing it can do:
+    // the searcher and the indexer really do contend for one `TextEmbedding`,
+    // and this is the test that covers it. It used to need `conserveMemory:
+    // true` to reach this path, because a run this long would otherwise have
+    // loaded a private model and proved less.
     s.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
-                    "params": { "vault": v, "full": true, "conserveMemory": true } }));
+                    "params": { "vault": v, "full": true } }));
     let first = read_one(&mut s.stdout).expect("it reports before it finishes");
     assert_eq!(first["method"], "$/progress");
 

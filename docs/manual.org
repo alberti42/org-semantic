@@ -711,7 +711,6 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-auto-reindex-delay~    | =2.0=          | seconds of quiet after a save before it runs                |
 | ~org-semantic-auto-reindex-quietly~  | =t=            | whether a run that worked says so                           |
 | ~org-semantic-config~                | =nil=          | the indexing policy to send --- below                       |
-| ~org-semantic-conserve-memory~       | =nil=          | see [[#during-a-reindex][Searching while it reindexes]]     |
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
 | ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
@@ -987,7 +986,7 @@ Methods:
 |-------------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
 | =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...], "indexing": false}= |
-| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config=, =conserveMemory= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
+| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
@@ -1262,31 +1261,24 @@ reply says so:
 Grey the list, or label it; the next search after the run replies will be current.
 =status= carries the same flag for a client that wants to ask before searching.
 
-Two things worth knowing before you build on this.
+A few things worth knowing before you build on this.
 
-*A long rebuild loads its own copy of the model, so that searching stays fast.*
-The server keeps one model resident for queries. Lending it to an indexing run is
-what makes re-embedding a note you just saved cost the embedding and nothing else
---- but a borrowed model is a shared one, and a query then waits for whatever
-batch is being embedded. So the run borrows it only while there is little to do,
-and loads its own for anything longer, leaving the resident one to the searcher.
+*A search during a rebuild waits for one embedding batch.* The server keeps one
+model resident, and the indexing run uses that same one --- holding it for a batch
+at a time and releasing it in between, so a query arriving mid-batch waits for
+that batch and no longer. The wait is =BATCH= divided by chunks per second: a
+*p90 of about 1.7 seconds* on a full rebuild, against 9 ms for a warm query with
+nothing else running. So a rebuild does not block searching, but it is too slow to search as you
+type. Wait for the run, or use the word index.
 
-The difference is large. Measured on 600 notes: a full rebuild that loads its own
-model answers searches in *41 ms* at the ninetieth percentile, against *1.7
-seconds* when it shares --- and the rebuild itself takes the same time either way.
-
-What it costs is memory, and more of it than the second model alone. Measured on
-the same vault with the small English model: the server sits at 255 MB answering
-queries, reaches 691 MB through a rebuild that shares the model, and 920 MB
-through one that loads its own. So the second copy is about 230 MB --- more like
-800 MB for =e5-small=, a couple of gigabytes for the large multilingual ones ---
-while the rest is the runtime's own working memory, which a rebuild needs either
-way. *And it does not come back when the run ends*: the process stays at its high
-mark until you restart it.
-
-If that is the wrong trade for your machine, pass =conserveMemory: true= with the
-=index= request and the run will share the one model however long it takes. In
-Emacs this is =org-semantic-conserve-memory=.
+*The process never holds a second copy of the model.* An earlier version let a
+long run load its own, which answered searches in 41 ms instead of 1.7 seconds.
+It cost 229 MB on the small English model, and more on the larger ones in
+proportion to their weights. That memory was never returned: the process stayed at
+its high mark until you restarted it. The option that declined this,
+=conserveMemory=, is gone with it. A rebuild still needs memory for the runtime's
+own working set, which measures at about 691 MB on the small English model against
+255 MB idle.
 
 *Lexical search is unaffected either way* --- it uses no model --- and stays at a
 few milliseconds throughout, which makes it the better fallback while a semantic

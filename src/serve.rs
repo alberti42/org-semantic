@@ -140,21 +140,15 @@ struct Plan {
     rehash: bool,
     want: &'static Model,
     cfg: Config,
-    /// Never hold a second set of weights, whatever it costs a search.
-    ///
-    /// A **parameter and not policy**: it changes nothing about what the index
-    /// contains, so putting it in `Config` would hash it into the manifest and
-    /// demand a reindex the first time someone toggled a memory setting.
-    conserve: bool,
 }
 
 impl Server {
     /// Refuse a search that would have to fetch a model — before anything slow
     /// happens.
     ///
-    /// **A search may not fetch a model.** Indexing takes `Lend::Own` and loads
-    /// its own, so `model` below is the only place `serve` loads one and this is
-    /// the check that stands in front of it.
+    /// **A search may not fetch a model.** Indexing loads its own when there is
+    /// nothing resident to share, so `model` below is the only place `serve`
+    /// loads one for a *query*, and this is the check that stands in front of it.
     ///
     /// Not a timeout problem, though that is how it shows up: a search is
     /// answered *on the message loop*, and `model_with` would block it for the
@@ -201,10 +195,10 @@ impl Server {
     /// since they are fastembed's to change.
     ///
     /// Whatever is done here, **keep the bias**: this must fail towards "cached".
-    /// The refusal is not self-correcting — `index` takes `Lend::Own` and never
-    /// populates `Server::models` — so a search that says "missing" about a model
-    /// that is present says it again after the very run it asked for, and for
-    /// ever.
+    /// The refusal is not self-correcting — a run that loads a model of its own
+    /// never populates `Server::models` — so a search that says "missing" about a
+    /// model that is present says it again after the very run it asked for, and
+    /// for ever.
     ///
     /// VAULT is not used to find the model — one model serves every vault — but
     /// to say, when refusing, whether a run that will fetch it is already going.
@@ -513,10 +507,10 @@ impl Server {
         };
         let full = p.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
         let rehash = p.get("rehash").and_then(|v| v.as_bool()).unwrap_or(false);
-        // For a client whose user is short of memory rather than of patience.
-        // Off by default: the second model is transient and a rebuild is rare,
-        // so most people would rather have the responsive search.
-        let conserve = p.get("conserveMemory").and_then(|v| v.as_bool()).unwrap_or(false);
+        // `conserveMemory` was read here. It said whether a long run might load
+        // a second model, and nothing loads one now, so an older client sending
+        // it is ignored like any other unknown key rather than refused.
+        //
         // Emacs keeps its policy in whatever format it likes — a commented
         // `.eld`, say — and passes it here already parsed, so neither side
         // needs a reader for the other's syntax.
@@ -559,7 +553,7 @@ impl Server {
                 )?;
             }
         }
-        Ok(Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve })
+        Ok(Plan { vault, semantic, lexical, full, rehash, want, cfg })
     }
 
     /// Start an `index` and return to the loop.
@@ -710,7 +704,7 @@ impl Server {
 
     /// The run itself, on the worker.
     fn run(&self, plan: Plan, j: &mut Journal, stop: &Cancel) -> Result<serde_json::Value> {
-        let Plan { vault, semantic, lexical, full, rehash, want, cfg, conserve } = plan;
+        let Plan { vault, semantic, lexical, full, rehash, want, cfg } = plan;
         let mut done = serde_json::Map::new();
 
         // Languages come from the policy, not from separate parameters: they are
@@ -727,21 +721,19 @@ impl Server {
             // journal: a flag is something you can forget to clear, a mark is
             // not.
             let mark = j.remarks.len();
-            // Offer the resident model if this vault's index is already loaded.
-            // A vault nobody has searched has no entry and no model to offer, so
-            // the run loads one of its own and drops it; the first search after
-            // it reads the committed index from disk, as it always did.
+            // Hand over the resident model if this vault's index is loaded, and
+            // it is always taken: the run holds it one batch at a time, so a
+            // query waits for a batch rather than for the run. A vault nobody has
+            // searched has no entry and no model to hand over, so the run loads
+            // one of its own and drops it; the first search after it reads the
+            // committed index from disk, as it always did.
             //
-            // Whether the offer is *taken* for a long run is `cmd_index`'s call,
-            // since it is the one that knows how many chunks there are — unless
-            // the client has asked us never to hold two sets of weights, which is
-            // an answer no chunk count overrides.
+            // **This process never holds two sets of weights.** A long run used
+            // to take a private model, and `conserveMemory: true` was how a
+            // client declined that. Both are gone — see the match in `cmd_index`
+            // for what the trade was and why it was not worth its permanent cost.
             let loaded = lock(&self.semantic).get(&key).cloned();
-            let lend = match (loaded.as_ref(), conserve) {
-                (Some(s), true) => Lend::Always(&s.model),
-                (Some(s), false) => Lend::IfShort(&s.model),
-                (None, _) => Lend::Own,
-            };
+            let lend = loaded.as_ref().map(|s| s.model.as_ref());
             let out = cmd_index(&vault, full, rehash, want, &cfg, j, lend, stop)?;
             for r in &mut j.remarks[mark..] {
                 r.target = Some("semantic");

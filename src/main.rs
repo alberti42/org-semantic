@@ -4299,45 +4299,6 @@ struct IndexReport {
     secs: f64,
 }
 
-/// What the caller wants done about the embedding model.
-///
-/// A resident server holds one, and lending it to an indexing run is what makes
-/// re-embedding a just-saved note cost the embedding and nothing else. But the
-/// lend is a `Mutex`, so a search during a long run waits out the batch in
-/// flight — every time. The choice is between a model load and that wait, and it
-/// depends on how long the run turns out to be, which only `cmd_index` knows.
-///
-/// Hence three cases rather than an `Option`: the caller says what it wants and
-/// the decision is made where the chunk count is.
-enum Lend<'a> {
-    /// Nothing to share — the CLI, where there is no second user and no wait to
-    /// protect anyone from.
-    Own,
-    /// Share this one however long the run turns out to be. What a
-    /// RAM-constrained client asks for: a search during a rebuild pays for it,
-    /// and the process never holds a second set of weights.
-    Always(&'a Mutex<TextEmbedding>),
-    /// Share it for a short run, load a private one for a long one.
-    ///
-    /// A search waits one batch whether the run is two batches or two thousand —
-    /// what a long run changes is how *many* searches pay it. So a run that will
-    /// be over in a moment is not worth a model load, and one that will take
-    /// minutes is.
-    IfShort(&'a Mutex<TextEmbedding>),
-}
-
-/// Above this many chunks to embed, an indexing run loads its own model rather
-/// than borrowing the resident one, so that searches keep the resident one to
-/// themselves.
-///
-/// Four batches — expressed in `BATCH` because the wait being avoided is exactly
-/// one of those. On a real corpus that is ~6 s of embedding; under it, the run
-/// ends about as quickly as a second model could be loaded, and the load would
-/// cost more than the contention. A judgement, not a measurement: the two costs
-/// are within a factor of a few of each other around here, and the numbers that
-/// were measured are the ones either side of it — see `Lend`.
-const SHARE_UP_TO: usize = 4 * BATCH;
-
 /// How many chunks go to the model at once — and, because the model is locked for
 /// exactly one of these, **how long a search waits during a rebuild**.
 ///
@@ -4376,7 +4337,11 @@ fn cmd_index(
     m: &Model,
     cfg: &Config,
     j: &mut Journal,
-    lend: Lend<'_>,
+    // The resident model to share, when the caller has one.  `Some` for `serve`
+    // on a vault something has already searched; `None` for the CLI, and for a
+    // vault nothing has searched, where there is nothing to share and this loads
+    // a model of its own.  **Never a second one** — see the match below.
+    lend: Option<&Mutex<TextEmbedding>>,
     stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
@@ -4677,8 +4642,16 @@ fn cmd_index(
     if pending.is_empty() {
         writeln!(j.out, "no new text to embed; rewriting the manifest")?;
     } else {
-        // Borrow the resident model, or load one of our own — the trade is a
-        // model load against a search waiting out our batches.  See `Lend`.
+        // Share the caller's model, or load one because there is none to share.
+        // **Never load a second one**, which this did above a chunk-count
+        // threshold: a long run took a private model so that the resident one
+        // stayed exclusively the searcher's.  That bought a p90 of 41 ms against
+        // 1.7 s for a query arriving mid-rebuild, and cost 229 MB on the smallest
+        // model — permanently, because RSS does not fall when a run ends.  It
+        // could also only ever apply to a vault whose index was readable *and*
+        // already searched: no index, a layout bump or a new model each leave
+        // nothing resident, so the run loaded its own regardless.  A rare gain,
+        // a lasting cost, and a rule nobody could predict the effect of.
         //
         // Behind a `Mutex` either way, so there is one path rather than two.
         // Uncontended that costs ~20 ns against a batch of seconds; contended, it
@@ -4686,9 +4659,8 @@ fn cmd_index(
         let t1 = Instant::now();
         let owned;
         let model: &Mutex<TextEmbedding> = match lend {
-            Lend::Always(m) => m,
-            Lend::IfShort(m) if pending.len() <= SHARE_UP_TO => m,
-            _ => {
+            Some(resident) => resident,
+            None => {
                 owned = Mutex::new(model_with(m.which.clone(), None, false)?);
                 writeln!(j.out, "model loaded in {:.2}s", t1.elapsed().as_secs_f64())?;
                 &owned
@@ -5776,7 +5748,7 @@ fn main() -> Result<()> {
             // announce an unknown language code twice.
             prepare_lang(&lang, &mut j)?;
             if both || !lexical {
-                cmd_index(vault, full, rehash, model, &cfg, &mut j, Lend::Own, &Cancel::default())?;
+                cmd_index(vault, full, rehash, model, &cfg, &mut j, None, &Cancel::default())?;
             }
             if both || lexical {
                 cmd_index_lexical(
@@ -6720,7 +6692,7 @@ mod tests {
             m,
             &Config::default(),
             &mut Journal::quiet(),
-            Lend::Own,
+            None,
             &Cancel::default(),
         )
         .unwrap()
@@ -6828,7 +6800,7 @@ mod tests {
             m,
             &Config::default(),
             &mut Journal::quiet(),
-            Lend::Own,
+            None,
             &Cancel::default(),
         )
         .unwrap();
@@ -6886,7 +6858,7 @@ mod tests {
         let cfg = Config { languages: vec!["en-US".into(), "de-DE".into()], ..Config::default() };
         let mut j = Journal::quiet();
         prepare_lang(&LangConfig { languages: cfg.languages.clone() }, &mut j).unwrap();
-        cmd_index(&v, true, false, m, &cfg, &mut j, Lend::Own, &Cancel::default()).unwrap();
+        cmd_index(&v, true, false, m, &cfg, &mut j, None, &Cancel::default()).unwrap();
 
         let ix = Index::read(&semantic_dir(&v, m), m).unwrap();
         let of = |p: &str| ix.chunks.iter().find(|c| c.path == p).map(|c| c.lang.clone());
@@ -7039,18 +7011,9 @@ mod tests {
             .unwrap()
         };
         let semantic = |rehash: bool| {
-            cmd_index(
-                &v,
-                false,
-                rehash,
-                m,
-                &cfg,
-                &mut Journal::quiet(),
-                Lend::Own,
-                &Cancel::default(),
-            )
-            .unwrap()
-            .report
+            cmd_index(&v, false, rehash, m, &cfg, &mut Journal::quiet(), None, &Cancel::default())
+                .unwrap()
+                .report
         };
         let recorded = || -> LexManifest {
             serde_json::from_slice(&fs::read(lex_manifest_path(&state_dir(&v))).unwrap()).unwrap()
@@ -7138,7 +7101,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            Lend::Own,
+            None,
             &Cancel::default(),
         )
         .unwrap();
@@ -7168,7 +7131,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            Lend::Own,
+            None,
             &Cancel::default(),
         )
         .unwrap();
@@ -7570,18 +7533,10 @@ mod tests {
         let (mut j, log) = watched();
         let m = model_named(DEFAULT_MODEL).unwrap();
         // Nothing changed since the seed, so every file takes an early exit.
-        let r = cmd_index(
-            &v,
-            false,
-            false,
-            m,
-            &Config::default(),
-            &mut j,
-            Lend::Own,
-            &Cancel::default(),
-        )
-        .unwrap()
-        .report;
+        let r =
+            cmd_index(&v, false, false, m, &Config::default(), &mut j, None, &Cancel::default())
+                .unwrap()
+                .report;
         assert_eq!(r.embedded, 0, "the premise: this run does no work per note");
 
         let seen = lock(&log);
@@ -8217,7 +8172,7 @@ mod tests {
             model_named(DEFAULT_MODEL).unwrap(),
             &Config::default(),
             &mut Journal::quiet(),
-            Lend::Own,
+            None,
             &Cancel::default(),
         )
         .unwrap();
