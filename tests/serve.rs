@@ -1092,6 +1092,54 @@ fn a_missing_model_sends_the_client_to_download() {
     assert_eq!(data["model"], "bge-small-en");
 }
 
+/// A search that cannot be answered must not load a model to find that out.
+///
+/// `Server::semantic` took the model first and read the index second, so a vault
+/// left behind by an `INDEX_VERSION` bump paid a 0.12–0.64 s load on the message
+/// loop and then threw the model away: nothing owns the `Arc` until the entry is
+/// inserted, and `Server::models` keeps only a `Weak`. The error was right and
+/// the cost was invisible — and it was paid **per search**, which is why this
+/// asks twice.
+///
+/// Timing is the only witness, since both orders answer `index-layout`. The
+/// margin is two orders of magnitude, so the threshold is loose and still
+/// discriminates: put the two lines back and each reply takes longer than all of
+/// this allows.
+#[test]
+#[ignore = "needs an embedding model in the cache"]
+fn an_unreadable_index_is_refused_without_loading_a_model() {
+    let v = vault("stale-layout", 1);
+    let dir = v.join(".org-semantic").join("semantic").join("bge-small-en");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Enough of a manifest to be found and parsed, and a layout nothing serves.
+    // `chunks.json` and `vectors.f32` are deliberately absent: the point is that
+    // the refusal comes before anything reads them, or loads a model to.
+    std::fs::write(
+        dir.join("manifest.json"),
+        json!({ "version": 1, "model": "bge-small-en", "dim": 384, "files": {} }).to_string(),
+    )
+    .unwrap();
+
+    let mut s = Session::open();
+    for id in 1..=2 {
+        let t = std::time::Instant::now();
+        s.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "search",
+                        "params": { "vault": v, "query": "atoms", "mode": "semantic",
+                                    "model": "bge-small-en" } }));
+        let err = s.reply()["error"].clone();
+        let waited = t.elapsed();
+        assert_eq!(
+            err["data"]["kind"], "index-layout",
+            "the layout is what is wrong (is bge-small-en cached?): {err:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_millis(60),
+            "refusal {id} took {waited:?} — long enough to have loaded a model"
+        );
+    }
+    s.close();
+}
+
 #[test]
 #[ignore = "downloads the 938 kB language classifier"]
 fn a_cold_classifier_is_announced_before_it_is_fetched() {
