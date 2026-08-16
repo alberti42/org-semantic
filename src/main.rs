@@ -4693,17 +4693,17 @@ fn cmd_index(
         // the order of those two changes between runs.  It also changes no
         // vector.  fastembed embeds a batch from its own members and pads to the
         // longest of them, so the output does not depend on when the batch runs.
-        // Checked by rebuilding one vault both ways: `vectors.f32` was identical
-        // byte for byte.  A test cannot reach this, because it would need both
-        // orders in one binary.
-        let mut batches: Vec<&[usize]> = order.chunks(BATCH).collect();
-        let mut rng = Rng::new();
-        for i in (1..batches.len()).rev() {
-            batches.swap(i, rng.next() % (i + 1));
-        }
+        // `the_batch_order_does_not_change_the_vectors` holds that, by indexing
+        // one vault under two seeds and comparing the two files.
+        //
+        // The write-back below is what that test really guards.  A vector goes to
+        // `pending[i]`, the chunk's own slot, so the file does not depend on the
+        // order.  Write sequentially instead and a shuffled run scrambles every
+        // vector against its chunk, which no length check can see.
+        let batches: Vec<&[usize]> = order.chunks(BATCH).collect();
 
         let (mut done, mut tokens_done) = (0usize, 0usize);
-        for group in batches {
+        for group in batch_order(batches.len(), shuffle_seed()).into_iter().map(|b| batches[b]) {
             stop.check()?;
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
             // Locked for one batch and released between them, which is what
@@ -4791,9 +4791,18 @@ fn cmd_index(
 /// from the clock.
 struct Rng(u64);
 
+/// The seed both callers start from.  Named so a test can pass a different one
+/// to `batch_order` and get a different permutation of the same batches.
+const SEED: u64 = 0x2545_F491_4F6C_DD1D;
+
 impl Rng {
     fn new() -> Rng {
-        Rng(0x2545_F491_4F6C_DD1D)
+        Rng::from_seed(SEED)
+    }
+
+    /// Any odd seed will do; xorshift64 only fails on zero.
+    fn from_seed(seed: u64) -> Rng {
+        Rng(if seed == 0 { SEED } else { seed })
     }
 
     fn next(&mut self) -> usize {
@@ -4802,6 +4811,41 @@ impl Rng {
         self.0 ^= self.0 << 17;
         (self.0 >> 33) as usize
     }
+}
+
+/// The positions of N batches, shuffled.
+///
+/// Its own function so a test can compare two seeds.  See
+/// `the_batch_order_does_not_change_the_vectors`, which is the only reason
+/// `cmd_index` reads the seed through `shuffle_seed` instead of using `SEED`.
+fn batch_order(n: usize, seed: u64) -> Vec<usize> {
+    let mut at: Vec<usize> = (0..n).collect();
+    let mut rng = Rng::from_seed(seed);
+    for i in (1..n).rev() {
+        at.swap(i, rng.next() % (i + 1));
+    }
+    at
+}
+
+/// `SEED`, except under test.
+///
+/// The seam exists for one test, and it is `#[cfg(test)]` so the shipped binary
+/// keeps a constant and cannot be talked into a different order by anything.
+/// A thread-local rather than a global, because the tests run on threads and a
+/// global would race the way `std::env::set_var` does.
+#[cfg(not(test))]
+fn shuffle_seed() -> u64 {
+    SEED
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEED_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(SEED) };
+}
+
+#[cfg(test)]
+fn shuffle_seed() -> u64 {
+    SEED_OVERRIDE.with(std::cell::Cell::get)
 }
 
 #[derive(Clone, Copy)]
@@ -8079,6 +8123,69 @@ mod tests {
         }
         let (a, b) = (Baseline::of(&v, dim).unwrap(), Baseline::of(&v, dim).unwrap());
         assert_eq!((a.mean, a.sd), (b.mean, b.sd), "the same vectors give the same floor");
+    }
+
+    /// The batch order changes nothing about the index it produces.
+    ///
+    /// Two seeds, one vault, two full rebuilds, and `vectors.f32` compared byte
+    /// for byte.  The seeds give different permutations of the *same* batches, so
+    /// each batch keeps its members and fastembed pads it to the same length.
+    /// Only the moment each batch runs differs.
+    ///
+    /// It guards our write-back more than it guards fastembed.  A vector is
+    /// written to `pending[i]`, the slot of the chunk it belongs to.  Write them
+    /// out in the order the batches finish instead and every vector lands against
+    /// the wrong chunk, while the count still matches, so `load_index` sees
+    /// nothing wrong and every search answers with the wrong note.
+    ///
+    /// `--ignored` because it embeds for real, twice.
+    #[test]
+    #[ignore = "needs an embedding model in the cache"]
+    fn the_batch_order_does_not_change_the_vectors() {
+        let v = scratch("batch-order");
+        for i in 0..120 {
+            // Lengths spread widely, so the sort makes batches that really do
+            // differ from each other and a reordering is worth something.
+            let body = "trapped atoms in an optical lattice. ".repeat(1 + i % 25);
+            fs::write(v.join(format!("n{i:03}.org")), format!("#+title: N{i}\n* S{i}\n{body}\n"))
+                .unwrap();
+        }
+        let m = model_named(DEFAULT_MODEL).unwrap();
+        let (a, b) = (SEED, 0x9E37_79B9_7F4A_7C15);
+
+        // The running token count is the witness that the orders really differed.
+        // Each batch adds its own tokens, so the sequence of partial sums is the
+        // order, read back from the run itself.  Without this the test passes for
+        // the wrong reason if `shuffle_seed` ever stops reading the override:
+        // both runs then use one seed, and identical vectors prove nothing.
+        let build = |seed: u64| {
+            SEED_OVERRIDE.with(|s| s.set(seed));
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            let mut j = Journal::quiet();
+            j.watch = Some(Box::new(move |p| {
+                if p.phase == "embed" {
+                    sink.lock().unwrap().push(p.tokens);
+                }
+            }));
+            cmd_index(&v, true, false, m, &Config::default(), &mut j, None, &Cancel::default())
+                .unwrap();
+            drop(j);
+            let steps = seen.lock().unwrap().clone();
+            (fs::read(semantic_dir(&v, m).join("vectors.f32")).unwrap(), steps)
+        };
+        let (first, steps_a) = build(a);
+        let (second, steps_b) = build(b);
+        SEED_OVERRIDE.with(|s| s.set(SEED));
+
+        assert!(steps_a.len() > 3, "too few batches for an order to mean anything");
+        assert_ne!(
+            steps_a, steps_b,
+            "the two runs embedded in the same order, so this proves nothing"
+        );
+        assert_eq!(steps_a.last(), steps_b.last(), "and yet both ran every batch exactly once");
+        assert_eq!(first.len(), second.len(), "the same vault gives the same number of vectors");
+        assert!(first == second, "the batch order changed the vectors");
     }
 
     #[test]
