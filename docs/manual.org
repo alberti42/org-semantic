@@ -75,6 +75,13 @@ anything interactive, run [[#driving-it-from-an-editor][=org-semantic serve=]]
 instead: it keeps the model and the vectors resident, and answers in *7--9 ms*
 by meaning or *3 ms* by word --- fast enough to search as you type.
 
+*Every timing in this manual is an order of magnitude, not a promise.* All of
+them, the example above included, come from an Apple M2 laptop with 4
+performance cores, against vaults of several hundred to a thousand notes.
+Embedding tracks the CPU almost exactly, so your own figures will differ ---
+what holds everywhere is the shape of them: the word index in seconds, the
+embeddings in minutes, and a warm query in milliseconds either way.
+
 * Why
 :PROPERTIES:
 :CUSTOM_ID: why
