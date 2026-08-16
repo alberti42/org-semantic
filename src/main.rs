@@ -4676,8 +4676,34 @@ fn cmd_index(
         let mut order: Vec<usize> = (0..texts.len()).collect();
         order.sort_unstable_by_key(|&i| pending_len[i]);
 
+        // The sort groups each batch by length.  The batches then run in a
+        // shuffled order.  These are two separate things: the grouping removes
+        // the padding, and it survives the shuffle, because a batch keeps its
+        // members whichever position it runs in.
+        //
+        // Sorted order ran every short batch first and every long batch last, so
+        // the chunks per second on the progress line fell for the whole run and
+        // the eta fell with it.  Measured on 713 chunks: the cumulative rate went
+        // from 109.9/s at one tenth of the work to 28.4/s at the end, a drift of
+        // 3.9 times.  Shuffled, the same run went from 41.1/s to 27.8/s, a drift
+        // of 1.5.  A run that reports itself slowing down looks like a run in
+        // trouble.
+        //
+        // This costs no throughput: 25.1 s sorted against 25.7 s shuffled, and
+        // the order of those two changes between runs.  It also changes no
+        // vector.  fastembed embeds a batch from its own members and pads to the
+        // longest of them, so the output does not depend on when the batch runs.
+        // Checked by rebuilding one vault both ways: `vectors.f32` was identical
+        // byte for byte.  A test cannot reach this, because it would need both
+        // orders in one binary.
+        let mut batches: Vec<&[usize]> = order.chunks(BATCH).collect();
+        let mut rng = Rng::new();
+        for i in (1..batches.len()).rev() {
+            batches.swap(i, rng.next() % (i + 1));
+        }
+
         let (mut done, mut tokens_done) = (0usize, 0usize);
-        for group in order.chunks(BATCH) {
+        for group in batches {
             stop.check()?;
             let batch: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
             // Locked for one batch and released between them, which is what
@@ -4757,6 +4783,27 @@ fn cmd_index(
 /// Derived from the vectors and never stored: it costs a few milliseconds to
 /// recompute, it cannot go stale that way, and storing it would mean a format
 /// bump and a full re-embed for a number that is only ever displayed.
+/// xorshift64, seeded from a constant.
+///
+/// Deterministic on purpose.  Both callers must give the same answer on every
+/// run: `Baseline` so an index reports the same z-scores, and the embed loop so
+/// two runs over one vault do the same work in the same order.  Do not seed this
+/// from the clock.
+struct Rng(u64);
+
+impl Rng {
+    fn new() -> Rng {
+        Rng(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn next(&mut self) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 33) as usize
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Baseline {
     mean: f32,
@@ -4772,17 +4819,11 @@ impl Baseline {
         if n < 3 {
             return None;
         }
-        let mut state = 0x2545_F491_4F6C_DD1Du64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state >> 33) as usize
-        };
+        let mut rng = Rng::new();
         let samples = 20_000.min(n * n);
         let mut cs: Vec<f32> = Vec::with_capacity(samples);
         for _ in 0..samples {
-            let (a, b) = (next() % n, next() % n);
+            let (a, b) = (rng.next() % n, rng.next() % n);
             if a == b {
                 continue;
             }
