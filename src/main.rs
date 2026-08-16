@@ -8042,6 +8042,45 @@ mod tests {
         assert!(b2.z(1.0).abs() < 1.0, "nothing stands out: {}", b2.z(1.0));
     }
 
+    /// `Rng` draws the same numbers on every run, and the values are pinned.
+    ///
+    /// Two callers depend on it.  `Baseline` promises that one index reports the
+    /// same z-scores every time, and the embed loop uses it to shuffle the batch
+    /// order.  Seed it from the clock and the first promise breaks silently: the
+    /// scores move a little between runs of a search over an unchanged index, and
+    /// nothing fails.
+    ///
+    /// The literals are what make this a gate.  Asserting only that two `Rng`s
+    /// agree passes under a clock seed whenever both are built inside the same
+    /// tick, and asserting only that `Baseline` is reproducible passes for the
+    /// degenerate corpora in `the_baseline_is_the_corpus_noise_floor`, where
+    /// every pair scores the same and the sample does not matter.
+    #[test]
+    fn the_random_numbers_are_the_same_on_every_run() {
+        let mut rng = Rng::new();
+        let drawn: Vec<usize> = (0..6).map(|_| rng.next()).collect();
+        assert_eq!(
+            drawn,
+            [1068897285, 1916308675, 445359392, 828837885, 1984023446, 108825369],
+            "the seed or the generator changed; z-scores move with it"
+        );
+
+        // A corpus where the sample really does decide the answer: 64 vectors
+        // that are neither orthogonal nor parallel, so two different draws of
+        // 20k pairs would land on different means.
+        let (n, dim) = (64, 8);
+        let mut v = vec![0.0f32; n * dim];
+        for i in 0..n {
+            for d in 0..dim {
+                v[i * dim + d] = (((i * 31 + d * 17) % 23) as f32 / 23.0) - 0.4;
+            }
+            let norm = v[i * dim..(i + 1) * dim].iter().map(|x| x * x).sum::<f32>().sqrt();
+            v[i * dim..(i + 1) * dim].iter_mut().for_each(|x| *x /= norm);
+        }
+        let (a, b) = (Baseline::of(&v, dim).unwrap(), Baseline::of(&v, dim).unwrap());
+        assert_eq!((a.mean, a.sd), (b.mean, b.sd), "the same vectors give the same floor");
+    }
+
     #[test]
     fn several_model_indexes_coexist_and_are_chosen_between() {
         let v = scratch("choose-model");
