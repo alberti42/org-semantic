@@ -7276,10 +7276,9 @@ mod tests {
         );
     }
 
-    /// `USAGE` is copied into two documents, and a copy nobody diffs is a copy
-    /// that rots: adding `--version` left the manual describing a tool without
-    /// one, and only a hand-run `diff` noticed. The agent guide's copy is
-    /// checked by a command in its own text; this is the manual's.
+    /// `USAGE` is copied into the manual, and a copy nobody diffs is a copy that
+    /// rots: adding `--version` left the manual describing a tool without one,
+    /// and only a hand-run `diff` noticed.
     #[test]
     fn both_documents_quote_the_usage_the_binary_prints() {
         let org = include_str!("../docs/manual.org");
@@ -7305,8 +7304,8 @@ mod tests {
     /// whichever test starts second deletes the other's vault mid-run — and the
     /// panic then lands wherever that test next touches the directory, which is
     /// nowhere near the cause. Two tests did share `restamp`, and it cost a
-    /// puzzled look twice: once recorded in the guide as an unexplained flake,
-    /// once here.
+    /// puzzled look twice — the first time it was written off as an unexplained
+    /// flake.
     ///
     /// Reading our own source is the only way to check this. The alternative —
     /// a registry every test must remember to use — is one more thing to forget,
