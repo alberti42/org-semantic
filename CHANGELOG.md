@@ -58,10 +58,10 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Needs the new binary. An older one gets both entries below silently wrong: it
-still loads a second model on a long rebuild, and it still loads a model to
-discover that an index it cannot read is unreadable. Raise the floor when this
-is released.
+Needs the new binary. An older one gets the first two entries below silently
+wrong: it still loads a second model on a long rebuild, and it still loads a
+model to discover that an index it cannot read is unreadable. Raise the floor
+when this is released.
 
 ### Changed
 
@@ -71,6 +71,12 @@ is released.
 - A search that cannot be answered no longer loads a model to find that out. A
   vault left behind by an index-layout change refused each search in about
   190 ms, and did it again on every search. It is now about 1 ms.
+- `index` reports a steady speed. Chunks are still grouped by length, which is
+  what keeps the batches efficient, but the batches now run in a shuffled order
+  instead of shortest first. The rate on the progress line used to start at about
+  four times the true speed and fall for the whole run, which made the estimated
+  time wrong from the first report. The index itself is unchanged: the vectors are
+  identical byte for byte, and the run takes the same time.
 
 ### Removed
 
