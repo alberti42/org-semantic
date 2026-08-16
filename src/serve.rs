@@ -318,13 +318,28 @@ impl Server {
         lexical::Analyzer::from_key(&stored).ok_or_else(|| missing("unreadable"))
     }
 
-    /// Whether **this vault** is being indexed, which is what refuses a second run
-    /// on it and what tells a searcher its answer is a version behind.
+    /// Whether **this vault** is being indexed, by anything, anywhere.
     ///
     /// Per vault, so a search on one vault no longer reports itself stale because
     /// an unrelated vault is rebuilding — which the single global slot did.
+    ///
+    /// **Two sources, because one of them cannot see far enough.** `run` holds
+    /// this process's runs. A run in a shell, in a cron job, or in another Emacs
+    /// is a different process with a different server, and `run` knows nothing of
+    /// it — so a client was told the vault was idle while it was being rewritten,
+    /// and a client waiting for the index to finish waited for a run it could not
+    /// see the end of.
+    ///
+    /// `being_indexed` closes that by reading the lock file, which is the only
+    /// thing those processes share. It judges staleness with `forsaken`, the same
+    /// rule `Claim::on` uses to decide whether it may take the lock over, so this
+    /// cannot report a vault busy that the next `index` would happily claim.
+    ///
+    /// `run` is still consulted first and is not redundant: it is a map lookup
+    /// against a `stat`, and it is the truthful answer for the window in which
+    /// this process has a run but the lock is not yet on disk.
     fn indexing(&self, vault: &Path) -> bool {
-        lock(&self.run).get(vault).is_some_and(|r| !r.handle.is_finished())
+        lock(&self.run).get(vault).is_some_and(|r| !r.handle.is_finished()) || being_indexed(vault)
     }
 
     /// `search` — both modalities, one shape.

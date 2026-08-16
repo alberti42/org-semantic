@@ -1275,13 +1275,18 @@ the run replies, so what you read is never a version behind. The buffer says it
 is waiting, and the results appear by themselves. Use it when a stale answer is
 worse than a slow one --- and remember that a full rebuild is minutes.
 
-It needs nothing from the server, because the run already answers the request
-that started it: that reply /is/ the notification, and
-=org-semantic-index-finished-functions= is where it arrives. Which is also its
-one limit. A run in another process --- a shell, a cron job, another Emacs ---
-belongs to a different server, and this one neither knows nor reports it, so
-there is nothing to wait for. Searches during such a run answer as they always
-did.
+A run this Emacs started needs nothing from the server, because the run already
+answers the request that started it: that reply /is/ the notification, and
+=org-semantic-index-finished-functions= is where it arrives.
+
+A run in another process --- a shell, a cron job, another Emacs --- has no reply
+here. The server reports it all the same, by reading the vault's lock file, so
+=indexing= means /somebody/ is indexing and not merely /we/ are. The search is
+then sent again every couple of seconds until the vault is free. That is the one
+place anything polls, and it is the only case where there is nothing to wait on.
+
+*A run that nobody finishes therefore holds the search open.* Kill the buffer,
+or search again, to stop waiting.
 
 A few things worth knowing before you build on this.
 

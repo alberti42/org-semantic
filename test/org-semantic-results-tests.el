@@ -1171,6 +1171,42 @@ search goes out exactly once, when the run ends, and not before."
         (run-hook-with-args 'org-semantic-index-finished-functions "/v" nil)
         (should-not (equal (car sent) "killed"))))))
 
+(ert-deftest another-process-s-index-is-waited-for-by-asking-again ()
+  "A run we cannot hear the end of is the one case that polls.
+
+Our own run is held before the search is sent, so reaching the
+reply with `indexing' true means a shell, a cron job or another
+Emacs holds the lock.  There is no reply here to wait for, so the
+search is sent again until the vault is free."
+  (let* ((sent nil) (settle nil) (waited 0) (timer nil)
+         (org-semantic-wait-for-index t)
+         (org-semantic--runs (make-hash-table :test 'equal))
+         (org-semantic-index-finished-functions nil))
+    (cl-letf (((symbol-function 'org-semantic-search-async)
+               (lambda (query &rest keys)
+                 (push query sent)
+                 (setq settle (plist-get keys :success))
+                 1))
+              ((symbol-function 'run-at-time)
+               (lambda (_secs _rep fn &rest args)
+                 (setq timer (cons fn args))
+                 'a-timer))
+              ((symbol-function 'cancel-timer) #'ignore))
+      (let ((driver (org-semantic-ui-driver-create
+                     :on-reply (lambda (_r) (error "Rendered a stale list while waiting"))
+                     :on-waiting (lambda (_v) (cl-incf waited)))))
+        ;; Nothing of ours is running, so it goes out at once.
+        (org-semantic-ui-ask driver '(:query "a" :vault "/v"))
+        (should (equal sent '("a")))
+        ;; The server says somebody else is indexing.
+        (funcall settle '(:hits [] :indexing t))
+        (should (= waited 1))
+        (should (org-semantic-ui-driver-retry driver))
+        ;; The timer asks again, and the vault is free this time.
+        (apply (car timer) (cdr timer))
+        (should (equal (car sent) "a"))
+        (should (= 2 (length sent)))))))
+
 (ert-deftest a-run-announces-that-it-ended-however-it-ended ()
   "`org-semantic-index' runs the hook on success and on failure.
 

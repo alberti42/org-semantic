@@ -3750,6 +3750,49 @@ struct Claim {
 /// patience. Never consulted when the pid *is* readable.
 const FORSAKEN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Whether a lock file is dead, and may be taken over.
+///
+/// One function, because two answers to this question would drift apart, and the
+/// two callers ask it for opposite reasons.  `Claim::on` asks in order to steal
+/// the lock.  `Server::indexing` asks in order to report a run to a client.  A
+/// reader that judged staleness differently from the taker would tell a client
+/// that a vault is idle while the next `index` refuses it, or the reverse.
+///
+/// PATH need not exist; a lock that is gone is not held.
+fn forsaken(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        // Unreadable covers "not there", which is the common case and means
+        // nothing holds it.
+        return true;
+    };
+    match text.trim().parse::<u32>().ok().filter(|&pid| pid != std::process::id()) {
+        Some(pid) => !alive(pid),
+        // No pid to ask about.  Either the owner died between creating the file
+        // and writing to it — microseconds, but reachable — or something wrote
+        // nonsense here.  Age tells those from a lock taken a moment ago, and it
+        // is consulted *only* when the pid is unreadable, so a long run whose
+        // owner is plainly alive is never second-guessed.
+        None => fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > FORSAKEN_AFTER),
+    }
+}
+
+/// Whether anything, in any process, is indexing VAULT.
+///
+/// The lock is a writer's lock, and this is the only thing that reads it.  It is
+/// how `indexing` on a reply covers a run in a shell, in a cron job, or in
+/// another Emacs: those are separate processes with separate servers, and this
+/// file is the only thing they share.
+///
+/// A `stat` and a short read per call, which a search can afford.
+fn being_indexed(vault: &Path) -> bool {
+    let path = state_dir(vault).join("index.lock");
+    path.exists() && !forsaken(&path)
+}
+
 impl Claim {
     /// Take the claim, or say who holds it.
     ///
@@ -3777,23 +3820,10 @@ impl Claim {
                     // **Stale locks are routine, not exceptional**: Ctrl-C is the
                     // documented way to stop a run, and it leaves no chance to
                     // release anything.  So an owner that is gone must not wedge a
-                    // vault.
-                    let forsaken = match owner {
-                        Some(pid) => !alive(pid),
-                        // No pid to ask about.  Either the owner died between
-                        // creating this file and writing to it — microseconds, but
-                        // reachable — or something wrote nonsense here.  Age tells
-                        // those from a lock taken a moment ago, and it is consulted
-                        // *only* when the pid is unreadable, so a long run whose
-                        // owner is plainly alive is never second-guessed.
-                        None => fs::metadata(&path)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.elapsed().ok())
-                            .is_some_and(|age| age > FORSAKEN_AFTER),
-                    };
+                    // vault.  The rule is `forsaken`, shared with the reader that
+                    // reports a run to a client, so the two cannot disagree.
                     // One retry, and only having found this very file stale.
-                    if attempt == 0 && forsaken {
+                    if attempt == 0 && forsaken(&path) {
                         let _ = fs::remove_file(&path);
                         continue;
                     }

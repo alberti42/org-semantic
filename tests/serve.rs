@@ -1092,6 +1092,53 @@ fn a_missing_model_sends_the_client_to_download() {
     assert_eq!(data["model"], "bge-small-en");
 }
 
+/// `indexing` covers a run in another process, not only in this one.
+///
+/// It used to read `Server::run`, which is this process's map.  A `serve` is
+/// spawned per editor, so a run in a shell, in a cron job, or in another Emacs
+/// is a different process with a different map — and a search during one was
+/// answered `indexing: false`, telling a client its list was current while the
+/// index underneath it was being rewritten.  Silent, and wrong in the direction
+/// that a client cannot check.
+///
+/// The lock file is the only thing those processes share, so that is what is
+/// read, with the staleness rule `Claim::on` already uses.  Written here rather
+/// than as a unit test because the point is what a *client* is told.
+#[test]
+fn indexing_is_reported_for_a_run_in_any_process() {
+    let v = vault("foreign-run", 3);
+    index(&v, "lexical");
+    let ask = || {
+        talk(
+            &[json!({ "jsonrpc": "2.0", "id": 5, "method": "status",
+                      "params": { "vault": v } })],
+            None,
+        )
+        .iter()
+        .find(|m| m["id"] == 5)
+        .expect("a reply")["result"]["indexing"]
+            .clone()
+    };
+    assert_eq!(ask(), json!(false), "nothing is running");
+
+    // What another process's `Claim` leaves on disk: the file, and a pid that
+    // is alive.  Our own pid would be ignored as this process's own claim, so
+    // it has to be somebody else — a sleep we start and then kill.
+    let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+    let lock = v.join(".org-semantic").join("index.lock");
+    std::fs::write(&lock, other.id().to_string()).unwrap();
+    assert_eq!(ask(), json!(true), "a live owner in another process is a run");
+
+    // A lock whose owner has gone is not a run.  `Claim::on` would take it
+    // over, so reporting it busy would refuse what the next index allows.
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert_eq!(ask(), json!(false), "a corpse does not hold a vault");
+
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(ask(), json!(false), "and no lock at all is certainly not a run");
+}
+
 /// A search that cannot be answered must not load a model to find that out.
 ///
 /// `Server::semantic` took the model first and read the index second.  A vault

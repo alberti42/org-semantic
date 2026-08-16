@@ -257,7 +257,18 @@ called again from the reply that releases it.  Only under
   (held nil :documentation "\
 The function waiting on `org-semantic-index-finished-functions',
 or nil.  Removed by a newer query and by
-`org-semantic-ui-driver-abandon'."))
+`org-semantic-ui-driver-abandon'.")
+  (retry nil :documentation "\
+The timer that will ask again, or nil.  Used only for a run in
+another process, which has no reply here to wait for.  Cancelled
+by a newer query and by `org-semantic-ui-driver-abandon'."))
+
+(defvar org-semantic-ui-poll-interval 2.0
+  "Seconds between attempts while waiting for another process's index.
+
+Only reached when `org-semantic-wait-for-index' is on and the run
+belongs to a shell, a cron job or another Emacs.  A run this Emacs
+started needs no polling: its reply says when it ended.")
 
 (defcustom org-semantic-wait-for-index nil
   "Whether a search waits for an index this Emacs is building.
@@ -266,14 +277,18 @@ Off, the default, answers from the version committed before the
 run started.  The reply says the index is a version behind, and
 the results buffer marks the list.
 
-On, the search is held and sent when the run replies.  Use it when
-a stale answer is worse than a slow one.  A rebuild takes minutes,
-so the buffer says what it is waiting for.
+On, the search waits.  Use it when a stale answer is worse than a
+slow one.  A rebuild takes minutes, so the buffer says what it is
+waiting for, and the results appear by themselves.
 
-It covers the runs this Emacs started, which is what
-`org-semantic-reindex' and `org-semantic-auto-reindex-mode' make.
-A run in another process -- a shell, a cron job, another Emacs --
-is invisible to this server and cannot be waited for."
+It covers a run in any process.  A run this Emacs started is held
+until its own reply arrives, which costs nothing.  A run in a
+shell, a cron job or another Emacs has no reply here, so the search
+is tried again every `org-semantic-ui-poll-interval' seconds until
+the vault is free.
+
+A run that nobody finishes therefore holds the search open.  Kill
+the buffer, or search again, to stop waiting."
   :type 'boolean
   :group 'org-semantic)
 
@@ -309,10 +324,13 @@ would leave the buffer empty for one round trip."
         (org-semantic-ui-driver-pending driver) nil))
 
 (defun org-semantic-ui--release (driver)
-  "Stop DRIVER waiting for an index, if it is."
+  "Stop DRIVER waiting for an index, by either route."
   (when-let* ((fn (org-semantic-ui-driver-held driver)))
     (remove-hook 'org-semantic-index-finished-functions fn)
-    (setf (org-semantic-ui-driver-held driver) nil)))
+    (setf (org-semantic-ui-driver-held driver) nil))
+  (when-let* ((timer (org-semantic-ui-driver-retry driver)))
+    (cancel-timer timer)
+    (setf (org-semantic-ui-driver-retry driver) nil)))
 
 (defun org-semantic-ui--hold (driver params vault)
   "Hold PARAMS on DRIVER until the index of VAULT ends, then send them.
@@ -372,6 +390,7 @@ for."
   ;; that anything has `defvar'-ed binds dynamically, and is unwound
   ;; before the reply arrives.
   (let* ((os-driver driver)
+         (os-params params)
          (os-epoch (org-semantic-ui-driver-epoch driver))
          (os-settle
           (lambda (reply error)
@@ -379,9 +398,21 @@ for."
             ;; set would hold the driver in flight for ever.
             (setf (org-semantic-ui-driver-request os-driver) nil)
             (when (= os-epoch (org-semantic-ui-driver-epoch os-driver))
-              (if error
-                  (funcall (org-semantic-ui-driver-on-error os-driver) error)
-                (funcall (org-semantic-ui-driver-on-reply os-driver) reply))
+              (cond
+               (error (funcall (org-semantic-ui-driver-on-error os-driver) error))
+               ;; A run in another process.  Ours was held before this was
+               ;; sent, so reaching here means a shell, a cron job or
+               ;; another Emacs holds the vault's lock.  There is no reply
+               ;; here to wait for, so this is the one place that polls.
+               ((and org-semantic-wait-for-index
+                     (org-semantic-true-p (plist-get reply :indexing))
+                     (not (org-semantic-ui-driver-pending os-driver)))
+                (funcall (org-semantic-ui-driver-on-waiting os-driver)
+                         (plist-get os-params :vault))
+                (setf (org-semantic-ui-driver-retry os-driver)
+                      (run-at-time org-semantic-ui-poll-interval nil
+                                   #'org-semantic-ui--fire os-driver os-params)))
+               (t (funcall (org-semantic-ui-driver-on-reply os-driver) reply)))
               (let ((next (org-semantic-ui-driver-pending os-driver)))
                 (when next
                   (setf (org-semantic-ui-driver-pending os-driver) nil)
