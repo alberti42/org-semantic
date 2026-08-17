@@ -58,7 +58,7 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-08-16
+## [0.5.0] — 2026-08-17
 
 Binary version 0.4.0, and this release needs it. The floor moves to 0.4.0 with
 it, because an older binary gets the first two entries below **silently** wrong:
