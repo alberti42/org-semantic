@@ -2043,5 +2043,108 @@ test that lets an error render must answer the question."
               (should-not (next-button (point-min))))
           (kill-buffer buffer))))))
 
+;; ------------------------------------------------------- scoping to a directory
+
+(ert-deftest a-directory-scope-is-spelled-relative-and-not-in-full ()
+  "The predicate names the subtree as the collection's own path to it."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic-canonical-vault dir)))
+      (make-directory (expand-file-name "lab/2026" dir) t)
+      (should (equal (org-semantic--dir-predicate
+                      (expand-file-name "lab/2026" dir) vault)
+                     "dir:lab/2026 ")))))
+
+(ert-deftest the-vault-root-scopes-to-nothing-at-all ()
+  "A predicate naming the whole collection filters nothing, so there is none."
+  (org-semantic-tests--with-vault dir
+    (should (equal (org-semantic--dir-predicate
+                    dir (org-semantic-canonical-vault dir))
+                   ""))))
+
+(ert-deftest a-directory-with-a-space-in-it-is-quoted ()
+  "Or the query would split on it and scope to the first word."
+  (org-semantic-tests--with-vault dir
+    (let ((vault (org-semantic-canonical-vault dir)))
+      (make-directory (expand-file-name "03 Literature review" dir))
+      (should (equal (org-semantic--dir-predicate
+                      (expand-file-name "03 Literature review" dir) vault)
+                     "dir:\"03 Literature review\" ")))))
+
+(ert-deftest a-directory-outside-the-notes-scopes-to-nothing ()
+  "It names no subtree, so there is no narrowing to express.
+
+The whole vault answers instead, and the empty prompt is what says so.
+Signalling was tried and is wrong: `org-semantic-vault-root' has a global
+value precisely so that a buffer which is nowhere -- `*scratch*', the
+agenda -- still searches the vault, and an error would make this the one
+search command those buffers cannot use."
+  (org-semantic-tests--with-vault dir
+    (let ((elsewhere (make-temp-file "org-semantic-outside" t))
+          (vault (org-semantic-canonical-vault dir)))
+      (unwind-protect
+          (should (equal (org-semantic--dir-predicate elsewhere vault) ""))
+        (delete-directory elsewhere t)))))
+
+(ert-deftest a-scope-is-relative-to-the-notes-and-not-to-the-vault ()
+  "A vault directory can hold nothing but the index.
+
+Its notes are then in no subtree of it, so comparing against the vault
+scopes every note of such a vault to nothing -- which reads as the
+command doing nothing at all.  The server resolves `dir:' against the
+notes root too, so a vault-relative spelling would name the wrong tree."
+  (org-semantic-tests--with-vault notes
+    (let ((state (make-temp-file "org-semantic-state" t)))
+      (unwind-protect
+          (progn
+            (make-directory (expand-file-name ".org-semantic" state))
+            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+              (insert (json-serialize `(:notes ,notes))))
+            (make-directory (expand-file-name "lab" notes))
+            (let ((vault (org-semantic-canonical-vault state)))
+              (should (equal (org-semantic--dir-predicate
+                              (expand-file-name "lab" notes) vault)
+                             "dir:lab "))
+              ;; And the notes root is still the whole collection.
+              (should (equal (org-semantic--dir-predicate notes vault) ""))))
+        (delete-directory state t)))))
+
+(ert-deftest the-directory-scope-arrives-as-text-already-typed ()
+  "Which is the whole of the scoping, and the reason it can be edited.
+
+A default cannot be widened, negated or deleted: it is offered, and the
+first character typed replaces it.  Text already in the minibuffer is
+the scope the reader can see and change before the query is sent, and
+`org-semantic-find-at-point' is deliberately the other way round -- the
+thing at point is a suggestion, so it goes in as the default.  Passed as
+a default here, or dropped, the query would reach the server unscoped
+and nothing would say so."
+  (org-semantic-tests--with-vault dir
+    (make-directory (expand-file-name "lab" dir))
+    (let ((note (expand-file-name "lab/a.org" dir))
+          (org-semantic-vault-root dir)
+          (org-semantic-results-ranking "lexical")
+          (initials nil) (defaults nil) (asked nil))
+      (with-temp-file note (insert "* A heading\nThe turbo pump was baked out.\n"))
+      (let ((buffer (find-file-noselect note)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (cl-letf (((symbol-function 'read-from-minibuffer)
+                         (lambda (_prompt &optional initial _keymap _read _hist default
+                                          &rest _)
+                           (push initial initials)
+                           (push default defaults)
+                           ;; What a reader would leave: the scope, then a query.
+                           (concat initial "vacuum bakeout")))
+                        ((symbol-function 'org-semantic-find)
+                         (lambda (query &optional _arg mode)
+                           (setq asked (cons query mode)))))
+                (org-semantic-find-in-directory)))
+          (kill-buffer buffer)))
+      ;; Asked once, with this buffer's directory as text to edit.
+      (should (equal initials '("dir:lab ")))
+      (should (equal defaults '(nil)))
+      ;; And the scope reaches the search, ahead of what was typed after it.
+      (should (equal asked '("dir:lab vacuum bakeout" . "lexical"))))))
+
 (provide 'org-semantic-results-tests)
 ;;; org-semantic-results-tests.el ends here

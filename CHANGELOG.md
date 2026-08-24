@@ -58,6 +58,31 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
+Binary version 0.4.0, unchanged — there is nothing to download, and an existing
+binary keeps working. This is the Emacs package alone.
+
+### Added
+
+- `M-x org-semantic-find-in-directory` searches the vault scoped to the
+  directory you are in, and everything under it. The whole of the scoping is a
+  `dir:` predicate put into the query prompt **as text already typed**, so it
+  can be widened, negated or deleted there like anything else you typed — which
+  a hidden argument could not be. It is spelled relative to your notes, and
+  quoted if the directory name carries a space.
+
+  A buffer that is nowhere in the notes — `*scratch*`, the agenda, a directory
+  of some other tree — has no subtree to name, so the prompt opens empty and
+  the whole vault answers. The empty prompt is what says so.
+
+### Changed
+
+- The bindings suggested in the README and the manual moved one command:
+  `C-c n S` is now `org-semantic-find-in-directory`, and
+  `org-semantic-find-at-point` is `C-c n .`. `s` and `S` are the pair `grep` and
+  `consult-ripgrep` established — the capital is the same search, narrowed to
+  here. If you copied the earlier bindings, update them; nothing breaks if you
+  do not, since both commands are still there under whatever keys you gave them.
+
 ## [0.5.0] — 2026-08-17
 
 Binary version 0.4.0, and this release needs it. The floor moves to 0.4.0 with

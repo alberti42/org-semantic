@@ -390,7 +390,8 @@ this can go.
   :load-path "/path/to/org-semantic/lisp"
   :custom (org-semantic-executable "/path/to/org-semantic")
   :bind (("C-c n s" . org-semantic-find)
-         ("C-c n S" . org-semantic-find-at-point)
+         ("C-c n S" . org-semantic-find-in-directory)
+         ("C-c n ." . org-semantic-find-at-point)
          ("C-c n R" . org-semantic-reindex))
   ;; Optional, and one of the nicer things here: each passage is previewed
   ;; in its note as point reaches it, so `n' and `p' read the vault rather
@@ -401,10 +402,14 @@ this can go.
   :init (org-semantic-auto-reindex-mode 1))
 #+end_src
 
-=s= searches, =S= searches for the region or the symbol at point, and =R=
-indexes. The =C-c n= prefix is what org-roam's own manual suggests for its
-commands, and these three compose with it rather than colliding --- org-roam uses
-=f=, =i=, =l=, =g=, =c= and =j=, and none of those. Everything else ---
+=s= searches, =S= searches the directory you are in, =.= searches for the region
+or the symbol at point, and =R= indexes. =s= and =S= are the pair =grep= and
+=consult-ripgrep= established --- the capital is the same search, narrowed to
+here --- and =S= is no more than =s= with the =dir:= predicate of
+[[#filters][Filters]] already in the prompt, so it can be widened or deleted
+there like anything else typed. The =C-c n= prefix is what org-roam's own manual
+suggests for its commands, and these four compose with it rather than colliding
+--- org-roam uses =f=, =i=, =l=, =g=, =c= and =j=, and none of those. Everything else ---
 ~org-semantic-cancel~, ~org-semantic-show-status~, ~org-semantic-show-memory~,
 ~org-semantic-restart~, ~org-semantic-quit~ --- is rare enough to leave on =M-x=.
 
@@ -1795,6 +1800,15 @@ dir:"~/notes/08 Conferences"              # and with a home directory
 An absolute =dir:= *outside* the vault is an error rather than a search that
 finds nothing --- "nothing matched" and "that directory is not in this
 collection" are different answers, and only one of them would be true.
+
+From Emacs the common case is typed for you: ~org-semantic-find-in-directory~
+--- =C-c n S= in the bindings above --- opens the query prompt with the =dir:=
+of the current buffer's directory already in it, spelled relative to the notes
+and quoted if it needs to be. It is text like any other, so the scope can be
+widened, negated or deleted before the query is finished. A buffer that is
+nowhere in the notes --- =*scratch*=, the agenda, a directory of some other
+tree --- has no subtree to name, so the prompt opens empty and the whole vault
+answers.
 
 ** What gets indexed
 :PROPERTIES:

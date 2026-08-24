@@ -602,6 +602,62 @@ The rest of the query is free text."
          (asked (org-semantic-results--read-query start nil thing)))
     (org-semantic-find (car asked) arg (cdr asked))))
 
+(defun org-semantic--dir-predicate (dir vault)
+  "Return the `dir:' predicate that scopes a query to DIR inside VAULT.
+
+A predicate is a narrowing, so there is one only where DIR names a
+subtree of the notes.  Two directories name no subtree and both answer
+the empty string: the notes root itself, which every hit is already
+under, and a directory outside the notes, which no hit can ever be
+under.  The prompt then opens empty, and that is what says so -- the
+scope is text the reader sees before the query is sent.
+
+DIR is compared against VAULT's notes, which `org-semantic-notes-root'
+answers, and not against VAULT.  A vault directory can hold nothing but
+the index, and a note of such a vault is then in no subtree of it.
+
+The value is spelled relative to the notes rather than in full.  Both
+are accepted -- the server rewrites an absolute one -- but the relative
+spelling is what a person reads at a glance, and it is what stays true
+if the tree is moved.  Quoted when it carries whitespace, since a query
+is split on spaces and `dir:03 Literature review' would otherwise scope
+to `03' and search for the rest.
+
+DIR is resolved through `file-truename' before it is compared, which is
+how the notes root is already spelled, so a note reached through a
+symlinked path is still recognised as being in the notes."
+  (let* ((notes (org-semantic-notes-root vault))
+         (here (directory-file-name (file-truename (expand-file-name dir))))
+         (rel (and (file-in-directory-p here notes)
+                   (file-relative-name here notes))))
+    (cond ((or (null rel) (equal rel ".")) "")
+          ((string-match-p "[[:space:]]" rel) (format "dir:\"%s\" " rel))
+          (t (format "dir:%s " rel)))))
+
+;;;###autoload
+(defun org-semantic-find-in-directory (&optional arg)
+  "Search the vault, scoped to this buffer's directory and below.
+
+ARG is as in `org-semantic-find'.  The whole of the scoping is a
+`dir:' predicate put into the prompt as text already typed, so the
+query is finished after it -- and the scope can be edited, widened or
+dropped there like anything else that was typed, which a hidden
+argument could not be.
+
+The directory is `default-directory', so the command means the same
+thing in Dired and in a note, and `dir:' is subtree-inclusive on the
+server: the directory and everything under it.  A buffer outside the
+notes -- `*scratch*', the agenda, another tree -- has no subtree to
+name, so the whole vault answers and the prompt opens empty."
+  (interactive "P")
+  (let* ((vault (org-semantic-vault-or-error))
+         (scope (org-semantic--dir-predicate default-directory vault))
+         (start (if (equal org-semantic-results-ranking "ask")
+                    (org-semantic--read-ranking)
+                  org-semantic-results-ranking))
+         (asked (org-semantic-results--read-query start scope)))
+    (org-semantic-find (car asked) arg (cdr asked))))
+
 (defun org-semantic-results--read-query (mode &optional initial default)
   "Read a query to rank by MODE, and return it as (QUERY . MODE).
 

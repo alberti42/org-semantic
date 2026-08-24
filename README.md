@@ -39,13 +39,18 @@ so a recommendation is as far as this goes:
   :load-path "/path/to/org-semantic/lisp"
   :custom (org-semantic-vault-root "~/notes")
   :bind (("C-c n s" . org-semantic-find)
-         ("C-c n S" . org-semantic-find-at-point)
+         ("C-c n S" . org-semantic-find-in-directory)
+         ("C-c n ." . org-semantic-find-at-point)
          ("C-c n R" . org-semantic-reindex))
   ;; Follow mode, on for every results buffer.
   :hook (org-semantic-results-mode . next-error-follow-minor-mode)
   ;; Reindex a vault as its notes are saved.
   :init (org-semantic-auto-reindex-mode 1))
 ```
+
+`S` is `s` scoped to the directory you are in: it fills the prompt with a `dir:`
+predicate naming it, and that directory and everything under it is what answers.
+`.` searches for the region, or the symbol at point.
 
 `org-semantic-vault-root` is the one setting that has to be right: it says which
 directory your notes are, and every buffer that says nothing else — `*scratch*`,
