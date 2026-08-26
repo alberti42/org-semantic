@@ -112,10 +112,11 @@ embeddings in minutes, and a warm query in milliseconds either way.
 - *Search by word.* BM25 over a
   [[https://github.com/quickwit-oss/tantivy][tantivy]] index, stemmed for the
   language each note is written in. Phrases, AND/OR/NOT and parentheses.
-- *Six embedding models.* Three BGE for English --- small, base and large,
-  384 to 1024 dimensions --- and three multilingual E5 covering 100 languages.
-  =--model= picks one. Each keeps its own index, so two can sit side by side
-  and be compared on your own notes.
+- *Six embedding models.* Three [[https://github.com/FlagOpen/FlagEmbedding][BGE]] from BAAI
+  for English --- small, base and large, 384 to 1024 dimensions --- and three
+  multilingual [[https://github.com/microsoft/unilm/tree/master/e5][E5]] from
+  Microsoft Research, covering 100 languages. =--model= picks one. Each keeps
+  its own index, so two can sit side by side and be compared on your own notes.
 - *The same predicates on both sides.* =tag:=, =dir:=, =todo:= and =lang:=,
   each negated with a leading =-=.
 - *Org-mode, not text.* Tag inheritance from =#+filetags:= and every ancestor.
