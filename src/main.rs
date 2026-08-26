@@ -7372,7 +7372,7 @@ mod tests {
         let org = include_str!("../docs/manual.org");
         let strip = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        let tagline = "Search a tree of org-mode notes by meaning or by words.";
+        let tagline = "org-semantic brings embedding search to org-mode.";
         assert!(md.contains(tagline) && org.contains(tagline), "the tagline moved");
 
         // The demo is the part carrying real numbers, so it rots fastest.

@@ -76,6 +76,16 @@ binary keeps working. This is the Emacs package alone.
 
 ### Changed
 
+- The README and the manual open by saying what org-semantic is, and how it
+  works, rather than by listing what it does not carry. A model turns each
+  passage into a vector, a query becomes one too, and the score is the cosine
+  between them; BM25 with per-language stemming ranks the same notes by word.
+  The static binary, the absent database and the pipe are still there, one
+  paragraph later. A `What it does` section follows, carrying the figures, the
+  six models, the libraries, and the fact that the binary works without Emacs.
+  Both files share the opening and the list. Nothing about the tool itself
+  changed.
+
 - The bindings suggested in the README and the manual moved one command:
   `C-c n S` is now `org-semantic-find-in-directory`, and
   `org-semantic-find-at-point` is `C-c n .`. `s` and `S` are the pair `grep` and

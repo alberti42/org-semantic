@@ -1,10 +1,73 @@
 # org-semantic
 
-Search a tree of org-mode notes by meaning or by words. One static binary, no
-database, no Python. It runs as a one-shot command, or stays resident for Emacs
-— over a pipe, never a port.
+org-semantic brings embedding search to org-mode. A model reads each passage of
+your notes and turns it into a vector, placed so that passages saying the same
+thing sit close together, whatever words they used. Your query becomes a vector
+in the same space, and the score is the cosine of the angle between it and each
+passage. So a note can answer a question it shares no word with, and an English
+question can be answered by an Italian note.
+
+Traditional search is there too. The words themselves go into a second index,
+ranked by BM25 with per-language stemming, for the searches where the exact word
+is the point: a flag, a name, a phrase. The two rankings are kept apart and
+never fused. You choose which one answers, because a phrase or an AND/OR/NOT
+means nothing to an embedding.
+
+It comes in two parts, and each works without the other. The search itself is a
+single Rust binary, with no database, no Python and no service: run it as a
+one-shot command, or drive it from your own tools. The Emacs package is its
+client. It starts the binary, keeps it resident over a pipe rather than a port,
+and draws the results. The model is downloaded once, and after that nothing
+leaves your machine.
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
+
+## What it does
+
+- **It finds passages, not files.** Both ways of keeping notes work: a
+  Zettelkasten of thousands of small files, or a few very large org files,
+  where a hit is one section rather than the whole file. Two caps bound the
+  list — how many notes it may show, and how many passages any one of them
+  may contribute — so one crowded file cannot fill it.
+- **Search by meaning.** Your query is embedded and scored against every
+  passage in the vault. An English query finds an Italian note.
+- **Search by word.** BM25 over a [tantivy](https://github.com/quickwit-oss/tantivy)
+  index, stemmed for the language each note is written in. Phrases, AND/OR/NOT
+  and parentheses.
+- **Six embedding models.** Three BGE for English — small, base and large,
+  384 to 1024 dimensions — and three multilingual E5 covering 100 languages.
+  `--model` picks one. Each keeps its own index, so two can sit side by side
+  and be compared on your own notes.
+- **The same predicates on both sides.** `tag:`, `dir:`, `todo:` and `lang:`,
+  each negated with a leading `-`.
+- **Org-mode, not text.** Tag inheritance from `#+filetags:` and every ancestor.
+  TODO keywords, priorities and planning lines. `#+begin_src` bodies stay out of
+  the meaning index and stay in the word index.
+- **A language per note, detected.** fastText's `lid.176` covers 176 languages,
+  and a `# ltex: language=…` line overrides it. That choice picks the stemmer,
+  labels the passage, and answers `lang:de`.
+- **Fast enough to type into.** Measured in Emacs, round trip included, on a
+  vault of about 1,000 notes: 10 ms by meaning, 20 ms by word.
+- **Incremental by passage.** Appending one meeting to a 4,500-line
+  `meetings.org` costs one embedding rather than 901, and 0.4 s rather than
+  7 s.
+- **What takes time, and is paid once.** Building the meaning index for about
+  1,000 notes takes some three minutes. The word index takes about a second.
+  After that, a run that finds nothing changed takes about 30 ms, and the
+  first query of a session loads the model: 0.3 s for BGE, about 1 s for E5.
+- **Usable without Emacs.** The binary is the whole search engine, and the Emacs
+  package is one client of it. `search --json` gives a script machine-readable
+  results, and `serve` speaks JSON-RPC 2.0 over stdin and stdout for another
+  editor, a tool of your own, or an agent.
+- **No hand-rolled protocol.** The binary speaks JSON-RPC over a pipe with LSP's
+  framing, through rust-analyzer's
+  [`lsp-server`](https://github.com/rust-lang/rust-analyzer/tree/master/lib/lsp-server).
+  Emacs reads it with the built-in `jsonrpc.el`, the same library Eglot drives a
+  language server with, so the package carries no transport code of its own. The
+  methods are its own, though: this is not a language server.
+- **Built on** [fastembed](https://github.com/Anush008/fastembed-rs) and ONNX
+  Runtime, compiled into the binary by [`ort`](https://ort.pyke.io/); tantivy
+  for BM25; and [fastText](https://fasttext.cc/) for language detection.
 
 The screenshot and the worked example below search [Daniel Bias's
 braindump](https://github.com/denialbb/braindump), someone else's public vault
