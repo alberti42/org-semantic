@@ -117,6 +117,14 @@ inside `.org-semantic/`. The run names it and says where it belongs.
 
 ### Fixed
 
+- **Reindexing on save now works for a vault whose notes are kept elsewhere.**
+  The Emacs side looked for that vault's pointer file inside the cache directory
+  after the file had moved out of it, so `org-semantic-auto-reindex-mode` did
+  nothing at all — silently, and only for those vaults. Found by reading the
+  documentation, not by a test: the Emacs tests wrote the file at the same wrong
+  path, so they passed with it. A test now holds the file's name against the one
+  in the Rust source.
+
 - **A policy that reads the same is no longer refused.** The check in front of
   an index compared two things: a key stored in the index, and the settings
   themselves. When the key disagreed while every setting read the same, the run
