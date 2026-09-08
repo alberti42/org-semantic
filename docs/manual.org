@@ -234,14 +234,14 @@ narrow by --- one language declared *is* the answer for every note:
 
 #+begin_src sh
 git clone --depth 1 https://github.com/denialbb/braindump
-echo '{ "languages": ["en-US", "it-IT"] }' > bilingual.json
+echo '{ "languages": ["en-US", "it-IT"] }' > braindump/roam/.org-semantic-config.json
 
-org-semantic index braindump/roam --lexical --config bilingual.json  # 2863 chunks in 0.5s
+org-semantic index braindump/roam --lexical                   # 2863 chunks in 0.5s
 org-semantic search braindump/roam "algoritmo lang:it-IT" --lexical
 #+end_src
 
-The search needs no =--config= of its own: a policy is remembered once given,
-so later runs against that vault answer under it.
+The policy is a file beside the notes, so every later run against that vault
+reads it without being told.
 
 The semantic index over the same notes is around a minute on =e5-small=, which
 is the model to pick there --- an English-only one will rank the Italian half
@@ -1931,7 +1931,8 @@ note never had --- and lose the fact that a snippet was there at all, which is p
 of what the section is about. =[src bash]= keeps both, without forty lines of
 shell drowning the prose around it.
 
-The whole policy lives in a file you own, named with =--config=. Copy
+The whole policy lives in one file you own, =.org-semantic-config.json=, beside
+your notes. Copy
 [[https://github.com/alberti42/org-semantic/blob/main/config.example.json][=config.example.json=]] --- it is exactly the defaults --- and
 edit it:
 
@@ -2011,90 +2012,76 @@ Those values are the defaults, so the block above describes what you get with no
 config at all.
 
 #+begin_src sh
-cp config.example.json ~/notes/indexing.json     # then edit it
-org-semantic index ~/notes --both --config ~/notes/indexing.json
+cp config.example.json ~/notes/.org-semantic-config.json     # then edit it
+org-semantic index ~/notes --both
 #+end_src
 
-*The policy is sticky.* Once given it is cached, so later runs need not repeat
-=--config= --- forgetting it is safe, which is what makes a sticky setting
-tolerable. It is compared by /meaning/, not by bytes: key order,
+*There is no flag for it, and there is nothing to remember.* The file is where
+the tool looks, so every run --- yours, your editor's, a cron job's --- reads the
+same policy. It is compared by /meaning/ rather than by bytes: key order,
 whitespace and duplicates all hash the same, and a file that merely restates the
 defaults is indistinguishable from no file at all.
 
-*Changing it is refused, not obeyed.* A config can change without you doing
+It was a flag whose value was copied into the index directory, so that later
+runs need not repeat it. That put a file nothing can rebuild inside a cache, and
+it needed a rule for a copy that would not parse, a rule for a copy that had
+gone, and a comparison against the copy to say which setting had moved. A file
+that is simply there needs none of them.
+
+*Changing it is refused, not obeyed.* The file can change without you doing
 anything --- a =git pull= brings someone else's edit --- and re-embedding a corpus
-takes minutes, so the tool says what moved and waits:
+takes minutes, so the tool stops and waits to be told:
 
 #+begin_src console
-$ org-semantic index ~/notes --both --config ~/notes/indexing.json
-Error: the semantic index was built under a different policy —
-       exclude_tagged: was [ARCHIVE, noexport], now []
-       pass --full to rebuild under the new one, or restore the previous setting
+$ org-semantic index ~/notes --both
+Error: the semantic index was built under a different policy than
+       .org-semantic-config.json now holds
+       pass --full to rebuild under the new one
 #+end_src
 
-Unknown keys are an error rather than ignored, for the same reason unknown flags
-are: a typo that does nothing looks exactly like a setting that does nothing.
+It does not say which setting moved, and it has nothing to say it with: each
+index records a hash of the policy it was built under, not a copy of it. You
+wrote the file, so you know what you changed --- the same reason the exclusion
+list is not stored either.
 
-=chunks --config= applies a policy *without* storing it or reindexing, so you
-can see what a change would do before paying for it. =chunks= previews the
-semantic index and =chunks --lexical= the word index, faithfully in each case:
-each is packed in its own unit, and only the lexical one carries a language. It
-says which one it is showing.
+A mistake *in* the file stops the command rather than being worked around.
+Unknown keys are an error too, for the same reason unknown flags are: a typo
+that does nothing looks exactly like a setting that does nothing.
 
-Over JSON-RPC the =index= method takes the same policy as a =config= object, so
-an editor can keep its own source of truth in whatever format suits it --- a
-commented =.eld=, in Emacs's case --- and pass it already parsed. Neither side
-needs a reader for the other's syntax.
+=chunks --config= is the one place a policy is named on the command line, and it
+applies one *without* storing it or reindexing, so you can see what a change
+would do before paying for it. =chunks= previews the semantic index and
+=chunks --lexical= the word index, faithfully in each case: each is packed in its
+own unit, and only the lexical one carries a language. It says which one it is
+showing.
 
-That is also how =todo_keywords= is meant to be filled in from Emacs, rather
-than by hand: the editor already knows the answer, so it can send it.
-=org-remove-keyword-keys= does the stripping, so nothing has to be reimplemented:
+*A private copy wins.* The file is looked for beside the index directory first,
+and only then beside the notes. So you can index a shared folder --- somebody
+else's vault, or one in Dropbox --- under your own policy, without writing
+anything into their tree. The two are the same directory unless
+[[#index-elsewhere][the index lives elsewhere]], so in the ordinary case there is
+one file and no question of precedence. Nothing is merged: the file that is
+found is the whole policy.
+
+=todo_keywords= is the one setting worth filling in from Emacs rather than by
+hand, since Emacs already knows the answer. Print it and paste it in:
 
 #+begin_src elisp
 (delete "|" (mapcan (lambda (s) (org-remove-keyword-keys (cdr s)))
                     (default-value 'org-todo-keywords)))
 #+end_src
 
-*=search= takes =config= too, and checks it.* A client whose policy comes from
-the user's own settings should send it with every query, not only when
-indexing --- settings change between one search and the next, and an index built
-under the old ones answers from passages split by rules the user no longer
-holds. The check is a hash comparison, so it costs nothing per query.
+*Nothing is sent with a request, and a search does not check the policy.* An
+editor used to send its own policy with every query, so that a setting it had
+changed since the index was built would fail the search instead of answering
+from passages split by rules it no longer held. The policy is a file now, this
+side reads it, and there is nothing to send and no two sides to disagree.
 
-On a mismatch the query fails rather than answering, and the error names the
-setting:
-
-#+begin_src console
-the semantic index was built under a different policy —
-todo_keywords: was [DONE, TODO], now [DONE, NEXT, TODO]
-reindex with `full` to rebuild under the new one, or restore the previous setting
-#+end_src
-
-which is what a client turns into /your =org-todo-keywords= changed since this
-vault was indexed --- reindex?/ Nothing is rebuilt without that answer.
-
-It does not have to read that sentence to do so. Over JSON-RPC the same failure
-arrives labelled =config-drift=, with the settings that moved as a list of
-names --- see
-[[#errors-a-client-acts-on][errors you are meant to act on]]. The message is for
-showing; the label and the names are for deciding.
-
-The list of names is empty in one case, and then no setting can be named: the
-policy this vault was last indexed under is no longer on disk to compare
-against. See [[#config-is-not-derived][=config.json= --- yours, and only a
-copy]]. A settings change you made always arrives with its names.
-
-*A policy that reads the same is never refused, even if the index records a
-different one.* That happens when a new version of the tool starts taking a
-setting into account that the version which built your index ignored. Your
-settings did not move, so nothing is rebuilt: the run notes the new state and
-carries on. A release that needs a rebuild says so as an out-of-date index
-instead, which is a different error with its own remedy.
-
-Two things a client should get right: send the policy on =search= as well as
-=index=, and *latch the error into one prompt* --- the mismatch holds until the
-user acts, so a client searching as you type would otherwise raise it on every
-keystroke.
+So a policy you edit takes effect on the next =index=, which refuses until you
+say =--full=. Over JSON-RPC that refusal arrives labelled =config-drift= --- see
+[[#errors-a-client-acts-on][errors you are meant to act on]] --- with the index it
+is about and the remedy, and no list of settings, because the index records a
+hash of the policy rather than a copy.
 
 *** Leaving files and folders out
 :PROPERTIES:
