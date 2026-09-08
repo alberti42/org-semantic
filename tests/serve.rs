@@ -586,6 +586,50 @@ fn a_search_says_when_the_index_is_moving() {
     s.close();
 }
 
+/// A search says when its index was built under other exclusion rules, and
+/// still answers.
+///
+/// A remark and not an error: the hits are real hits, and only the set of notes
+/// the index covers has moved. An error would have to be latched into one
+/// prompt, and a prompt per keystroke is worse than the condition.
+#[test]
+fn a_search_says_when_the_exclusion_list_has_moved() {
+    let v = built("exclusions", 3);
+    let ask = |vault: &Path| {
+        talk(
+            &[json!({ "jsonrpc": "2.0", "id": 1, "method": "search",
+                      "params": { "vault": vault, "query": "atoms", "mode": "lexical" } })],
+            None,
+        )
+    };
+
+    // Nothing is excluded and nothing was excluded, so there is nothing to say.
+    let quiet = ask(&v);
+    let before = &quiet.iter().find(|m| m["id"] == 1).expect("a reply")["result"];
+    assert!(before["remarks"].is_null(), "silent while the two agree: {before:?}");
+
+    // Exclude a note without reindexing.
+    std::fs::write(v.join(".org-semantic-ignore"), "n0001.org\n").unwrap();
+    let msgs = ask(&v);
+    let said = &msgs.iter().find(|m| m["id"] == 1).expect("a reply")["result"];
+    assert_eq!(said["remarks"][0]["kind"], "exclude-drift", "{said:?}");
+    assert_eq!(said["remarks"][0]["target"], "lexical", "which index answered");
+    assert!(
+        !said["hits"].as_array().expect("hits, not an error").is_empty(),
+        "the search still answers: {said:?}"
+    );
+
+    // One plain incremental run catches the index up, and the remark stops.
+    talk(
+        &[json!({ "jsonrpc": "2.0", "id": 7, "method": "index",
+                  "params": { "vault": &v, "mode": "lexical" } })],
+        None,
+    );
+    let after = ask(&v);
+    let now = &after.iter().find(|m| m["id"] == 1).expect("a reply")["result"];
+    assert!(now["remarks"].is_null(), "nothing to say once they agree again: {now:?}");
+}
+
 /// LSP's two steps are two for a reason, and getting it wrong hangs the process
 /// rather than failing it.
 ///
