@@ -770,6 +770,25 @@ fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// The notes root, and every `.org` file under it in a stable order.
+///
+/// One function, because five commands need the same three steps and the walk
+/// is about to gain a filter. A command that resolved the root and walked it
+/// itself could miss that filter, and would then report on a set of notes the
+/// index does not hold.
+struct Walk {
+    notes: PathBuf,
+    files: Vec<PathBuf>,
+}
+
+fn walk_notes(vault: &Path) -> Result<Walk> {
+    let notes = notes_root(vault)?;
+    let mut files = Vec::new();
+    org_files(&notes, &mut files)?;
+    files.sort();
+    Ok(Walk { notes, files })
+}
+
 /// fastText's `lid.176`, product-quantized to 917 kB.  Fetched on first use
 /// rather than vendored: it is CC BY-SA 3.0 while this is MIT, and downloading
 /// keeps it out of the distribution so ShareAlike never engages.
@@ -4087,10 +4106,7 @@ fn cmd_index_lexical(
     stop: &Cancel,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
-    let notes = notes_root(vault)?;
-    let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
-    files.sort();
+    let Walk { notes, files } = walk_notes(vault)?;
     report_empty(&notes, &files, "lexical", j);
     report_stranded(vault, &notes, "lexical", j);
 
@@ -4375,10 +4391,7 @@ fn cmd_index(
     stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
-    let notes = notes_root(vault)?;
-    let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
-    files.sort();
+    let Walk { notes, files } = walk_notes(vault)?;
     report_empty(&notes, &files, "semantic", j);
     report_stranded(vault, &notes, "semantic", j);
 
@@ -5287,10 +5300,7 @@ fn cmd_search(
 /// full run.  Reports the chunk-length distribution too, since throughput on
 /// this workload is set by tokens rather than by chunk count.
 fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
-    let notes = notes_root(vault)?;
-    let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
-    files.sort();
+    let Walk { notes, files } = walk_notes(vault)?;
     // Packed with the real tokenizer, or this measures chunks the indexer would
     // never produce.
     let m = model_named(DEFAULT_MODEL)?;
@@ -5379,10 +5389,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
 fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let tok = tokenizer_for(m)?;
 
-    let notes = notes_root(vault)?;
-    let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
-    files.sort();
+    let Walk { notes, files } = walk_notes(vault)?;
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
     let measure = |s: &str| n_tokens(&tok, s);
@@ -5684,10 +5691,7 @@ fn cmd_chunks(
             Target::Lexical => "lexical",
         }
     );
-    let notes = notes_root(vault)?;
-    let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
-    files.sort();
+    let Walk { notes, files } = walk_notes(vault)?;
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
