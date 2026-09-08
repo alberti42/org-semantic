@@ -3586,7 +3586,7 @@ struct LoadedIndex {
 /// which used to parse `chunks.json` straight and, after a field was renamed,
 /// failed with `missing field \`heading_line\`` — true, and useless. A format
 /// change should say it is one.
-fn read_chunks(dir: &Path, m: &Model) -> Result<Vec<Chunk>> {
+fn read_chunks(dir: &Path, m: &Model) -> Result<(Vec<Chunk>, u64)> {
     let manifest: Manifest = stored_hash(&dir.join("manifest.json")).ok_or_else(|| {
         fault(
             "no-index",
@@ -3620,7 +3620,7 @@ fn read_chunks(dir: &Path, m: &Model) -> Result<Vec<Chunk>> {
             m.dim
         ));
     }
-    Ok(serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?)
+    Ok((serde_json::from_slice(&fs::read(dir.join("chunks.json"))?)?, manifest.exclude))
 }
 
 /// `chunks.json` and `vectors.f32` are positionally coupled, so a length
@@ -3645,6 +3645,8 @@ fn corrupt_index(chunks: usize, vectors: usize) -> anyhow::Error {
 struct Built {
     chunks: Vec<Chunk>,
     vectors: Vec<f32>,
+    /// The exclusion rules this index was built under, as a hash.
+    exclude: u64,
 }
 
 /// A semantic index as something *searches* it: what was built, plus the noise
@@ -3659,6 +3661,13 @@ struct Index {
     vectors: Vec<f32>,
     /// `None` for an index too small to sample a floor from.
     baseline: Option<Baseline>,
+    /// The exclusion rules this index was built under, as a hash.
+    ///
+    /// Kept here rather than read per query: it cannot change for the life of
+    /// this index, and re-reading the manifest would parse the per-note maps
+    /// again on every keystroke. What must be read per query is the file, not
+    /// this.
+    exclude: u64,
 }
 
 impl Index {
@@ -3669,14 +3678,14 @@ impl Index {
     /// check, so a torn file installed a mispaired cache in silence.  A guard
     /// that has to be repeated is a guard that will be forgotten.
     fn read(dir: &Path, m: &Model) -> Result<Index> {
-        let chunks = read_chunks(dir, m)?;
+        let (chunks, exclude) = read_chunks(dir, m)?;
         let raw = fs::read(dir.join("vectors.f32"))?;
         if raw.len() != chunks.len() * m.dim * 4 {
             return Err(corrupt_index(chunks.len(), raw.len() / (m.dim * 4)));
         }
         let vectors: Vec<f32> =
             raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-        Ok(Index::of(Built { chunks, vectors }, m.dim))
+        Ok(Index::of(Built { chunks, vectors, exclude }, m.dim))
     }
 
     /// Adopt what a run just built.  The baseline is derived here rather than
@@ -3684,7 +3693,7 @@ impl Index {
     /// ~37 ms computing it.
     fn of(b: Built, dim: usize) -> Index {
         let baseline = Baseline::of(&b.vectors, dim);
-        Index { chunks: b.chunks, vectors: b.vectors, baseline }
+        Index { chunks: b.chunks, vectors: b.vectors, baseline, exclude: b.exclude }
     }
 }
 
@@ -5097,7 +5106,7 @@ fn cmd_index(
     // Committed to disk and handed over in one piece.  What is returned is
     // exactly what was written — `save_index` serialised these very vectors —
     // which is what makes adopting it as legitimate as reading it back.
-    Ok(Indexed { report, built: Some(Built { chunks, vectors }) })
+    Ok(Indexed { report, built: Some(Built { chunks, vectors, exclude }) })
 }
 
 /// Print hits grouped by note.
@@ -5557,7 +5566,8 @@ fn cmd_search(
         vault,
         &notes,
         Target::Semantic,
-        stored_hash::<Manifest>(&semantic_dir(vault, m).join("manifest.json")).map(|m| m.exclude),
+        stored_hash::<StoredExcludes>(&semantic_dir(vault, m).join("manifest.json"))
+            .map(|m| m.exclude),
     );
 
     // Predicates constrain which chunks are considered; only the remaining free
@@ -5969,6 +5979,16 @@ fn flag_value<'a>(args: &'a [String], from: usize, flag: &str) -> Option<&'a str
     args.get(from + i + 1).map(String::as_str)
 }
 
+/// Just the exclusion hash out of a manifest, and nothing else.
+///
+/// A query path must not pay to build the per-note maps beside it, and serde
+/// skips every field no struct asks for.
+#[derive(Deserialize)]
+struct StoredExcludes {
+    #[serde(default)]
+    exclude: u64,
+}
+
 /// Read a manifest just far enough to learn what policy it was written under.
 fn stored_hash<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
@@ -6099,7 +6119,7 @@ fn cmd_lexical(
         vault,
         &notes,
         Target::Lexical,
-        stored_hash::<LexManifest>(&lex_manifest_path(&dir)).map(|m| m.exclude),
+        stored_hash::<StoredExcludes>(&lex_manifest_path(&dir)).map(|m| m.exclude),
     );
     let mut f = parse_query(query);
     f.relative_to(&notes)?;

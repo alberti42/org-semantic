@@ -377,19 +377,50 @@ impl Server {
         // version behind and the client is the one that decides whether to say
         // so.  It costs a boolean; asking `status` per keystroke would not.
         let moving = self.indexing(&vault);
-        let answer = |mut v: serde_json::Value| {
-            v["indexing"] = moving.into();
-            v
-        };
 
         let mut f = parse_query(query);
         // A hit's path is relative to where the notes are, which is not the
         // vault directory when that directory holds only the index.
         let notes = notes_root(&vault)?;
+
+        // The exclusion rules in force, read per request and never cached: a
+        // client that edits the file must see the effect on its next search,
+        // and a copy held in memory would need a `reload` to notice.  A file
+        // that will not parse says nothing here; it already fails the `index`
+        // this would send the reader to.
+        let target = if lexical_mode { Target::Lexical } else { Target::Semantic };
+        let wanted = Excludes::read(&notes).ok().map(|ex| ex.hash(target));
+        // Said on every reply, because a hit list answered mid-rebuild is a
+        // version behind and the client is the one that decides whether to say
+        // so.  It costs a boolean; asking `status` per keystroke would not.
+        //
+        // BUILT_UNDER is what the index that answered was built with, or `None`
+        // where no index was consulted.  A difference is a remark and not an
+        // error: every hit is a real hit, and only the set of notes the index
+        // covers has moved.  An error would have to be latched into one prompt,
+        // and a prompt per keystroke is worse than the condition.
+        let answer = |mut v: serde_json::Value, built_under: Option<u64>| {
+            v["indexing"] = moving.into();
+            if let (Some(now), Some(then)) = (wanted, built_under) {
+                if now != then {
+                    let mut r = Remark::new(
+                        "exclude-drift",
+                        "this index was built with a different exclusion list, so these \
+                         results follow the old list"
+                            .into(),
+                    );
+                    r.target = Some(if lexical_mode { "lexical" } else { "semantic" });
+                    if let Ok(rs) = serde_json::to_value(vec![r]) {
+                        v["remarks"] = rs;
+                    }
+                }
+            }
+            v
+        };
         f.relative_to(&notes)?;
         if f.text.trim().is_empty() && f.is_empty() {
             // An empty query is not an error while someone is still typing.
-            return Ok(answer(serde_json::json!({ "hits": [] })));
+            return Ok(answer(serde_json::json!({ "hits": [] }), None));
         }
 
         // An editor that derives its policy from its own settings — Emacs
@@ -428,7 +459,11 @@ impl Server {
             let hits = lexical::search(&state_dir(&vault), &f, pool, conjunction, &a)?;
             let hits: Vec<(f32, &Chunk)> = hits.iter().map(|(s, c)| (*s, c)).collect();
             // BM25 has no noise floor to standardise against.
-            return Ok(answer(hits_json(&notes, &hits, lim, merge, None)));
+            return Ok(answer(
+                hits_json(&notes, &hits, lim, merge, None),
+                stored_hash::<StoredExcludes>(&lex_manifest_path(&state_dir(&vault)))
+                    .map(|m| m.exclude),
+            ));
         }
 
         // No `lang:` check here any more, in either direction: the semantic index
@@ -445,7 +480,7 @@ impl Server {
         let candidates: Vec<usize> =
             (0..ix.chunks.len()).filter(|&i| f.matches(&ix.chunks[i])).collect();
         if candidates.is_empty() || f.text.trim().is_empty() {
-            return Ok(answer(serde_json::json!({ "hits": [] })));
+            return Ok(answer(serde_json::json!({ "hits": [] }), Some(ix.exclude)));
         }
         // The one place a query waits on an indexing run: the batch in flight,
         // which is `BATCH` divided by chunks per second — a p90 of ~2 s on a real
@@ -468,7 +503,7 @@ impl Server {
             .collect();
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         let hits: Vec<(f32, &Chunk)> = scored.iter().map(|(sc, i)| (*sc, &ix.chunks[*i])).collect();
-        Ok(answer(hits_json(&notes, &hits, lim, merge, ix.baseline)))
+        Ok(answer(hits_json(&notes, &hits, lim, merge, ix.baseline), Some(ix.exclude)))
     }
 
     /// Everything an `index` request can be refused for, settled before a thread
