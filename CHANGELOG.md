@@ -50,7 +50,12 @@ job refuses a tag whose Rust changed without it.
    old binary gets silently wrong.
 4. Move everything under `[Unreleased]` into a new version heading with today's
    date, and say in it which binary version the release carries.
-5. Commit, tag `vX.Y.Z`, push the tag.
+5. Commit and push, then dry-run the workflow **naming that section**:
+   `gh workflow run release.yml -f section=X.Y.Z`. The input defaults to
+   `Unreleased`, which is right before step 4 and fails after it — the extractor
+   finds no such heading and refuses rather than publishing an empty body. That
+   refusal is the check working; it is not a reason to put the heading back.
+6. Tag `vX.Y.Z` and push the tag.
 
 The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
