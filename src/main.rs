@@ -8427,6 +8427,31 @@ mod tests {
         );
     }
 
+    /// A private policy wins outright, and nothing is merged.
+    ///
+    /// The point of the two homes: index somebody else's shared folder your own
+    /// way, without writing your settings into their tree.
+    #[test]
+    fn a_private_policy_wins_over_the_shared_one() {
+        let state = scratch("policy-private");
+        let notes = state.parent().unwrap().join("policy-private-notes");
+        fs::create_dir_all(&notes).unwrap();
+        note(&notes, "alpha");
+        fs::write(vault_file(&state), r#"{"notes":"../policy-private-notes"}"#).unwrap();
+        let root = notes_root(&state).unwrap();
+
+        // Beside the notes, and it is used.
+        fs::write(notes.join(CONFIG_FILE), r#"{"fold_diacritics":true}"#).unwrap();
+        assert!(resolve_config(&state, &root, None).unwrap().fold_diacritics);
+
+        // Beside the cache directory, and it replaces the other one whole:
+        // folding is back at its default, and the tags are the private file's.
+        fs::write(state.join(CONFIG_FILE), r#"{"exclude_tagged":["private"]}"#).unwrap();
+        let private = resolve_config(&state, &root, None).unwrap();
+        assert!(!private.fold_diacritics, "nothing is merged in from the shared file");
+        assert_eq!(private.exclude_tagged, vec!["private"]);
+    }
+
     /// An index this binary cannot read is not blamed on the policy.
     ///
     /// This is what lets a future version key on a setting it did not key on
