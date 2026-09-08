@@ -2146,5 +2146,48 @@ and nothing would say so."
       ;; And the scope reaches the search, ahead of what was typed after it.
       (should (equal asked '("dir:lab vacuum bakeout" . "lexical"))))))
 
+(ert-deftest a-moved-exclusion-list-is-said-on-the-counts-line ()
+  "The counts line says the index was built under other exclusion rules.
+
+A remark of another kind must not draw it.  The buffer branches on the
+kind, not on a reply carrying any remark at all, and the middle case
+here is what holds that apart.
+
+The key is not spelled out in the source: `substitute-command-keys'
+reads it from the keymap, so rebinding the reindex command moves what
+this line says."
+  (let ((counts
+         (lambda (reply)
+           (with-temp-buffer
+             (org-semantic-results-mode)
+             (setq org-semantic-results--vault "/vault"
+                   org-semantic-results--query "q"
+                   org-semantic-results--mode "lexical")
+             (org-semantic-results--render reply)
+             (goto-char (point-min))
+             (forward-line 2)
+             (buffer-substring-no-properties
+              (line-beginning-position) (line-end-position))))))
+    (should-not (string-match-p "exclusion list"
+                                (funcall counts '(:hits []))))
+    (should-not (string-match-p
+                 "exclusion list"
+                 (funcall counts
+                          '(:hits [] :remarks [(:kind "unreadable-file" :message "m")]))))
+    (let ((said (funcall counts
+                         '(:hits [] :remarks [(:kind "exclude-drift" :message "m")]))))
+      (should (string-match-p "exclusion list changed" said))
+      (should (string-match-p
+               (regexp-quote (key-description
+                              (where-is-internal #'org-semantic-results-reindex
+                                                 org-semantic-results-mode-map t)))
+               said)))
+    ;; Both notes fit on the line, and neither hides the other.
+    (let ((said (funcall counts
+                         '(:hits [] :indexing t
+                           :remarks [(:kind "exclude-drift" :message "m")]))))
+      (should (string-match-p "one version behind" said))
+      (should (string-match-p "exclusion list changed" said)))))
+
 (provide 'org-semantic-results-tests)
 ;;; org-semantic-results-tests.el ends here
