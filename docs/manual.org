@@ -227,8 +227,10 @@ properties and =#+filetags:= that org-semantic reads on their own:
 
 The first is the one to reach for. Point the vault straight at the clone; the
 PDFs and LaTeX beside the notes are simply not =.org=, so nothing looks at them.
-Say that it is bilingual, or nothing is classified and =lang:= has nothing to
-narrow by --- one language declared *is* the answer for every note:
+Naming its two languages is worth a line. Without it every note is still
+classified, so =lang:= works --- but the answers are bare codes, =it= rather than
+=it-IT=, and the handful of notes that are almost all attachment links are
+guessed at:
 
 #+begin_src sh
 git clone --depth 1 https://github.com/denialbb/braindump
@@ -1930,7 +1932,7 @@ edit it:
 
 #+begin_src json
 {
-  "languages": ["en-US", "de-DE"],
+  "languages": [],
   "fold_diacritics": false,
   "blocks": {
     "src":     { "semantic": "placeholder", "lexical": true },
@@ -2175,8 +2177,9 @@ The keyword is always =ltex=. You do not need ltex installed to use it ---
 =# ltex: language=de-DE= is an ordinary org comment --- and if you do use it, the
 line you already wrote for grammar checking is the one this reads. From Emacs
 that is [[https://github.com/ltex-plus/emacs-ltex-plus][emacs-ltex-plus]], which
-drives ltex-ls-plus over =lsp-mode= and reads the same marker; its
-~lsp-ltex-plus-language~ is where the default =en-US= in the policy comes from.
+drives ltex-ls-plus over =lsp-mode= and reads the same marker. Spell a region
+in both, =de-DE= rather than =de=: ltex needs the variant for spelling
+corrections, and org-semantic keeps whichever form you wrote.
 
 *A language does two jobs, and only one of them is about stemming.* It selects
 the stemmer that makes =Sprachen= find =Sprache=, which is the lexical index's
@@ -2198,10 +2201,18 @@ Otherwise =languages= names what the vault is written in, and *how many you name
 decides everything else*:
 
 #+begin_src json
-"languages": ["en-US"]                       one language: every undeclared note is English
+"languages": []                              the default: every note is classified, all 176
 "languages": ["en-US", "de-DE", "it-IT"]     several: each note is classified as one of these
-"languages": []                              classified with no restriction, all 176
+"languages": ["en-US"]                       one language: no note is classified at all
 #+end_src
+
+*Naming one language is not a hint, it is an instruction.* It means every note
+that does not declare its own /is/ that language, and the classifier never
+predicts anything. That is right for a vault you know is written in one
+language, and wrong in a way that cannot correct itself otherwise: a German
+vault indexed under =["en-US"]= has every note labelled English, on every run,
+with nothing to indicate it. So the default names nothing and lets each note be
+read.
 
 Classification is per note rather than per chunk, since a chunk can be a two-line
 heading. It uses fastText's =lid.176= (938 kB), downloaded to
@@ -2217,8 +2228,14 @@ come back Portuguese because a screenshot filename looked like it. On the same
 vault that takes the misclassifications to zero.
 
 Languages are matched on their primary subtag but stored as you wrote them, so
-=de-DE= stays =de-DE= rather than becoming fastText's bare =de=. The first one
-you name is the vault's default.
+=de-DE= stays =de-DE= rather than becoming fastText's bare =de=.
+
+*That is the second reason to name them, and it decides how you write a query.*
+The matching is one-way: a broad =lang:de= finds a note labelled =de-DE=, and a
+regional =lang:de-DE= does *not* find one labelled bare =de=. So a vault indexed
+with no language list answers =lang:de= and not =lang:de-DE=, because the
+classifier replies =de=. Name =de-DE= in the policy and both work, since the
+label is then the regional form you wrote.
 
 *Settle the list before you first index, because changing it later is not cheap.*
 Both indexes write a language onto every chunk, so both are refused until they are
@@ -2226,8 +2243,8 @@ rebuilt under the new one --- the word index in a second or two, the meaning ind
 by re-embedding the corpus, which is minutes. Leaving the semantic index alone
 instead was the alternative and is worse: every note you did not touch keeps the
 label it had, so a language you have just added answers nothing, with no error and
-nothing in the log. The order counts as a change too, since the first entry is the
-default.
+nothing in the log. The order counts as a change too, since with one language
+named the first entry is what every undeclared note becomes.
 
 A misclassified chunk is stemmed wrongly and becomes harder to find, with nothing
 to indicate why. An explicit =# ltex: language=…= overrides the classifier --- it

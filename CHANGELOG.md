@@ -61,6 +61,42 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+Binary version **0.6.0**. This one has to be downloaded, and it rebuilds both
+indexes once: the language written onto every passage can change, so an index
+built by 0.5.0 is refused and rewritten rather than left saying something that
+is no longer true.
+
+### Changed
+
+- **A vault with no language configured now has every note classified.** The
+  default was `["en-US"]`, and a list of one does not mean "probably this
+  language" — it means *never classify*. So it was the one value that could not
+  correct itself: a German vault had every note labelled English, on every run,
+  with nothing to indicate it. Told nothing, the tool now reads each note.
+
+  Naming your languages is still worth doing, and now for two reasons. It takes
+  the ~0.4% misclassification on notes that are almost all attachment links to
+  zero. And the classifier answers with bare codes, so a vault indexed with no
+  list answers `lang:de` but not `lang:de-DE` — the matching is one-way, and a
+  regional query does not find a note labelled just `de`. Name `de-DE` and both
+  work.
+
+  If your vault is written in one language and you would rather assert that than
+  detect it, say so: `{ "languages": ["en-US"] }`. That is what the old default
+  did, and it is right when you know.
+
+### Fixed
+
+- **A rebuilt word index no longer loses its stemming.** The analyzer was
+  decided from the notes the scan found changed, which is right for an
+  incremental run and wrong for a rebuild. The two came apart exactly when the
+  stored analyzer key could not be read, which is a version upgrade: the scan
+  then found nothing changed, and a trilingual vault came back indexed as
+  English alone, with its German and Italian notes stemmed wrongly. Nothing
+  failed and `lang:de` still answered, because the label is stored separately.
+
 ## [0.6.0] — 2026-09-08
 
 Binary version **0.5.0**, and this one has to be downloaded. An older binary

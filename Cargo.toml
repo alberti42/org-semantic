@@ -1,6 +1,6 @@
 [package]
 name = "org-semantic"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Embedding search for org-mode. Passages are ranked by meaning in a vector space, and by word with BM25. One static binary, no database, no Python."
 license = "MIT"
