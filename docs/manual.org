@@ -2240,15 +2240,9 @@ Everything goes in one hidden directory --- beside your notes by default, or
 [[#index-elsewhere][somewhere else entirely]] if you say so. *No note is ever
 modified* --- org-semantic only reads them.
 
-| path                                           | 951-note vault | what it is                                                          |
-|------------------------------------------------+----------------+---------------------------------------------------------------------|
-| =.org-semantic/semantic/<model>/chunks.json=   | 2.4 MB         | per chunk: heading path, line, the lines it came from, =:ID:=, tags |
-| =.org-semantic/semantic/<model>/vectors.f32=   | 10.0 MB        | one embedding per chunk, in the same order (384--1024 floats)       |
-| =.org-semantic/semantic/<model>/manifest.json= | 0.2 MB         | what that model's index has seen: per-note hash and =(mtime, size)= |
-| =.org-semantic/tantivy/=                       | 2.9 MB         | the lexical index                                                   |
-| =.org-semantic/lexical.json=                   | 0.2 MB         | the same, for the lexical index                                     |
-| =.org-semantic/index.lock=                     | ---            | present only while something is indexing this vault                 |
-|                                                | *15 MB*        |                                                                     |
+On a 951-note vault the two indexes come to about *15 MB*, ten of it a single
+file of embeddings. [[#cache-directory][The appendix]] says what each file in
+there is.
 
 *Your prose is not copied into the index.* A chunk records *where* it came from
 --- the note and a range of lines --- not what it said. That is a fraction of the
@@ -2260,26 +2254,6 @@ It costs a handful of file reads per query, for the handful of hits actually
 being shown, and it means a preview can be missing if a note has moved since it
 was indexed --- which is the honest answer in that case, rather than showing text
 that is no longer there.
-
-One directory per model, each complete in itself. The chunk table is duplicated
-rather than shared because a vector is paired to its chunk *by position*: a
-shared table would silently go stale for every model you did not index in that
-run, and a same-count-different-content mismatch is exactly what a length check
-cannot catch.
-
-*An index is replaced whole or not at all.* A run builds the new one beside the
-old and commits it at the end, so killing =index= halfway leaves you with the
-previous index, or with none --- never with one that answers from mismatched
-pieces. If it leaves you with none, the next command says so and rebuilds, rather
-than quietly returning the wrong notes.
-
-*The two indexes are independent.* Each carries everything its own hits need
-and its own record of which notes it is behind on, so either can be built,
-rebuilt or deleted without disturbing the other --- which is what makes
-=index --lexical= a one-second operation rather than a ten-minute one.
-
-The two chunk differently, because they are bounded by different things --- see
-=chunk= in the policy above.
 
 Three files hold configuration. They are optional, they sit beside the index
 directory rather than in it, and nothing can generate them from your notes:
@@ -2302,7 +2276,6 @@ case there is one of each.
 =.org-semantic/= itself holds only cache, generated from your notes, so add
 =/.org-semantic/= to the vault's =.gitignore=. Lose it and one
 =org-semantic index --full= writes it again.
-[[#cache-directory][What is in =.org-semantic/=]] describes each file in it.
 
 *** Keeping the index out of a synced folder
 :PROPERTIES:
@@ -2558,20 +2531,37 @@ The directory holds the two indexes and each one's record of which notes it has
 seen. All of it is generated from your notes. If it is deleted or lost, one
 reindex writes it again, and nothing else is lost.
 
-| path                             | what it is                                                    |
-|----------------------------------+---------------------------------------------------------------|
-| =semantic/<model>/chunks.json=   | one entry per passage: where it came from, its tags, its =:ID:= |
-| =semantic/<model>/vectors.f32=   | one embedding per passage, in the same order                  |
-| =semantic/<model>/manifest.json= | what that model's index has seen, and under which settings     |
-| =tantivy/=                       | the word index                                                |
-| =lexical.json=                   | what the word index has seen, and under which settings         |
-| =index.lock=                     | present only while something is indexing this vault           |
+Sizes are from the 951-note reference vault, under one embedding model.
 
-There is one directory per embedding model, each complete in itself, so several
-models can be built side by side and any one of them removed on its own. The
-word index and the meaning index are independent too: rebuilding the word index
-takes about a second whatever state the meaning index is in, where re-embedding a
-whole vault takes minutes.
+| path                             | 951-note vault | what it is                                                          |
+|----------------------------------+----------------+---------------------------------------------------------------------|
+| =semantic/<model>/chunks.json=   | 2.4 MB         | per chunk: heading path, line, the lines it came from, =:ID:=, tags |
+| =semantic/<model>/vectors.f32=   | 10.0 MB        | one embedding per chunk, in the same order (384--1024 floats)       |
+| =semantic/<model>/manifest.json= | 0.2 MB         | what that model's index has seen, and under which settings          |
+| =tantivy/=                       | 2.9 MB         | the word index                                                      |
+| =lexical.json=                   | 0.2 MB         | what the word index has seen, and under which settings              |
+| =index.lock=                     | ---            | present only while something is indexing this vault                 |
+|                                  | *15 MB*        |                                                                     |
+
+*One directory per model, each complete in itself.* The chunk table is
+duplicated rather than shared because a vector is paired to its chunk *by
+position*: a shared table would silently go stale for every model you did not
+index in that run, and a same-count-different-content mismatch is exactly what a
+length check cannot catch. So several models can be built side by side, and any
+one of them removed on its own.
+
+*The two indexes are independent.* Each carries everything its own hits need and
+its own record of which notes it is behind on, so either can be built, rebuilt or
+deleted without disturbing the other. That is what makes =index --lexical= a
+one-second operation rather than a ten-minute one. They also chunk differently,
+because they are bounded by different things --- see =chunk= under
+[[#what-gets-indexed][what gets indexed]].
+
+*An index is replaced whole or not at all.* A run builds the new one beside the
+old and commits it at the end, so killing =index= halfway leaves you with the
+previous index, or with none --- never with one that answers from mismatched
+pieces. If it leaves you with none, the next command says so and rebuilds, rather
+than quietly returning the wrong notes.
 
 Rebuilding a part of it costs what building it cost in the first place:
 =index --lexical= for the word index, =index --model NAME= for one model's
