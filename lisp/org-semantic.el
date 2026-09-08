@@ -844,9 +844,9 @@ costs no model load."
   "Build a JSON object from PAIRS, dropping every key whose value is nil.
 
 Dropped, not sent as null, so the server applies its own default.
-A nil `config' would arrive as JSON null and fail to parse, where
-an absent one means \"whatever the index was built under\".  A
-boolean that must be false is therefore `:json-false'."
+A nil `model' would arrive as JSON null, where an absent one means
+\"whichever model this vault has built\".  A boolean that must be
+false is therefore `:json-false'."
   (let (out)
     (while pairs
       (let ((key (pop pairs)) (value (pop pairs)))
@@ -1064,8 +1064,8 @@ text can be older than the note."
 MODE is \"semantic\", \"lexical\" or \"both\", and defaults to
 `org-semantic-index-mode'.  FULL rebuilds from scratch, which is
 also how a changed policy is agreed to; REHASH re-reads every
-note rather than trusting its timestamp.  MODEL and CONFIG
-default to the corresponding settings.
+note rather than trusting its timestamp.  MODEL defaults to
+`org-semantic-model'.
 
 SUCCESS is called with what each index did, as numbers, and with
 any `remarks': warnings that did not stop the run, which travel on
