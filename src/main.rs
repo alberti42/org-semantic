@@ -114,17 +114,12 @@ fn fault(kind: &'static str, data: serde_json::Value, message: String) -> anyhow
 /// inhabitant is a taxonomy pretending to be data; add it when a second severity
 /// actually exists.
 ///
-/// The kinds, which are the client's contract:
-///
-/// | kind | when |
-/// |---|---|
-/// | `unreadable-file` | a note could not be read, so it is missing from the index |
-/// | `heading-shortened` | a heading too long to leave its passage room was cut for embedding |
-/// | `index-rebuilt` | an incremental run had to rebuild from scratch, and why |
-/// | `stale-policy` | the cached policy would not parse, so the defaults were used |
-/// | `unknown-configured-language` | a language in the policy is not one the classifier knows |
-/// | `model-downloaded` | a model was fetched, which is why this run took minutes |
-/// | `truncated` | how many remarks of one kind were dropped past the cap |
+/// The kinds are the client's contract, and they are listed in the warnings
+/// table of `docs/manual.org`.  Deliberately not copied here: this comment was
+/// the third copy of that list and the one nobody diffed, so it still named a
+/// warning about a cached policy long after the cache was removed and had never
+/// named two that exist.  `every_warning_kind_is_in_the_manual` reads this file
+/// for `Remark::new` and holds the manual against it, in both directions.
 #[derive(Serialize, Debug)]
 struct Remark {
     kind: &'static str,
