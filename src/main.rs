@@ -1663,6 +1663,7 @@ const CONFIG_FILE: &str = ".org-semantic-config.json";
 /// the exclusion list beside it, so a mistake in it must stop the command rather
 /// than quietly index under something else.
 fn resolve_config(vault: &Path, notes: &Path, given: Option<&Path>) -> Result<Config> {
+    refuse_old_place(vault, "config.json", CONFIG_FILE)?;
     if let Some(p) = given {
         return Config::read(p);
     }
@@ -1683,6 +1684,26 @@ fn resolve_config(vault: &Path, notes: &Path, given: Option<&Path>) -> Result<Co
 /// settings no longer match the index it is searching.
 /// How the CLI says yes.  `serve` names its own, since an editor has no flags.
 const CLI_REMEDY: &str = "pass --full to rebuild under the new one";
+
+/// The policy an index records, or `None` when this binary cannot read that
+/// index at all.
+///
+/// A record from an older layout is ignored rather than compared.  Such an
+/// index is refused for its version anyway, by the reader that then rebuilds it
+/// and says so, and comparing its policy first would blame a change the user
+/// never made.  That ordering is what lets a future version key on a new
+/// setting: raise the layout number with it, and the run reports an index older
+/// than this tool instead of a policy that moved.
+fn recorded_policy(dir: &Path) -> Option<u64> {
+    let m: Manifest = stored_hash(&dir.join("manifest.json"))?;
+    (m.version == INDEX_VERSION).then_some(m.config)
+}
+
+/// The same, for the word index, whose version lives in its analyzer key.
+fn recorded_lex_policy(dir: &Path) -> Option<u64> {
+    let m: LexManifest = stored_hash(&lex_manifest_path(dir))?;
+    lexical::Analyzer::from_key(&m.key).map(|_| m.config)
+}
 
 fn check_config(previous: Option<u64>, cfg: &Config, target: Target, remedy: &str) -> Result<()> {
     let what = match target {
@@ -6163,8 +6184,7 @@ fn main() -> Result<()> {
             if !full {
                 if both || !lexical {
                     check_config(
-                        stored_hash::<Manifest>(&semantic_dir(vault, model).join("manifest.json"))
-                            .map(|m| m.config),
+                        recorded_policy(&semantic_dir(vault, model)),
                         &cfg,
                         Target::Semantic,
                         CLI_REMEDY,
@@ -6172,8 +6192,7 @@ fn main() -> Result<()> {
                 }
                 if both || lexical {
                     check_config(
-                        stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(vault)))
-                            .map(|m| m.config),
+                        recorded_lex_policy(&state_dir(vault)),
                         &cfg,
                         Target::Lexical,
                         CLI_REMEDY,
@@ -8406,6 +8425,62 @@ mod tests {
             "says how many were dropped: {}",
             cut[0].message
         );
+    }
+
+    /// An index this binary cannot read is not blamed on the policy.
+    ///
+    /// This is what lets a future version key on a setting it did not key on
+    /// before: raise the layout number with it, and the run says the index
+    /// predates this tool rather than accusing the reader of an edit. Without
+    /// the ordering, the policy hash is compared first and always disagrees,
+    /// because the key it is computed from has just gained a field.
+    #[test]
+    fn an_out_of_date_index_is_not_reported_as_a_policy_change() {
+        let v = scratch("layout-first");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        cmd_index_lexical(
+            &v,
+            true,
+            false,
+            &lang,
+            false,
+            &cfg,
+            &mut Journal::quiet(),
+            &Cancel::default(),
+        )
+        .unwrap();
+
+        // A record this binary can read reports its policy, and the policy
+        // agrees, so nothing is refused.
+        let dir = state_dir(&v);
+        assert_eq!(recorded_lex_policy(&dir), Some(cfg.hash_for(Target::Lexical)));
+
+        // Now the same record under a layout this binary does not know, and a
+        // policy that disagrees.  The policy must not be consulted at all.
+        let path = lex_manifest_path(&dir);
+        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        m["key"] = serde_json::json!("v4 langs=en fold=false");
+        m["config"] = serde_json::json!(42u64);
+        fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(recorded_lex_policy(&dir), None, "an unreadable layout records no policy");
+        check_config(recorded_lex_policy(&dir), &cfg, Target::Lexical, CLI_REMEDY)
+            .expect("the layout is the complaint, not the policy");
+    }
+
+    /// The old home of the policy is refused rather than read or ignored.
+    ///
+    /// It used to be copied inside the state directory, which is a cache.
+    /// Ignoring one left there would index under the defaults and report
+    /// success, losing every setting silently.
+    #[test]
+    fn a_policy_left_in_the_cache_directory_is_refused_by_name() {
+        let v = scratch("old-policy-place");
+        fs::create_dir_all(state_dir(&v)).unwrap();
+        fs::write(state_dir(&v).join("config.json"), r#"{"fold_diacritics":true}"#).unwrap();
+        let e = resolve_config(&v, &v, None).unwrap_err().to_string();
+        assert!(e.contains("no longer read"), "says it is not read: {e}");
+        assert!(e.contains(CONFIG_FILE), "and where it belongs: {e}");
     }
 
     /// A policy that will not read stops the command.

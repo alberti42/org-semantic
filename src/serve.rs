@@ -440,13 +440,10 @@ impl Server {
             // chunk budget larger than the model reads and have it accepted.
             cfg.check()?;
             let (previous, target) = if lexical_mode {
-                let h = stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
-                    .map(|m| m.config);
-                (h, Target::Lexical)
+                (recorded_lex_policy(&state_dir(&vault)), Target::Lexical)
             } else {
                 let dir = semantic_dir(&vault, choose_index(&vault, want)?);
-                let h = stored_hash::<Manifest>(&dir.join("manifest.json")).map(|m| m.config);
-                (h, Target::Semantic)
+                (recorded_policy(&dir), Target::Semantic)
             };
             check_config(previous, &cfg, target, SERVE_REMEDY)?;
         }
@@ -549,8 +546,7 @@ impl Server {
         if !full {
             if semantic {
                 check_config(
-                    stored_hash::<Manifest>(&semantic_dir(&vault, want).join("manifest.json"))
-                        .map(|m| m.config),
+                    recorded_policy(&semantic_dir(&vault, want)),
                     &cfg,
                     Target::Semantic,
                     SERVE_REMEDY,
@@ -558,8 +554,7 @@ impl Server {
             }
             if lexical {
                 check_config(
-                    stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
-                        .map(|m| m.config),
+                    recorded_lex_policy(&state_dir(&vault)),
                     &cfg,
                     Target::Lexical,
                     SERVE_REMEDY,
