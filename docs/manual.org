@@ -381,9 +381,9 @@ usage: org-semantic <command> <vault> [options]
 Two indexes are built and searched separately: a semantic one, which finds
 notes by meaning, and a lexical one, which finds them by word.
 
-  index  <vault> [--full|--rehash] [--model NAME] [--config FILE]
+  index  <vault> [--full|--rehash] [--model NAME]
          Build the semantic index.  Minutes, and downloads a model once.
-  index  <vault> --lexical|--both [--full|--rehash] [--config FILE]
+  index  <vault> --lexical|--both [--full|--rehash]
          Build the word index (seconds), or --both in one run.
          Incremental by default; --full rebuilds, --rehash re-reads every note.
 
@@ -417,15 +417,22 @@ notes by meaning, and a lexical one, which finds them by word.
 
   --version                                 the release this binary is from
 
-Everything about how a vault is indexed is policy, not flags: which languages
-it is written in, whether accents are folded, which subtrees are skipped, how
-large a passage may get, and what happens to src and example blocks.  It goes
-in a JSON file passed with --config, remembered afterwards so later runs need
-not repeat it.  Copy config.example.json and edit it.
+Three files beside your notes are yours, and none of them is a flag.  Delete
+.org-semantic/ whenever you like: it is a cache, and indexing writes it again.
 
-Whole files and folders are left out by a separate route, and not by policy:
-name them in .org-semantic-ignore beside your notes, one rule per line, read
-as a subset of .gitignore.  Changing it re-embeds nothing.
+  .org-semantic-config.json   how the vault is indexed: which languages it is
+                              written in, whether accents are folded, which
+                              subtrees are skipped, how large a passage may
+                              get, what happens to src and example blocks.
+                              Copy config.example.json and edit it.  Changing
+                              it needs --full.
+  .org-semantic-ignore        whole files and folders to leave out, one rule
+                              per line, read as a subset of .gitignore.
+                              Changing it re-embeds nothing.
+  .org-semantic-vault.json    where the notes are, if not beside the index.
+
+The first two are also read beside the index directory, and that copy wins, so
+you can index a shared folder your own way.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
