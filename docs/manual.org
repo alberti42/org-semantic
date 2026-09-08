@@ -1503,10 +1503,17 @@ severity: every one of these is a warning.
 | =unknown-declared-language=   | a note's own =# ltex: language== names one, and says where |
 | =model-downloaded=            | why a five-second index took ninety                      |
 | =truncated=                   | how many of one kind were left out                       |
+| =exclude-drift=               | this index was built under other exclusion rules, and one plain reindex settles it |
 
 The key is missing when there is nothing to report. Past fifty of any one kind
 the rest are counted rather than listed, since an editor that reindexes on every
 save should not carry the same four hundred problems each time.
+
+*A search reply can carry one too, and =exclude-drift= is the only kind it does.*
+Every other kind arises while indexing. A search answered from an index built
+under other exclusion rules says so on its own reply rather than failing, because
+every hit it returns is a real hit --- see
+[[#exclusion-list][leaving files and folders out]].
 
 =remarks= is a list for the whole run, not one per index: two of the kinds arise
 before either index is touched, and a note that will not read is one problem even
@@ -1881,7 +1888,11 @@ answers.
 :CUSTOM_ID: what-gets-indexed
 :END:
 Two things are decided by policy: which subtrees are indexed at all, and what
-happens to blocks.
+happens to blocks. A third --- whole files and folders --- is decided by a file
+of its own and is deliberately *not* policy; see
+[[#exclusion-list][leaving files and folders out]] below. The difference is what
+a change costs: excluding a tag re-embeds the corpus, excluding a path embeds
+nothing.
 
 Subtrees tagged =:noexport:= or =:ARCHIVE:= are left out --- org's own markers for
 "not for consumption" and "put this away". Both inherit, so the rule covers a
@@ -2059,6 +2070,79 @@ Two things a client should get right: send the policy on =search= as well as
 user acts, so a client searching as you type would otherwise raise it on every
 keystroke.
 
+*** Leaving files and folders out
+:PROPERTIES:
+:CUSTOM_ID: exclusion-list
+:END:
+A vault holds notes you would rather not search: an archive, a folder of
+generated notes, a scratch file. Name them in =.org-semantic-ignore=, at the root
+of your notes:
+
+#+begin_src text
+# one rule per line
+archive/
+inbox.org
+/journal/**
+
+[semantic]
+code/
+#+end_src
+
+The file is optional, and without one nothing is excluded. It is not part of the
+policy, and that is the point: changing it re-embeds nothing, so the remedy for a
+change is always a plain =org-semantic index= and never =--full=.
+
+*Adding a rule costs no embedding at all.* Those notes leave the walk, and both
+indexes drop them exactly as they drop a note you deleted. Removing a rule costs
+about half a second for each note that comes back, and nothing else. Neither
+scales with the size of the vault.
+
+*Two differences from a =.gitignore=; everything else is a subset of one.* The
+labels =[both]=, =[semantic]= and =[lexical]= choose which index a rule narrows,
+and rules written before any label narrow both. And there is no =!= to put a path
+back --- a line beginning with one is an error, rather than a rule that would
+quietly match nothing.
+
+| form           | what it matches                          |
+|----------------+------------------------------------------|
+| =archive/=     | a directory of that name, at any depth   |
+| =inbox.org=    | that name, at any depth                  |
+| =/inbox.org=   | that name at the notes root alone        |
+| =journal/*/=   | one path component                       |
+| =journal/**=   | any depth below =journal=                |
+| =note?.org=    | one character                            |
+
+A name carries its extension, because that is the name on disk: =inbox.org=
+excludes the note and =inbox= does not. Case is compared exactly, as git does it
+--- worth knowing on macOS, where the filesystem is not.
+
+Character classes (=[abc]=) and backslash escapes are not supported, and a rule
+using either is an error naming its line. So is a label that is none of the
+three. Nothing here is ignored in silence, because a rule that quietly matches
+nothing looks exactly like a rule that worked.
+
+*The two indexes may then answer about different notes, on purpose.* Putting
+=code/= under =[semantic]= keeps those notes findable by word and out of the way
+by meaning, which is the trade =src= blocks already make one level down.
+
+*A search says when its index is behind the file.* Each index records the rules
+it was built under, so editing the file and searching without reindexing answers
+from the old set and says so:
+
+#+begin_src console
+$ org-semantic search ~/notes "vacuum bakeout" --lexical
+this index was built with a different exclusion list, so these results follow the old list
+run `org-semantic index ~/notes` to update it
+#+end_src
+
+The search still answers, because every hit it returns is a real hit --- only the
+set of notes the index covers has moved. Over JSON-RPC the same thing arrives as
+a remark of kind =exclude-drift=; in the Emacs results buffer it is a note on the
+counts line, carrying the key that settles it.
+
+=models <vault>= says how many rules the file holds and where it is, which is the
+only place a vault mentions it at all.
+
 ** Languages
 :PROPERTIES:
 :CUSTOM_ID: languages
@@ -2207,6 +2291,11 @@ rebuilt or deleted without disturbing the other --- which is what makes
 
 The two chunk differently, because they are bounded by different things --- see
 =chunk= in the policy above.
+
+=.org-semantic-ignore= is the one exception, and it sits beside your notes rather
+than in that directory. It is yours and not derived, so *track it* --- the same
+place, and the same reason, that git keeps =.gitignore= itself. See
+[[#exclusion-list][leaving files and folders out]].
 
 Add =/.org-semantic/= to the vault's =.gitignore=. All of it is derived, so
 rebuilding is always available: =org-semantic index --full= writes it again in one
