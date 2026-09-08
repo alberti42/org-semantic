@@ -108,6 +108,28 @@ version moves with this release.
   of some other tree — has no subtree to name, so the prompt opens empty and
   the whole vault answers. The empty prompt is what says so.
 
+### Fixed
+
+- **A policy that reads the same is no longer refused.** The check in front of
+  an index compared two things: a key stored in the index, and the settings
+  themselves. When the key disagreed while every setting read the same, the run
+  refused with "no setting reads differently, so this index predates one that
+  now exists" — a sentence that says nothing changed and then asks for a full
+  rebuild. It happens when a new version of the tool starts taking a setting
+  into account that the version which built your index ignored, so your settings
+  did not move and there is nothing to rebuild. The run now notes the new state
+  and carries on. A release that genuinely needs a rebuild reports an
+  out-of-date index instead, which has always been the error for that.
+
+- **And when the policy cannot be compared at all, it says so.** Delete
+  `.org-semantic/config.json` and there is no record of what the index was built
+  under. The old message claimed no setting had moved, which was never checked.
+  It now says a copy is no longer kept and that no setting can be named, and it
+  still refuses, because the settings really may have moved. Over JSON-RPC the
+  list of changed settings is empty in this one case; in the Emacs results
+  buffer the offer to list them is no longer made, where it used to answer with
+  a blank line.
+
 ### Changed
 
 - The README and the manual open by saying what org-semantic is, and how it

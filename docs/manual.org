@@ -2072,6 +2072,18 @@ names --- see
 [[#errors-a-client-acts-on][errors you are meant to act on]]. The message is for
 showing; the label and the names are for deciding.
 
+The list of names is empty in one case, and then no setting can be named: the
+policy this vault was last indexed under is no longer on disk to compare
+against. See [[#config-is-not-derived][=config.json= --- yours, and only a
+copy]]. A settings change you made always arrives with its names.
+
+*A policy that reads the same is never refused, even if the index records a
+different one.* That happens when a new version of the tool starts taking a
+setting into account that the version which built your index ignored. Your
+settings did not move, so nothing is rebuilt: the run notes the new state and
+carries on. A release that needs a rebuild says so as an out-of-date index
+instead, which is a different error with its own remedy.
+
 Two things a client should get right: send the policy on =search= as well as
 =index=, and *latch the error into one prompt* --- the mismatch holds until the
 user acts, so a client searching as you type would otherwise raise it on every
@@ -2603,9 +2615,14 @@ back to the defaults, the policy recorded in each index then disagrees with them
 and the run is refused rather than rebuilding under settings you did not choose:
 
 #+begin_example
-Error: the lexical index was built under a different policy
-pass --full to rebuild under the new one, or restore the previous setting
+Error: the lexical index was built under a policy this vault no longer keeps a
+copy of, so which setting moved cannot be named
+pass --full to rebuild under the new one
 #+end_example
+
+It cannot name a setting because there is nothing left to compare against. That
+is the honest answer, and it is the reason this is refused rather than waved
+through: with no record of the old policy, the settings really may have moved.
 
 Two ways out, and the cheap one needs your own copy of the file:
 
