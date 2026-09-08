@@ -3894,8 +3894,18 @@ struct VaultFile {
     notes: Option<String>,
 }
 
-const VAULT_FILE: &str = "vault.json";
+const VAULT_FILE: &str = ".org-semantic-vault.json";
 const VAULT_VERSION: u32 = 1;
+
+/// Where a vault says its notes are.
+///
+/// Beside the state directory rather than inside it, because the state
+/// directory holds only what indexing can write again and this file cannot be
+/// worked out from the notes at all.  Losing it with the cache used to make the
+/// notes look empty, which the manual had to warn about.
+fn vault_file(vault: &Path) -> PathBuf {
+    vault.join(VAULT_FILE)
+}
 
 /// Say when a vault has no notes, rather than writing an index of nothing.
 ///
@@ -3958,7 +3968,7 @@ fn report_stranded(vault: &Path, notes: &Path, target: &'static str, j: &mut Jou
 /// would be a chain nobody asked for, and a cycle if the two named each other —
 /// so it is an error, said in one sentence, rather than a loop.
 fn notes_root(vault: &Path) -> Result<PathBuf> {
-    let said = state_dir(vault).join(VAULT_FILE);
+    let said = vault_file(vault);
     let Ok(bytes) = fs::read(&said) else { return Ok(vault.to_path_buf()) };
     let file: VaultFile =
         serde_json::from_slice(&bytes).with_context(|| format!("reading {}", said.display()))?;
@@ -3995,7 +4005,7 @@ fn notes_root(vault: &Path) -> Result<PathBuf> {
     // vault itself would be merged over the placeholder's, once there are any
     // to merge.  What is refused is a second *notes* key, which would be a
     // chain, or a cycle if the two named each other.
-    let onward = state_dir(&notes).join(VAULT_FILE);
+    let onward = vault_file(&notes);
     // Compared canonically, or `"notes": "."` reads as a vault naming somebody
     // else and is refused as a chain it is not.
     let elsewhere = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf()) != notes;
@@ -7320,8 +7330,7 @@ mod tests {
         fs::create_dir_all(state_dir(&state)).unwrap();
         fs::create_dir_all(&notes).unwrap();
         let rel = note(&notes, "pumps");
-        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"version":1,"notes":"../notes"}"#)
-            .unwrap();
+        fs::write(vault_file(&state), r#"{"version":1,"notes":"../notes"}"#).unwrap();
 
         // Relative to the vault, and normalised: `state/../notes` is not what a
         // message should print, nor what a client should be handed.
@@ -7385,7 +7394,7 @@ mod tests {
         fs::create_dir_all(state_dir(&state)).unwrap();
         fs::create_dir_all(&notes).unwrap();
         let rel = note(&notes, "pumps");
-        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"notes":"../notes"}"#).unwrap();
+        fs::write(vault_file(&state), r#"{"notes":"../notes"}"#).unwrap();
 
         let indexed = cmd_index(
             &state,
@@ -7481,7 +7490,7 @@ mod tests {
         let notes = v.join("notes");
         fs::create_dir_all(state_dir(&state)).unwrap();
         fs::create_dir_all(&notes).unwrap();
-        let said = state_dir(&state).join(VAULT_FILE);
+        let said = vault_file(&state);
         // `{:#}` and not `to_string()`: a serde failure arrives as the *cause*
         // under "reading <file>", which is what the CLI prints as `Caused by:`.
         let complaint = |json: &str| -> String {
@@ -7509,7 +7518,7 @@ mod tests {
 
         // One hop, not a chain.
         fs::create_dir_all(state_dir(&notes)).unwrap();
-        fs::write(state_dir(&notes).join(VAULT_FILE), r#"{"notes":"../state"}"#).unwrap();
+        fs::write(vault_file(&notes), r#"{"notes":"../state"}"#).unwrap();
         let chain = complaint(r#"{"notes":"../notes"}"#);
         assert!(chain.contains("one hop"), "{chain}");
 
@@ -7517,7 +7526,7 @@ mod tests {
         // *allowed*, being where settings of the vault itself would be merged
         // from one day.  Refusing the file rather than the second indirection
         // would close that door.
-        fs::write(state_dir(&notes).join(VAULT_FILE), r#"{"version":1}"#).unwrap();
+        fs::write(vault_file(&notes), r#"{"version":1}"#).unwrap();
         fs::write(&said, r#"{"notes":"../notes"}"#).unwrap();
         assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
     }
@@ -7555,7 +7564,7 @@ mod tests {
         // Notes elsewhere, and one left behind in the placeholder.
         note(&notes, "pumps");
         note(&state, "stray");
-        fs::write(state_dir(&state).join(VAULT_FILE), r#"{"notes":"../notes"}"#).unwrap();
+        fs::write(vault_file(&state), r#"{"notes":"../notes"}"#).unwrap();
         let mut j = Journal::quiet();
         let report = run(&state, &mut j);
         assert_eq!(report.files, 1, "only the notes are indexed");

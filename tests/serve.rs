@@ -398,7 +398,7 @@ fn status_says_where_the_notes_are_when_they_are_elsewhere() {
     let state = scratch("detached-state");
     std::fs::create_dir_all(state.join(".org-semantic")).unwrap();
     std::fs::write(
-        state.join(".org-semantic/vault.json"),
+        state.join(".org-semantic-vault.json"),
         serde_json::to_vec(&json!({ "version": 1, "notes": notes })).unwrap(),
     )
     .unwrap();
@@ -1399,7 +1399,7 @@ fn a_search_refuses_to_fetch_a_model_and_says_where_to_get_it() {
 /// It asserts the **override wins over `XDG_CACHE_HOME`**, since both being set
 /// is the ordinary case — every Linux desktop sets the latter — and a rule that
 /// only holds when the other is absent is not the rule anyone wants.
-/// `~` in `vault.json` is expanded, and `models` says where the notes are.
+/// `~` in the vault file is expanded, and `models` says where the notes are.
 ///
 /// A subprocess, because `$HOME` is what decides and setting it in-process would
 /// race every other test.  Worth its own test rather than an eyeballed run: the
@@ -1418,7 +1418,7 @@ fn a_tilde_in_the_vault_file_is_expanded_and_both_roots_are_printed() {
     std::fs::create_dir_all(state.join(".org-semantic")).unwrap();
     std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(
-        state.join(".org-semantic/vault.json"),
+        state.join(".org-semantic-vault.json"),
         br#"{ "version": 1, "notes": "~/org" }"#,
     )
     .unwrap();
