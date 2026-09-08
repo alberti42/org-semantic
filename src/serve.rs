@@ -423,31 +423,6 @@ impl Server {
             return Ok(answer(serde_json::json!({ "hits": [] }), None));
         }
 
-        // An editor that derives its policy from its own settings — Emacs
-        // reading `org-todo-keywords` — can send it with every query, and learn
-        // here that those settings have drifted from what the index was built
-        // under.  Answering anyway would answer from chunks split by rules the
-        // caller no longer holds.
-        //
-        // Checked, never applied: `search` writes nothing, so the remedy is a
-        // reindex the user has to agree to.  A client sending this per keystroke
-        // must latch the resulting error into one prompt rather than one per
-        // keypress — the condition holds until they act on it.
-        if let Some(v) = p.get("config") {
-            let cfg: Config =
-                serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?;
-            // Deserializing does not validate: without this a client can send a
-            // chunk budget larger than the model reads and have it accepted.
-            cfg.check()?;
-            let (previous, target) = if lexical_mode {
-                (recorded_lex_policy(&state_dir(&vault)), Target::Lexical)
-            } else {
-                let dir = semantic_dir(&vault, choose_index(&vault, want)?);
-                (recorded_policy(&dir), Target::Semantic)
-            };
-            check_config(previous, &cfg, target, SERVE_REMEDY)?;
-        }
-
         if lexical_mode {
             let conjunction = !p.get("any").and_then(|v| v.as_bool()).unwrap_or(false);
             let a = Self::analyzer(&vault)?;
@@ -524,16 +499,11 @@ impl Server {
         // a second model.  Nothing loads one now, so an older client that sends
         // the key is ignored, like any other unknown key, and not refused.
         //
-        // Emacs keeps its policy in whatever format it likes — a commented
-        // `.eld`, say — and passes it here already parsed, so neither side
-        // needs a reader for the other's syntax.
-        let cfg: Config = match p.get("config") {
-            Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
-            None => resolve_config(&vault, &notes_root(&vault)?, None)?,
-        };
-        // Deserializing does not validate; `Config::read` would have, so a
-        // policy arriving over the wire must be held to the same bar.
-        cfg.check()?;
+        // `config` was read here too.  An editor sent its own policy with the
+        // request, so the two sides could disagree about which one applied.
+        // The policy is the vault's own file now, and this side reads it, so
+        // there is nothing to send and nothing to reconcile.
+        let cfg = resolve_config(&vault, &notes_root(&vault)?, None)?;
 
         let want = match p.get("model").and_then(|v| v.as_str()) {
             Some(name) => model_named(name)?,

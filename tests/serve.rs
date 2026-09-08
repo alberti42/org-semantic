@@ -306,12 +306,19 @@ fn a_condition_worth_acting_on_arrives_labelled() {
     // search would find no lexical index yet and say so — correctly, and not
     // what this test is about.
     index(&v, "lexical");
+    // Built with no policy file, so writing one now is a policy that moved.
+    // The server reads that file itself: an editor used to send its own policy
+    // with the request, and then the two sides could disagree about which
+    // applied.
+    std::fs::write(
+        std::path::Path::new(&v).join(".org-semantic-config.json"),
+        r#"{"todo_keywords":["TODO","DONE","WAITING"]}"#,
+    )
+    .unwrap();
     let msgs = talk(
         &[
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "search",
-                    "params": { "vault": v, "query": "atoms", "mode": "lexical",
-                                "config": { "languages": ["en-US"],
-                                            "todo_keywords": ["TODO", "DONE", "WAITING"] } } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "index",
+                    "params": { "vault": v, "mode": "lexical" } }),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "search",
                     "params": { "vault": "/nonesuch", "query": "atoms" } }),
         ],
