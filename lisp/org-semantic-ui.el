@@ -186,7 +186,12 @@ from the prose."
             ("config-drift"
              (append '(("Rebuild fully" . index-full)
                        ("Search anyway" . waive))
-                     '(("Show what changed" . show-changed))))
+                     ;; Only when there is a list to show.  The server sends an
+                     ;; empty one when the policy the index was built under is
+                     ;; not on disk to compare against, and the offer then
+                     ;; answered with a blank line in the echo area.
+                     (when (append (plist-get data :changed) nil)
+                       '(("Show what changed" . show-changed)))))
             ((or "unknown-model" "ambiguous-model")
              '(("Choose a model" . choose-model)))
             (_ build))))

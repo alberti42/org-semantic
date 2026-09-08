@@ -1755,6 +1755,31 @@ would be a question with one answer."
     (should (string-match-p "vanished" (buffer-string)))
     (should-not org-semantic-results-tests--asked)))
 
+(ert-deftest an-offer-that-would-show-nothing-is-not-made ()
+  "\"Show what changed\" needs something to show.
+
+The server sends an empty list when the policy the index was built
+under is not on disk to compare against, so no setting can be
+named.  The offer stayed on the prompt and answered with a blank
+line in the echo area."
+  (let ((named (org-semantic-ui-remedy-offers
+                (org-semantic-ui-remedy
+                 (list :message "drifted"
+                       :data (list :kind "config-drift" :remedy "reindex-full"
+                                   :changed ["exclude_tagged"]))
+                 "semantic")))
+        (nothing (org-semantic-ui-remedy-offers
+                  (org-semantic-ui-remedy
+                   (list :message "drifted"
+                         :data (list :kind "config-drift" :remedy "reindex-full"
+                                     :changed []))
+                   "semantic"))))
+    (should (rassq 'show-changed named))
+    (should-not (rassq 'show-changed nothing))
+    ;; The rest of the prompt is untouched: there is still something to do.
+    (should (rassq 'index-full nothing))
+    (should (rassq 'waive nothing))))
+
 (ert-deftest org-semantic-ui-offer-keys-are-unambiguous ()
   "A key is a label's own initial, so the collisions are what to check.
 
@@ -1775,7 +1800,12 @@ leave it."
             (let* ((offers (org-semantic-ui-remedy-offers
                             (org-semantic-ui-remedy
                              (list :message "something"
+                                   ;; With a setting named, so `config-drift'
+                                   ;; still offers "Show what changed" beside
+                                   ;; "Search anyway" -- the one collision this
+                                   ;; test exists for.
                                    :data (list :kind kind :remedy remedy
+                                               :changed ["exclude_tagged"]
                                                :indexing indexing))
                              mode)))
                    (keys (mapcar #'org-semantic-ui-offer-key offers)))
