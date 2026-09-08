@@ -439,7 +439,6 @@ impl Server {
             // Deserializing does not validate: without this a client can send a
             // chunk budget larger than the model reads and have it accepted.
             cfg.check()?;
-            let stored = Config::read(&config_path(&state_dir(&vault))).ok();
             let (previous, target) = if lexical_mode {
                 let h = stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
                     .map(|m| m.config);
@@ -449,7 +448,7 @@ impl Server {
                 let h = stored_hash::<Manifest>(&dir.join("manifest.json")).map(|m| m.config);
                 (h, Target::Semantic)
             };
-            check_config(previous, &cfg, stored.as_ref(), target, SERVE_REMEDY)?;
+            check_config(previous, &cfg, target, SERVE_REMEDY)?;
         }
 
         if lexical_mode {
@@ -508,7 +507,7 @@ impl Server {
 
     /// Everything an `index` request can be refused for, settled before a thread
     /// is spawned.
-    fn plan(&self, p: &serde_json::Value, j: &mut Journal) -> Result<Plan> {
+    fn plan(&self, p: &serde_json::Value) -> Result<Plan> {
         let vault = PathBuf::from(
             p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
         );
@@ -533,12 +532,11 @@ impl Server {
         // needs a reader for the other's syntax.
         let cfg: Config = match p.get("config") {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| anyhow!("config: {e}"))?,
-            None => resolve_config(&vault, None, j)?,
+            None => resolve_config(&vault, &notes_root(&vault)?, None)?,
         };
         // Deserializing does not validate; `Config::read` would have, so a
         // policy arriving over the wire must be held to the same bar.
         cfg.check()?;
-        let previous = Config::read(&config_path(&state_dir(&vault))).ok();
 
         let want = match p.get("model").and_then(|v| v.as_str()) {
             Some(name) => model_named(name)?,
@@ -554,7 +552,6 @@ impl Server {
                     stored_hash::<Manifest>(&semantic_dir(&vault, want).join("manifest.json"))
                         .map(|m| m.config),
                     &cfg,
-                    previous.as_ref(),
                     Target::Semantic,
                     SERVE_REMEDY,
                 )?;
@@ -564,7 +561,6 @@ impl Server {
                     stored_hash::<LexManifest>(&lex_manifest_path(&state_dir(&vault)))
                         .map(|m| m.config),
                     &cfg,
-                    previous.as_ref(),
                     Target::Lexical,
                     SERVE_REMEDY,
                 )?;
@@ -589,7 +585,7 @@ impl Server {
         sender: &crossbeam_channel::Sender<Message>,
     ) -> Result<()> {
         let mut j = Journal::quiet();
-        let plan = self.plan(&req.params, &mut j)?;
+        let plan = self.plan(&req.params)?;
 
         let mut runs = lock(&self.run);
         // Reap whatever has finished, on any vault.  Dropping a handle whose
@@ -782,8 +778,6 @@ impl Server {
             done.insert("lexical".into(), serde_json::to_value(report)?);
         }
 
-        fs::create_dir_all(state_dir(&vault))?;
-        fs::write(config_path(&state_dir(&vault)), cfg.canonical())?;
         Ok(serde_json::Value::Object(done))
     }
 

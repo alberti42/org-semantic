@@ -321,10 +321,9 @@ fn a_condition_worth_acting_on_arrives_labelled() {
 
     let drift = err(2);
     assert_eq!(drift["data"]["kind"], "config-drift");
-    assert_eq!(drift["data"]["changed"], json!(["todo_keywords"]));
     assert_eq!(drift["data"]["remedy"], "reindex-full");
     assert!(
-        drift["message"].as_str().unwrap().contains("todo_keywords"),
+        drift["message"].as_str().unwrap().contains("different policy"),
         "and still reads as a sentence"
     );
 
