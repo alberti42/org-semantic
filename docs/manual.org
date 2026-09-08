@@ -159,7 +159,7 @@ compares them one by one.
 
 org-semantic is a single 34 MB program. The machinery that runs the embedding
 model is compiled into it, so there is nothing to install alongside it, and the
-only thing it ever downloads is the model itself --- 129 MB, once, into your
+only thing it ever downloads is the model itself --- 133 MB, once, into your
 cache.
 
 *By design, it specialises in org and nothing else.* Parsing one format
@@ -298,7 +298,7 @@ reason --- =org-semantic-<version>-src.tar.gz=, with its hash in the same
 it, and build it:
 
 #+begin_src sh
-V=0.3.0
+V=0.5.0
 BASE=https://github.com/alberti42/org-semantic/releases/download/v$V
 curl -LO $BASE/org-semantic-$V-src.tar.gz
 curl -LO $BASE/SHA256SUMS
@@ -514,7 +514,7 @@ while a run is going waits for it rather than being refused. A run of one change
 note is about 70 ms: the note is re-chunked, and only the passages whose text
 actually moved are embedded again.
 
-It says nothing when it works, which is ~org-semantic-auto-reindex-quietly=; set
+It says nothing when it works, which is ~org-semantic-auto-reindex-quietly~; set
 it to nil to see each run reported. Failures are *not* quiet --- said once per
 vault, since an automatic feature that has stopped working looks exactly like one
 that is working.
@@ -778,8 +778,8 @@ before it, and the header says so. Nothing is lost; the list is a moment behind.
 
 If the index a search needs does not exist, the buffer says so and offers to
 build it --- as something to press, rather than as a question asked while you
-were typing somewhere else. The same goes for an index whose layout is too old
-to read, and for a policy that has drifted since the index was built.
+were typing somewhere else. The same goes for an index whose layout is too old to
+read, and for a model that is not downloaded.
 
 A prefix argument to =M-x org-semantic-find= asks for the ranking and the two
 limits instead of taking them from the settings. =M-x org-semantic-reindex=
@@ -856,10 +856,10 @@ offered as "Build it". A failure with nothing to decide --- one the server sends
 no label with --- is shown and not asked about, since there would be only one
 answer.
 
-Two failures describe the vault rather than the request: a policy that has
-drifted stays drifted, and a model that is absent stays absent. Those are asked
-about *once* per results buffer and afterwards merely restated, which is what
-keeps a search you re-run from asking the same question on every reply.
+One failure describes the vault rather than the request: a model that is absent
+stays absent, so asking again cannot answer differently. It is asked about *once*
+per results buffer and afterwards merely restated, which is what keeps a search
+you re-run from asking the same question on every reply.
 
 ~org-semantic-install-directory~ is where org-semantic keeps a binary of its
 own, under your ~user-emacs-directory~. =M-x org-semantic-binary-install= puts one
@@ -868,7 +868,7 @@ configuring either:
 
 #+begin_src sh
 mkdir -p ~/.config/emacs/org-semantic
-tar xzf org-semantic-0.3.0-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
+tar xzf org-semantic-0.5.0-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
 #+end_src
 
 Release assets are =org-semantic-<version>-bin-<platform>= for the binaries and
@@ -1143,7 +1143,7 @@ Ask the *file*, before starting anything:
 
 #+begin_src console
 $ org-semantic --version
-0.1.0
+0.5.0
 #+end_src
 
 Ask the *process*, which is a different question the moment a new binary has
@@ -1154,7 +1154,7 @@ one moment a client is certain to be listening:
 #+begin_src json
 --> { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }
 <-- { "capabilities": {},
-      "serverInfo": { "name": "org-semantic", "version": "0.1.0" } }
+      "serverInfo": { "name": "org-semantic", "version": "0.5.0" } }
 #+end_src
 
 *** Errors you are meant to act on
@@ -1164,8 +1164,8 @@ one moment a client is certain to be listening:
 
 Some failures are things to show the user; others are things to /offer to fix/.
 "The vault path does not exist" is the first kind. "Your settings no longer match
-what this index was built under" is the second: the right response is a prompt,
-and the client needs to know which settings moved to write one.
+what this index was built under" is the second: the right response is a prompt
+offering the rebuild, and the client needs to know that is what to offer.
 
 Telling them apart by reading the message would mean matching English, so the
 ones worth acting on carry a label in the error's =data= member --- the same
@@ -1192,11 +1192,13 @@ nothing to decide.
 | =unknown-model=   | no such model                                                | =known=                      |
 | =ambiguous-model= | several indexes exist and none is the default                | =built=                      |
 | =indexing=        | an index is already running; only one runs at a time         | =remedy= (=wait=)            |
+| =model-missing=   | the index is here and the model that built it is not downloaded | =target=, =model=, =remedy= (=download=), =indexing= |
+| =downloading=     | that model is being fetched already                          | =model=, =remedy= (=wait=)   |
 
 Every one carries =remedy=, which is the call to offer rather than a sentence to
-parse: =index= means /build it/, =reindex-full= means /rebuild it from scratch/.
-=changed= names the settings, so a prompt can say *which* one moved without
-taking the message apart.
+parse: =index= means /build it/, =reindex-full= means /rebuild it from scratch/,
+=download= means /fetch that model/, and =wait= means /somebody else is already
+doing it/.
 
 =message= stays the human sentence, unchanged, and is written to be shown as-is.
 It never names a command-line flag, because the person reading it in an editor
@@ -1293,7 +1295,7 @@ Send *=$/cancelRequest=* with the id of the =index= request:
 #+end_src
 
 The run stops at its next unit of work and answers under that id with LSP's
-=-32800= /RequestCancelled/ and a =data.kind= of ="cancelled"=. The session
+=-32800= /RequestCancelled/ and a =data.kind= of =cancelled=. The session
 survives: one request ended, not the server. Because the id is carried, a
 cancellation that arrives after its run has already finished does nothing,
 rather than stopping whatever came next.
@@ -1504,11 +1506,11 @@ when both indexes trip over it. Where it matters, =target= says which index a
 remark came from.
 
 *Reindexing happens in-process too.* Spawning a CLI for it would pay the model
-load again, which is the cost the resident process exists to avoid --- so a short
-run borrows the resident model and re-indexing a vault after saving one note takes
-under a tenth of a second, embedding only that note. A long run loads its own
-instead, so that searching stays quick while it works; see
-[[#during-a-reindex][above]].
+load again, which is the cost the resident process exists to avoid --- so the run
+borrows the resident model and re-indexing a vault after saving one note takes
+under a tenth of a second, embedding only that note. It is always the same model:
+the process never holds two sets of weights, so a search during a long run waits
+out one embedding batch. See [[#during-a-reindex][above]].
 
 Either way the new index is *adopted, not re-read*: the run already holds it in
 memory when it writes it, and hands it over. So the next query answers from the
@@ -1672,18 +1674,21 @@ org-semantic index ~/notes --lexical       # BM25             1.3 s
 org-semantic index ~/notes --both          # both
 #+end_src
 
-=languages= and =fold_diacritics= affect only the lexical index, which is the
-only one that has a use for a language: they choose the stemmer.
+=fold_diacritics= affects only the word index, which is the only one that
+analyses text: it chooses a filter for the analyzer. =languages= affects both,
+since both label every passage with a language and both answer =lang:=.
 
 They are separate artifacts with separate records of what they have seen, so each
 re-run only reads the notes /that/ index is behind on. Both are incremental by
 default; =--full= rebuilds from scratch and =--rehash= re-reads every note,
 ignoring timestamps.
 
-Embedding takes minutes and a 129 MB model; the lexical index takes a second and
+Embedding takes minutes and a 133 MB model; the word index takes a second and
 nothing but the notes. So refreshing keyword search after editing a few notes
-costs a second, and changing the folding or your language list rebuilds only the
-lexical index --- those settings are hashed per index.
+costs a second. The policy is hashed per index, so a setting that only one of
+them reads costs only that one a rebuild: changing =fold_diacritics= rebuilds the
+word index alone, in about a second, while changing your language list rebuilds
+both --- see [[#languages][Languages]].
 
 ** Two rankings, never merged
 :PROPERTIES:
@@ -2349,7 +2354,7 @@ saving one still reindexes. ~M-x org-semantic-show-status~ names both.
 *Two things live outside the vault*, both downloaded once and shared by every
 vault: the embedding model, in =$XDG_CACHE_HOME/fastembed=, and the language
 classifier, in =$XDG_CACHE_HOME/org-semantic=. =org-semantic models= prints both
-paths. A model is 128 MB for =bge-small-en= and up to 2.24 GB for the large
+paths. A model is 133 MB for =bge-small-en= and up to 2.24 GB for the large
 multilingual ones; the classifier is 938 kB.
 
 To put them elsewhere --- a small system disk, an external drive, a directory
@@ -2432,25 +2437,25 @@ another vault is a different argument, not a different configuration.
 :END:
 Early, and useful. It indexes an org tree, searches it by meaning and by words,
 updates incrementally, and speaks JSON --- over =--json= for one-shot calls and
-over =serve= for a caller holding a session open.
+over =serve= for a caller holding a session open. The Emacs package is written
+and is what [[#searching-from-emacs][Searching from Emacs]] describes: a results
+buffer, reindexing as notes are saved, and a binary it can install for you.
 
-*The Emacs package is the open piece, and is coming.* Everything it needs
-exists: structured hits carrying the note, the line its heading starts on, the
-lines the passage came from and the passage itself, and a resident process that
-answers in ~10 ms. What is missing is the client itself ---
-no elisp is written yet, so for now jumping to a hit is a manual =find-file=.
+The roadmap is org depth rather than more formats. Priority is parsed onto every
+passage and has no predicate yet. Following an =[[id:…]]= link to pull a
+neighbouring note's context into a passage is not done. On the Emacs side, a
+minibuffer interface that narrows as you type is the piece most obviously
+missing, and the results buffer is deliberately read-only for now --- writing a
+passage back needs a way to be sure a line number from the index still points
+where it did.
 
-The rest of the roadmap is org depth rather than more formats: honouring
-=:noexport:= and archived subtrees, and treating =#+begin_src= blocks distinctly,
-since code embedded as prose pollutes results.
-
-Known gaps. The two modes are not fused into a single ranking: a phrase or a
-boolean means nothing to an embedding, so a combined list would mix hits that
-honoured your query with hits that could not. Auto language detection is
-right on prose and guesses on notes that are almost entirely attachment links or
-shell snippets --- 0.4% of chunks on the reference vault, and none once the
-languages are named in the policy. Re-split pieces of a long section share their
-section's line number.
+Known gaps. The two rankings are not fused into one: a phrase or a boolean means
+nothing to an embedding, so a combined list would mix hits that honoured your
+query with hits that could not. Language detection is right on prose and guesses
+on notes that are almost entirely attachment links or shell snippets --- 0.4% of
+chunks on the reference vault, and none once the languages are named in the
+policy. And a passage cannot be reached across two vaults in one search: a vault
+is one argument, and searching several means searching them one at a time.
 
 * Related work
 :PROPERTIES:
@@ -2462,7 +2467,7 @@ wire up yourself.
 
 | project          | format   | Emacs front-end                    | runtime                            |
 |------------------+----------+------------------------------------+------------------------------------|
-| *org-semantic*   | org      | via =serve= (elisp UI in progress) | one static binary, in-process ONNX |
+| *org-semantic*   | org      | native elisp, over =serve=         | one static binary, in-process ONNX |
 | org-supertag     | org      | native elisp                       | elisp only, no embeddings          |
 | org-db           | org      | native elisp                       | Python + =torch= server on a port  |
 | emacs-rag-libsql | org      | native elisp                       | Python + =torch= server on a port  |

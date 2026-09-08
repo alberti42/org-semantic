@@ -8138,6 +8138,38 @@ mod tests {
         }
     }
 
+    /// Every labelled failure is named in the manual.
+    ///
+    /// The same drift as the warnings table, and it had happened here too: two
+    /// kinds a client meets often — a model that is not downloaded, and one
+    /// already being fetched — were in no table at all. A client author reads
+    /// that table to decide what to branch on.
+    ///
+    /// Named *somewhere* in the manual rather than in one table, since
+    /// `cancelled` is documented where cancelling is explained.
+    #[test]
+    fn every_labelled_failure_is_in_the_manual() {
+        let src = format!("{}{}", include_str!("main.rs"), include_str!("serve.rs"));
+        let mut kinds: Vec<&str> = src
+            .match_indices("fault(")
+            .filter_map(|(i, _)| {
+                let rest = &src[i + "fault(".len()..].trim_start();
+                rest.strip_prefix('"')?.split('"').next()
+            })
+            .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+            // The fixture in `a_label_does_not_disturb_the_message_it_labels`.
+            .filter(|k| *k != "test-kind")
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert!(kinds.len() > 5, "the kinds are found at all: {kinds:?}");
+
+        let manual = include_str!("../docs/manual.org");
+        for kind in &kinds {
+            assert!(manual.contains(&format!("={kind}=")), "{kind} is not in the manual");
+        }
+    }
+
     /// `USAGE` is copied into the manual.  Nobody diffs that copy by hand, so it
     /// goes stale: adding `--version` left the manual describing a tool that had
     /// none.
