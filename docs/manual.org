@@ -420,6 +420,10 @@ large a passage may get, and what happens to src and example blocks.  It goes
 in a JSON file passed with --config, remembered afterwards so later runs need
 not repeat it.  Copy config.example.json and edit it.
 
+Whole files and folders are left out by a separate route, and not by policy:
+name them in .org-semantic-ignore beside your notes, one rule per line, read
+as a subset of .gitignore.  Changing it re-embeds nothing.
+
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
 #+end_example
