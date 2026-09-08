@@ -746,28 +746,273 @@ struct Chunk {
 
 // ---------------------------------------------------------------- collecting
 
-fn org_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// The file that says what to leave out of the index.
+///
+/// It sits at the notes root, and not in the state directory. The state
+/// directory holds derived data, and losing it must cost one `index --full` and
+/// nothing more. A lost exclusion list has no loud failure: the next run
+/// indexes more notes and reports success. Git keeps `.gitignore` in the work
+/// tree for the same reason, and this follows that shape.
+const IGNORE_FILE: &str = ".org-semantic-ignore";
+
+/// Which list a rule joins.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RuleGroup {
+    Both,
+    Semantic,
+    Lexical,
+}
+
+/// One rule from the exclusion file.
+///
+/// The parser settles the two facts git's syntax reads off a line, so the
+/// matcher does not work them out again for every path it tests.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Rule {
+    /// The path components, split on `/`, with no empty component.
+    parts: Vec<String>,
+    /// The line ended with `/`, so the rule names a directory and never a file.
+    dir_only: bool,
+    /// The rule matches from the notes root rather than at any depth.
+    ///
+    /// Git anchors a pattern that carries a `/` at the start or in the middle.
+    /// A `/` at the end alone does not anchor it. So `archive/` matches a
+    /// directory of that name anywhere, and `journal/2019/` matches one path.
+    anchored: bool,
+}
+
+impl Rule {
+    /// Does this rule exclude PARTS, a path's components below the notes root?
+    ///
+    /// IS_DIR decides whether a rule written with a trailing `/` applies. Every
+    /// other rule matches a file and a directory alike, as git does it.
+    fn matches(&self, parts: &[&str], is_dir: bool) -> bool {
+        if self.dir_only && !is_dir {
+            return false;
+        }
+        if self.anchored {
+            match_parts(&self.parts, parts)
+        } else {
+            (0..parts.len()).any(|i| match_parts(&self.parts, &parts[i..]))
+        }
+    }
+}
+
+/// Match a rule's components against a path's, left to right.
+///
+/// `**` stands for zero or more whole components, so `journal/**` covers
+/// everything below `journal` and `**/draft.org` finds that name at any depth.
+fn match_parts(rule: &[String], path: &[&str]) -> bool {
+    let Some((first, rest)) = rule.split_first() else { return path.is_empty() };
+    if first.as_str() == "**" {
+        return (0..=path.len()).any(|i| match_parts(rest, &path[i..]));
+    }
+    match path.split_first() {
+        Some((head, tail)) if glob_component(first, head) => match_parts(rest, tail),
+        _ => false,
+    }
+}
+
+/// Does one path component match one rule component?
+fn glob_component(pat: &str, name: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    glob_at(&p, &n)
+}
+
+/// `*` covers any run of characters and `?` exactly one.
+///
+/// Neither crosses a `/`, because this is given one component at a time.
+fn glob_at(p: &[char], n: &[char]) -> bool {
+    let Some((c, rest)) = p.split_first() else { return n.is_empty() };
+    match c {
+        '*' => (0..=n.len()).any(|i| glob_at(rest, &n[i..])),
+        '?' => !n.is_empty() && glob_at(rest, &n[1..]),
+        _ => n.first() == Some(c) && glob_at(rest, &n[1..]),
+    }
+}
+
+/// What each index leaves out, as read from `.org-semantic-ignore`.
+///
+/// Three lists, because the two indexes already differ in what they hold: a
+/// `src` block's body is in the word index and not in the semantic one.
+/// Excluding a whole directory from one side is the same idea one level up.
+///
+/// `both` exists so the common case stays short. Almost every rule applies to
+/// both indexes, and writing each one twice would let the two lists drift apart
+/// by accident.
+#[derive(Default, Clone, Debug)]
+struct Excludes {
+    both: Vec<Rule>,
+    semantic: Vec<Rule>,
+    lexical: Vec<Rule>,
+}
+
+impl Excludes {
+    /// Read the file at the notes root. An absent file excludes nothing.
+    ///
+    /// A file that is present and will not read is an error. This file is the
+    /// user's own, like a policy named with `--config`, so a mistake in it must
+    /// stop the command rather than quietly change what is indexed.
+    fn read(notes: &Path) -> Result<Excludes> {
+        let path = notes.join(IGNORE_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Excludes::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        Excludes::parse(&text).with_context(|| format!("in {}", path.display()))
+    }
+
+    /// Parse the text of an exclusion file.
+    ///
+    /// Separate from `read` so a test needs no vault on disk.
+    fn parse(text: &str) -> Result<Excludes> {
+        let mut ex = Excludes::default();
+        let mut group = RuleGroup::Both;
+        for (i, raw) in text.lines().enumerate() {
+            let no = i + 1;
+            // Git strips trailing space and keeps leading space, so an indented
+            // line names a file whose name begins with a space. Kept as git has
+            // it, because this file is documented as a subset of that syntax and
+            // one silent difference is worse than none.
+            let line = raw.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let trimmed = line.trim();
+            if let Some(g) = group_label(trimmed) {
+                group = g;
+                continue;
+            }
+            // A whole line in brackets is a misspelt label far more often than
+            // it is a character class of one letter. Refused here, ahead of the
+            // character class below, so the message names the three labels
+            // rather than a syntax nobody was reaching for.
+            if label_shaped(trimmed) {
+                return Err(anyhow!(
+                    "line {no}: `{trimmed}` is not a group label; \
+                     expected `[both]`, `[semantic]` or `[lexical]`"
+                ));
+            }
+            if line.starts_with('!') {
+                return Err(anyhow!(
+                    "line {no}: `{line}` un-excludes a path, which is not supported yet; \
+                     name the paths to exclude instead"
+                ));
+            }
+            if line.contains('[') || line.contains('\\') {
+                return Err(anyhow!(
+                    "line {no}: `{line}` uses a character class or an escape, and this \
+                     reads a subset of .gitignore that has neither"
+                ));
+            }
+            ex.push(group, rule_of(line, no)?);
+        }
+        Ok(ex)
+    }
+
+    fn push(&mut self, group: RuleGroup, rule: Rule) {
+        match group {
+            RuleGroup::Both => self.both.push(rule),
+            RuleGroup::Semantic => self.semantic.push(rule),
+            RuleGroup::Lexical => self.lexical.push(rule),
+        }
+    }
+
+    /// The rules one index goes by: the shared list, then that index's own.
+    ///
+    /// Order carries no meaning while un-excluding is unsupported, so this is a
+    /// plain concatenation. Adding `!` later would make the order significant.
+    fn rules(&self, target: Target) -> impl Iterator<Item = &Rule> {
+        let own = match target {
+            Target::Semantic => &self.semantic,
+            Target::Lexical => &self.lexical,
+        };
+        self.both.iter().chain(own.iter())
+    }
+}
+
+/// The group a label names, or `None` when the line names none of the three.
+///
+/// Compared whole and in lower case, never by a first character: `[abc].org` is
+/// a character class in the syntax this borrows from.
+fn group_label(line: &str) -> Option<RuleGroup> {
+    match line {
+        "[both]" => Some(RuleGroup::Both),
+        "[semantic]" => Some(RuleGroup::Semantic),
+        "[lexical]" => Some(RuleGroup::Lexical),
+        _ => None,
+    }
+}
+
+/// Does the whole line look like a label, whatever it says inside?
+///
+/// This gives a misspelt label its own message. A line with anything after the
+/// closing bracket is left to the character class refusal instead.
+fn label_shaped(line: &str) -> bool {
+    line.len() > 2
+        && line.starts_with('[')
+        && line.ends_with(']')
+        && line[1..line.len() - 1].chars().all(|c| c.is_ascii_alphabetic())
+}
+
+/// Turn one line into a rule.
+fn rule_of(line: &str, no: usize) -> Result<Rule> {
+    let dir_only = line.ends_with('/');
+    let body = line.strip_suffix('/').unwrap_or(line);
+    // Git's anchoring rule, with the trailing slash already off: a separator
+    // left anywhere means the rule starts at the notes root.
+    let anchored = body.contains('/');
+    let parts: Vec<String> = body.split('/').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    if parts.is_empty() {
+        return Err(anyhow!("line {no}: `{line}` names no path"));
+    }
+    Ok(Rule { parts, dir_only, anchored })
+}
+
+fn org_files(notes: &Path, dir: &Path, rules: &[&Rule], out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // Hidden directories hold state, not notes — including this tool's own.
+        // Hidden directories hold state and not notes. This tool's own is one.
+        // Tested ahead of the rules, so no rule can put one back.
         if name.starts_with('.') {
             continue;
         }
         let path = entry.path();
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            // org-attach's store: binaries, and nothing to embed.
+            // org-attach keeps binaries here, and there is nothing to embed.
             if name == "data" {
                 continue;
             }
-            org_files(&path, out)?;
+            // A directory the rules exclude is not descended into. That is what
+            // keeps a large archive from being read on every run, and it is the
+            // half of the matcher easiest to leave out.
+            if excluded(notes, &path, rules, true) {
+                continue;
+            }
+            org_files(notes, &path, rules, out)?;
         } else if ft.is_file() && path.extension().is_some_and(|e| e == "org") {
+            if excluded(notes, &path, rules, false) {
+                continue;
+            }
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// Does any rule exclude this path?
+fn excluded(notes: &Path, path: &Path, rules: &[&Rule], is_dir: bool) -> bool {
+    if rules.is_empty() {
+        return false;
+    }
+    let rel = rel_path(notes, path);
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    rules.iter().any(|r| r.matches(&parts, is_dir))
 }
 
 /// The notes root, and every `.org` file under it in a stable order.
@@ -781,10 +1026,12 @@ struct Walk {
     files: Vec<PathBuf>,
 }
 
-fn walk_notes(vault: &Path) -> Result<Walk> {
+fn walk_notes(vault: &Path, target: Target) -> Result<Walk> {
     let notes = notes_root(vault)?;
+    let excludes = Excludes::read(&notes)?;
+    let rules: Vec<&Rule> = excludes.rules(target).collect();
     let mut files = Vec::new();
-    org_files(&notes, &mut files)?;
+    org_files(&notes, &notes, &rules, &mut files)?;
     files.sort();
     Ok(Walk { notes, files })
 }
@@ -4106,7 +4353,7 @@ fn cmd_index_lexical(
     stop: &Cancel,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
-    let Walk { notes, files } = walk_notes(vault)?;
+    let Walk { notes, files } = walk_notes(vault, Target::Lexical)?;
     report_empty(&notes, &files, "lexical", j);
     report_stranded(vault, &notes, "lexical", j);
 
@@ -4391,7 +4638,7 @@ fn cmd_index(
     stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
-    let Walk { notes, files } = walk_notes(vault)?;
+    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
     report_empty(&notes, &files, "semantic", j);
     report_stranded(vault, &notes, "semantic", j);
 
@@ -5300,7 +5547,7 @@ fn cmd_search(
 /// full run.  Reports the chunk-length distribution too, since throughput on
 /// this workload is set by tokens rather than by chunk count.
 fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
-    let Walk { notes, files } = walk_notes(vault)?;
+    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
     // Packed with the real tokenizer, or this measures chunks the indexer would
     // never produce.
     let m = model_named(DEFAULT_MODEL)?;
@@ -5389,7 +5636,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
 fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let tok = tokenizer_for(m)?;
 
-    let Walk { notes, files } = walk_notes(vault)?;
+    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
     let measure = |s: &str| n_tokens(&tok, s);
@@ -5691,7 +5938,7 @@ fn cmd_chunks(
             Target::Lexical => "lexical",
         }
     );
-    let Walk { notes, files } = walk_notes(vault)?;
+    let Walk { notes, files } = walk_notes(vault, target)?;
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
@@ -7233,6 +7480,165 @@ mod tests {
         );
     }
 
+    // ----------------------------------------------------- the exclusion list
+
+    /// The default group is `both`, a label may repeat, and each index reads the
+    /// shared rules before its own.
+    #[test]
+    fn a_label_chooses_the_group_and_the_first_rules_belong_to_both() {
+        let ex = Excludes::parse(
+            "archive/\n\n[semantic]\ncode/\n\n[lexical]\ngen/\n\n[semantic]\nmore/\n",
+        )
+        .unwrap();
+        let names = |t| ex.rules(t).map(|r| r.parts.join("/")).collect::<Vec<_>>();
+        assert_eq!(names(Target::Semantic), ["archive", "code", "more"]);
+        assert_eq!(names(Target::Lexical), ["archive", "gen"]);
+    }
+
+    /// Git's own tidying, and one thing it deliberately does not do: a trailing
+    /// slash names a directory without anchoring the rule to the notes root.
+    #[test]
+    fn a_comment_a_blank_line_and_trailing_space_are_ignored() {
+        let ex = Excludes::parse("# not a rule\n\n   \narchive/   \n").unwrap();
+        assert_eq!(ex.both.len(), 1);
+        assert_eq!(ex.both[0].parts, ["archive"]);
+        assert!(ex.both[0].dir_only);
+        assert!(!ex.both[0].anchored, "a trailing slash alone does not anchor");
+    }
+
+    /// Every refusal names its line. A rule that quietly does nothing looks
+    /// exactly like a rule that worked, and there is no other check for it.
+    #[test]
+    fn a_bad_line_is_refused_and_the_message_says_which() {
+        for (text, want) in [
+            ("archive/\n[semanic]\n", "not a group label"),
+            ("archive/\n!archive/keep.org\n", "un-excludes a path"),
+            ("archive/\n[abc].org\n", "character class"),
+            ("archive/\na\\b.org\n", "character class"),
+            ("archive/\n/\n", "names no path"),
+        ] {
+            let said = format!("{:#}", Excludes::parse(text).expect_err(text));
+            assert!(said.contains(want), "{said:?} should mention {want:?}");
+            assert!(said.contains("line 2"), "{said:?} should name the line");
+        }
+    }
+
+    /// The forms the manual documents, and what each one leaves alone.
+    ///
+    /// A path that does not end in `.org` stands for a directory here, which is
+    /// what a vault looks like: every note carries the extension.
+    #[test]
+    fn each_pattern_form_matches_what_gitignore_would() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("archive/", &["archive", "a/archive"], &["archive.org", "a/archive.org"]),
+            (
+                "inbox.org",
+                &["inbox.org", "a/inbox.org", "a/b/inbox.org"],
+                &["a/inbox", "inbox.org.bak"],
+            ),
+            ("/inbox.org", &["inbox.org"], &["a/inbox.org"]),
+            ("journal/*/", &["journal/2019"], &["journal", "journal/2019/q1"]),
+            (
+                "journal/**",
+                &["journal", "journal/2019", "journal/2019/x.org"],
+                &["j/2019", "ajournal"],
+            ),
+            ("note?.org", &["note1.org", "a/noteB.org"], &["note.org", "note12.org"]),
+        ];
+        for (rule, hit, miss) in cases {
+            let ex = Excludes::parse(&format!("{rule}\n")).unwrap();
+            let r = &ex.both[0];
+            for path in *hit {
+                let parts: Vec<&str> = path.split('/').collect();
+                assert!(
+                    r.matches(&parts, !path.ends_with(".org")),
+                    "`{rule}` should exclude `{path}`"
+                );
+            }
+            for path in *miss {
+                let parts: Vec<&str> = path.split('/').collect();
+                assert!(
+                    !r.matches(&parts, !path.ends_with(".org")),
+                    "`{rule}` should leave `{path}` alone"
+                );
+            }
+        }
+    }
+
+    /// The directory is skipped whole, not filtered note by note.
+    ///
+    /// `archive/` names a directory, so it cannot match a file. The note inside
+    /// therefore matches no rule of its own, and its absence is the only proof
+    /// that the walk never went in. Without that, a large archive is read on
+    /// every run and nothing says so.
+    #[test]
+    fn an_excluded_directory_is_not_descended_into() {
+        let v = scratch("exclude-walk");
+        fs::create_dir_all(v.join("archive")).unwrap();
+        note(&v, "alpha");
+        note(&v.join("archive"), "keep");
+        fs::write(v.join(IGNORE_FILE), "archive/\n").unwrap();
+
+        let w = walk_notes(&v, Target::Semantic).unwrap();
+        let seen: Vec<String> = w.files.iter().map(|f| rel_path(&w.notes, f)).collect();
+        assert_eq!(seen, ["alpha.org"], "archive/keep.org matches no rule of its own");
+    }
+
+    /// A group narrows one index and leaves the other whole, which is the point
+    /// of having three lists rather than one.
+    #[test]
+    fn a_group_narrows_one_index_and_leaves_the_other() {
+        let v = scratch("exclude-groups");
+        fs::create_dir_all(v.join("code")).unwrap();
+        note(&v, "alpha");
+        note(&v.join("code"), "helper");
+        fs::write(v.join(IGNORE_FILE), "[semantic]\ncode/\n").unwrap();
+
+        let walked = |t| {
+            let w = walk_notes(&v, t).unwrap();
+            let mut seen: Vec<String> = w.files.iter().map(|f| rel_path(&w.notes, f)).collect();
+            seen.sort();
+            seen
+        };
+        assert_eq!(walked(Target::Semantic), ["alpha.org"]);
+        assert_eq!(walked(Target::Lexical), ["alpha.org", "code/helper.org"]);
+    }
+
+    /// Adding a rule costs no embedding.
+    ///
+    /// The note leaves the walk, `scan_vault` reports it as dropped by the same
+    /// set difference a deletion goes through, and the index is written without
+    /// it. No model is loaded, because nothing is stale: this test would need
+    /// one if the note were re-read. It is the sibling of
+    /// `deleting_a_note_is_persisted_even_though_nothing_needs_embedding`, which
+    /// is the same path by another cause.
+    #[test]
+    fn an_excluded_note_leaves_the_index_without_embedding_anything() {
+        let v = scratch("exclude-drop");
+        let a = note(&v, "alpha");
+        let b = note(&v, "beta");
+        seed(&v, &[a.as_str(), b.as_str()]);
+
+        fs::write(v.join(IGNORE_FILE), "beta.org\n").unwrap();
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &Config::default(),
+            &mut Journal::quiet(),
+            None,
+            &Cancel::default(),
+        )
+        .unwrap();
+
+        let ix =
+            loaded(&sem(&v), model_named(DEFAULT_MODEL).unwrap()).expect("index should still load");
+        assert_eq!(ix.chunks.len(), 1, "beta's chunk must be gone");
+        assert_eq!(ix.chunks[0].path, a);
+        assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
+    }
+
     #[test]
     fn an_unchanged_vault_is_left_alone() {
         let v = scratch("unchanged");
@@ -7467,7 +7873,7 @@ mod tests {
         // Not UTF-8, which is what `read_to_string` refuses.
         fs::write(v.join("broken.org"), [0xffu8, 0xfe, 0x00]).unwrap();
         let mut files = Vec::new();
-        org_files(&v, &mut files).unwrap();
+        org_files(&v, &v, &[], &mut files).unwrap();
         files.sort();
 
         let scan = scan_vault(
