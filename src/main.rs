@@ -3907,6 +3907,25 @@ fn vault_file(vault: &Path) -> PathBuf {
     vault.join(VAULT_FILE)
 }
 
+/// Refuse a file this tool used to keep inside the state directory.
+///
+/// These moved out because the state directory is a cache.  Reading the old
+/// place as well would be a fallback nobody can see; ignoring it is worse,
+/// because the settings in it silently stop applying and the run reports
+/// success.  So it is named, once, with where it belongs now.
+fn refuse_old_place(vault: &Path, was: &str, now: &str) -> Result<()> {
+    let old = state_dir(vault).join(was);
+    if !old.exists() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{} is no longer read: that directory is a cache now, and this file is yours.\n\
+         move it to {}",
+        old.display(),
+        vault.join(now).display()
+    ))
+}
+
 /// Say when a vault has no notes, rather than writing an index of nothing.
 ///
 /// Loud because it is otherwise invisible: the run succeeds, every search
@@ -3968,6 +3987,7 @@ fn report_stranded(vault: &Path, notes: &Path, target: &'static str, j: &mut Jou
 /// would be a chain nobody asked for, and a cycle if the two named each other —
 /// so it is an error, said in one sentence, rather than a loop.
 fn notes_root(vault: &Path) -> Result<PathBuf> {
+    refuse_old_place(vault, "vault.json", VAULT_FILE)?;
     let said = vault_file(vault);
     let Ok(bytes) = fs::read(&said) else { return Ok(vault.to_path_buf()) };
     let file: VaultFile =
@@ -7476,6 +7496,31 @@ mod tests {
         };
         assert_eq!(narrowed("lang:de Sprache"), vec!["de.org".to_string()]);
         assert_eq!(narrowed("-lang:de atoms"), vec!["en.org".to_string()]);
+    }
+
+    /// The old home is refused rather than read or ignored.
+    ///
+    /// It used to sit inside the state directory, which is a cache.  Ignoring
+    /// one left there would make a detached vault look empty while the run
+    /// reported success, and reading it as well would be a fallback nobody can
+    /// see.
+    #[test]
+    fn a_pointer_left_in_the_cache_directory_is_refused_by_name() {
+        let state = scratch("old-vault-place");
+        let notes = state.parent().unwrap().join("old-vault-place-notes");
+        fs::create_dir_all(&notes).unwrap();
+        note(&notes, "alpha");
+
+        // Where it belongs now, and it works.
+        fs::write(vault_file(&state), r#"{"notes":"../old-vault-place-notes"}"#).unwrap();
+        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+
+        // And the old place is named, with where to put it.
+        fs::create_dir_all(state_dir(&state)).unwrap();
+        fs::write(state_dir(&state).join("vault.json"), r#"{"notes":"../elsewhere"}"#).unwrap();
+        let e = notes_root(&state).unwrap_err().to_string();
+        assert!(e.contains("no longer read"), "says it is not read: {e}");
+        assert!(e.contains(VAULT_FILE), "and where it belongs: {e}");
     }
 
     /// Every way `vault.json` can be wrong, said rather than guessed at.
