@@ -3776,7 +3776,7 @@ fn state_dir(vault: &Path) -> PathBuf {
     vault.join(STATE_DIR)
 }
 
-/// What `.org-semantic/vault.json` may say about the vault it sits in.
+/// What `.org-semantic-vault.json` may say about the vault it sits in.
 ///
 /// Every field optional and merged over the defaults, so `{}` is legal and a
 /// vault that says nothing is the ordinary case: the notes are the directory the
@@ -3872,7 +3872,7 @@ fn report_stranded(vault: &Path, notes: &Path, target: &'static str, j: &mut Jou
 ///
 /// **This is the only place that answers it**, and the split it describes is the
 /// whole of the feature: a vault directory is where its *index* lives, and the
-/// notes are inside it unless `.org-semantic/vault.json` names somewhere else.
+/// notes are inside it unless `.org-semantic-vault.json` names somewhere else.
 /// So an index can sit outside a synced folder — or several can sit side by side
 /// under one cache directory — while the vault stays the single path every
 /// command already takes and the server already keys its caches by.

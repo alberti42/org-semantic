@@ -270,11 +270,20 @@ Nothing here searches the filesystem for a vault."
      ((stringp global)
       (org-semantic-canonical-vault (expand-file-name global))))))
 
+(defconst org-semantic-vault-file ".org-semantic-vault.json"
+  "The file in which a vault says where its notes are.
+
+The one fact both languages know.  The server is the authority;
+this is here so a test can hold the two names together, which is
+how the name last went out of step -- the client kept reading the
+old place, silently, and only for the vaults that keep their notes
+elsewhere.")
+
 (defun org-semantic-notes-root (vault)
-  "Where VAULT's notes are: VAULT itself, or what its `vault.json' says.
+  "Where VAULT's notes are: VAULT itself, or what its vault file says.
 
 A vault directory holds the index.  The notes are inside it unless
-`.org-semantic/vault.json' names another directory, which is for
+`.org-semantic-vault.json' names another directory, which is for
 notes in a synced folder, or for several vaults that keep their
 indexes together.
 
@@ -283,7 +292,7 @@ reads the one key instead, because the caller is `after-save-hook',
 where a round trip would start the server for any org file saved
 anywhere.  A file that is absent, unreadable or silent answers
 VAULT, which is also the server's default."
-  (let ((said (expand-file-name ".org-semantic/vault.json" vault)))
+  (let ((said (expand-file-name org-semantic-vault-file vault)))
     (or (and (file-readable-p said)
              (ignore-errors
                (let ((notes (plist-get (with-temp-buffer

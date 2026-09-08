@@ -2090,7 +2090,7 @@ notes root too, so a vault-relative spelling would name the wrong tree."
       (unwind-protect
           (progn
             (make-directory (expand-file-name ".org-semantic" state))
-            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+            (with-temp-file (expand-file-name org-semantic-vault-file state)
               (insert (json-serialize `(:notes ,notes))))
             (make-directory (expand-file-name "lab" notes))
             (let ((vault (org-semantic-canonical-vault state)))

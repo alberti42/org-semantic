@@ -681,8 +681,26 @@ after another by a server that runs one per vault."
                                 org-semantic-auto-reindex--timers)
                        (car org-semantic-tests--armed)))))))
 
+(ert-deftest the-vault-file-has-one-name-in-both-languages ()
+  "The client and the server must look in the same place.
+
+This is the one fact both languages know, and it went out of step:
+the file moved out of the cache directory and the client kept
+reading the old path.  Nothing failed -- the mode simply did
+nothing, and only for the vaults that keep their notes elsewhere,
+which is the case nobody tests by hand.  The Emacs tests encoded
+the same old path, so they passed too."
+  (let ((src (expand-file-name "src/main.rs" org-semantic-tests--root)))
+    (unless (file-readable-p src) (ert-skip "no source"))
+    (with-temp-buffer
+      (insert-file-contents src)
+      (goto-char (point-min))
+      (should (re-search-forward
+               "^const VAULT_FILE: &str = \"\\([^\"]+\\)\";" nil t))
+      (should (equal (match-string 1) org-semantic-vault-file)))))
+
 (ert-deftest a-vault-may-keep-its-notes-somewhere-else ()
-  "The notes are the vault, unless its `vault.json' says otherwise.
+  "The notes are the vault, unless its vault file says otherwise.
 
 A vault directory is where the *index* lives, so saving a note asks
 whether the file is in the **notes** -- and reindexes the vault, which
@@ -698,23 +716,23 @@ org file saved anywhere."
       (unwind-protect
           (progn
             (make-directory (expand-file-name ".org-semantic" state))
-            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+            (with-temp-file (expand-file-name org-semantic-vault-file state)
               (insert (json-serialize `(:version 1 :notes ,notes))))
             (should (equal (org-semantic-notes-root state)
                            (org-semantic-canonical-vault notes)))
             ;; Anything absent, unreadable or silent is the vault itself.
             (should (equal (org-semantic-notes-root notes)
                            notes))
-            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+            (with-temp-file (expand-file-name org-semantic-vault-file state)
               (insert "{ this is not json"))
             (should (equal (org-semantic-notes-root state) state))
-            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+            (with-temp-file (expand-file-name org-semantic-vault-file state)
               (insert "{\"version\": 1}"))
             (should (equal (org-semantic-notes-root state) state))
 
             ;; And a note in those notes arms a reindex of the vault holding
             ;; the index, which is the path the server knows it by.
-            (with-temp-file (expand-file-name ".org-semantic/vault.json" state)
+            (with-temp-file (expand-file-name org-semantic-vault-file state)
               (insert (json-serialize `(:notes ,notes))))
             (let ((org-semantic-vault-root state))
               (org-semantic-tests--saving
