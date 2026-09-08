@@ -7761,6 +7761,44 @@ mod tests {
         assert!(!ix.files.contains_key(&b), "beta must be gone from the manifest");
     }
 
+    /// Zero means nothing was excluded, and that is load-bearing.
+    ///
+    /// A manifest written before the field existed reads as zero. If an empty
+    /// list hashed to anything else, every index already on disk would report a
+    /// change nobody made, on the first search after an upgrade.
+    #[test]
+    fn nothing_excluded_hashes_to_the_zero_an_older_manifest_reads() {
+        let none = Excludes::default();
+        assert_eq!(none.hash(Target::Semantic), 0);
+        assert_eq!(none.hash(Target::Lexical), 0);
+
+        let m: Manifest = serde_json::from_str(&format!(
+            r#"{{"version":{INDEX_VERSION},"model":"bge-small-en","dim":384,"files":{{}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(m.exclude, 0, "an older manifest is silent, not different");
+    }
+
+    /// Two spellings of one rule hash alike, or reformatting the file would
+    /// report a change nobody made. A trailing slash is not reformatting: it
+    /// says the rule names a directory.
+    #[test]
+    fn one_rule_spelled_two_ways_hashes_the_same() {
+        let hash = |text: &str| Excludes::parse(text).unwrap().hash(Target::Semantic);
+        assert_eq!(hash("journal/2019/\n"), hash("/journal/2019/\n"));
+        assert_ne!(hash("journal/2019/\n"), hash("journal/2019\n"));
+    }
+
+    /// A rule under one label moves that index's hash and leaves the other's,
+    /// which is why the record cannot live in the file alone.
+    #[test]
+    fn a_group_moves_one_index_hash_and_leaves_the_other() {
+        let ex = Excludes::parse("archive/\n[semantic]\ncode/\n").unwrap();
+        let plain = Excludes::parse("archive/\n").unwrap();
+        assert_eq!(ex.hash(Target::Lexical), plain.hash(Target::Lexical));
+        assert_ne!(ex.hash(Target::Semantic), plain.hash(Target::Semantic));
+    }
+
     #[test]
     fn an_unchanged_vault_is_left_alone() {
         let v = scratch("unchanged");
