@@ -56,7 +56,7 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
-## [Unreleased]
+## [0.6.0] — 2026-09-08
 
 Binary version **0.5.0**, and this one has to be downloaded. An older binary
 reads none of the three files this release puts beside your notes: it indexes
@@ -116,6 +116,12 @@ inside `.org-semantic/`. The run names it and says where it belongs.
   the whole vault answers. The empty prompt is what says so.
 
 ### Fixed
+
+- **`--version` and the handshake are labelled correctly.** Both report the
+  *binary* version, which is what the Emacs package checks its floor against.
+  Two places called it the release, and this is the release where that reads as
+  a contradiction: 0.6.0 ships binary 0.5.0, so a reader comparing the two
+  numbers would think one of them was wrong.
 
 - **Reindexing on save now works for a vault whose notes are kept elsewhere.**
   The Emacs side looked for that vault's pointer file inside the cache directory
@@ -736,7 +742,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.6.0
 [0.5.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.5.0
 [0.4.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.1
 [0.4.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.4.0

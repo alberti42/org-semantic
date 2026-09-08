@@ -413,7 +413,7 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
-  --version                                 the release this binary is from
+  --version                                 the version of this binary
 
 Three files hold configuration, all optional, all read from beside your notes:
 
@@ -1044,7 +1044,7 @@ Methods:
 
 | method            | params                                                                                   | returns                                       |
 |-------------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
-| =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
+| =initialize=      | =capabilities=                                                                           | =serverInfo= --- the binary version of this process |
 | =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...], "indexing": false}= |
 | =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |

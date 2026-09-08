@@ -612,7 +612,7 @@ notes by meaning, and a lexical one, which finds them by word.
 
   bench  <vault> [n] [config]               embedding throughput on a slice
 
-  --version                                 the release this binary is from
+  --version                                 the version of this binary
 
 Three files hold configuration, all optional, all read from beside your notes:
 
