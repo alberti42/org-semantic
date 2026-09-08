@@ -4438,7 +4438,7 @@ fn cmd_index_lexical(
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
-    let analyzer = lexical::Analyzer::widen(previous.as_ref(), &chunks, fold);
+    let mut analyzer = lexical::Analyzer::widen(previous.as_ref(), &chunks, fold);
     let rebuilding = old.is_none() || previous.as_ref().map(|a| a.key()) != Some(analyzer.key());
 
     // A rebuild has to see every note, not only the changed ones — but the scan
@@ -4502,6 +4502,18 @@ fn cmd_index_lexical(
             .last(),
         );
         j.progress_done();
+        // **The analyzer is decided again, now that every note has been read.**
+        // Above it was widened over the *stale* chunks alone, which is right for
+        // an incremental run and wrong for this one: a rebuild whose scan found
+        // nothing stale widened over an empty list, so a vault whose stored key
+        // could not be read at all came back with `langs=en` and stemmed its
+        // German and Italian notes as English.  Nothing failed and nothing said
+        // so; `lang:de` still answered, because the label is a stored field.
+        //
+        // Reachable exactly when `from_key` returns `None`, which is a version
+        // bump -- so it bit on upgrade, on the vaults that most need stemming,
+        // and only until some note changed.
+        analyzer = lexical::Analyzer::widen(previous.as_ref(), &chunks, fold);
     } else {
         // Nothing was discarded, so the speculative pass is the real one.
         j.absorb(speculative);
@@ -7512,6 +7524,56 @@ mod tests {
     /// and hashed again by every run from then on — the work a stamp exists to
     /// avoid — while the report cheerfully counted it as "restamped" each time.
     /// And the semantic index asked `by_hash > 0` instead of whether the stamps
+    /// A rebuild reads every note, so the analyzer must be decided from all of
+    /// them and not from the ones the scan happened to find stale.
+    ///
+    /// The two come apart exactly when the stored key cannot be read, which is a
+    /// version bump: the scan then finds nothing stale, the analyzer is widened
+    /// over an empty chunk list, and a trilingual vault comes back `langs=en`
+    /// with its German and Italian notes stemmed as English. Nothing fails, and
+    /// `lang:de` still answers, because the label is a stored field. So it bit
+    /// on upgrade, on the vaults that most need stemming.
+    #[test]
+    fn a_rebuild_decides_the_analyzer_from_every_note() {
+        let v = scratch("analyzer-rebuild");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let lex = |full| {
+            cmd_index_lexical(
+                &v,
+                full,
+                false,
+                &lang,
+                false,
+                &cfg,
+                &mut Journal::quiet(),
+                &Cancel::default(),
+            )
+            .unwrap()
+        };
+        // Prose in three languages, long enough for the classifier to be sure.
+        fs::write(v.join("en.org"), "#+title: E\n* One\nThe turbo pump was baked out at 120 degrees for 48 hours before the chamber was vented.\n").unwrap();
+        fs::write(v.join("de.org"), "#+title: D\n* Eins\nDie Woerter der deutschen Sprache sind oft sehr lang und zusammengesetzt, was das Lesen erschwert.\n").unwrap();
+        fs::write(v.join("it.org"), "#+title: I\n* Uno\nLe parole della lingua italiana sono spesso melodiose e la pronuncia segue regole chiare.\n").unwrap();
+        lex(true);
+
+        let stored = || lexical::stored_key(&state_dir(&v)).unwrap();
+        let all = stored();
+        for l in ["de", "en", "it"] {
+            assert!(all.contains(l), "a full build sees every language: {all}");
+        }
+
+        // What an upgrade leaves: a key this binary cannot parse, and not one
+        // note changed since.
+        let path = lex_manifest_path(&state_dir(&v));
+        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        m["key"] = serde_json::json!("v0 langs=en fold=false");
+        fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+
+        lex(false);
+        assert_eq!(stored(), all, "the rebuild reached the same analyzer as a full build");
+    }
+
     /// differed, which under `--rehash` is every note: each rehash rewrote the
     /// whole index to store stamps identical to the ones already there.
     #[test]
