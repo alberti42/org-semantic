@@ -614,22 +614,25 @@ notes by meaning, and a lexical one, which finds them by word.
 
   --version                                 the release this binary is from
 
-Three files beside your notes are yours, and none of them is a flag.  Delete
-.org-semantic/ whenever you like: it is a cache, and indexing writes it again.
+Three files hold configuration, all optional, all read from beside your notes:
 
   .org-semantic-config.json   how the vault is indexed: which languages it is
                               written in, whether accents are folded, which
                               subtrees are skipped, how large a passage may
                               get, what happens to src and example blocks.
-                              Copy config.example.json and edit it.  Changing
-                              it needs --full.
+                              Without it the defaults apply.  Copy
+                              config.example.json and edit it.  Changing it
+                              needs --full.
   .org-semantic-ignore        whole files and folders to leave out, one rule
                               per line, read as a subset of .gitignore.
                               Changing it re-embeds nothing.
   .org-semantic-vault.json    where the notes are, if not beside the index.
 
-The first two are also read beside the index directory, and that copy wins, so
-you can index a shared folder your own way.
+The first two are also read from beside the index directory, and that copy
+takes precedence, so a shared folder can be indexed under your own settings.
+
+The .org-semantic/ directory holds only cache: the two indexes, generated from
+your notes.  Indexing writes it again.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.";

@@ -191,9 +191,10 @@ down, which is worth being sure about before you do it.
 drawer, not a timestamp: nothing anywhere in the binary opens a =.org= file for
 writing. What it creates is one hidden directory --- =.org-semantic/= beside the
 notes, or [[#index-elsewhere][somewhere else entirely]] if you say so --- holding
-the two indexes and nothing besides. [[#what-it-writes][What it writes]] lists
-every file in it. All of it is derived, so deleting the directory leaves the
-vault exactly as it was: =index --full= writes it again in one pass.
+the two indexes and nothing besides. It is generated from your notes, so losing
+it costs one =index --full= and nothing else. [[#what-it-writes][What it writes]]
+lists every file in it, and [[#cache-directory][the appendix]] says what each one
+is.
 
 *Nothing about your notes leaves the machine.* There is no service to sign up
 to, no account, no API key, no telemetry. The embedding model runs in this
@@ -414,22 +415,25 @@ notes by meaning, and a lexical one, which finds them by word.
 
   --version                                 the release this binary is from
 
-Three files beside your notes are yours, and none of them is a flag.  Delete
-.org-semantic/ whenever you like: it is a cache, and indexing writes it again.
+Three files hold configuration, all optional, all read from beside your notes:
 
   .org-semantic-config.json   how the vault is indexed: which languages it is
                               written in, whether accents are folded, which
                               subtrees are skipped, how large a passage may
                               get, what happens to src and example blocks.
-                              Copy config.example.json and edit it.  Changing
-                              it needs --full.
+                              Without it the defaults apply.  Copy
+                              config.example.json and edit it.  Changing it
+                              needs --full.
   .org-semantic-ignore        whole files and folders to leave out, one rule
                               per line, read as a subset of .gitignore.
                               Changing it re-embeds nothing.
   .org-semantic-vault.json    where the notes are, if not beside the index.
 
-The first two are also read beside the index directory, and that copy wins, so
-you can index a shared folder your own way.
+The first two are also read from beside the index directory, and that copy
+takes precedence, so a shared folder can be indexed under your own settings.
+
+The .org-semantic/ directory holds only cache: the two indexes, generated from
+your notes.  Indexing writes it again.
 
 Each model keeps its own semantic index, so several can be built side by side;
 `models <vault>` shows which are.
@@ -2277,8 +2281,8 @@ rebuilt or deleted without disturbing the other --- which is what makes
 The two chunk differently, because they are bounded by different things --- see
 =chunk= in the policy above.
 
-*Three more files are yours, and none of them is in that directory.* They sit
-beside it, named so they sort together, and nothing can rebuild any of them:
+Three files hold configuration. They are optional, they sit beside the index
+directory rather than in it, and nothing can generate them from your notes:
 
 | file                        | says                              | see                                          |
 |-----------------------------+-----------------------------------+----------------------------------------------|
@@ -2286,19 +2290,19 @@ beside it, named so they sort together, and nothing can rebuild any of them:
 | =.org-semantic-ignore=      | what to leave out                 | [[#exclusion-list][leaving files and folders out]]              |
 | =.org-semantic-vault.json=  | where the notes are, if not here  | [[#index-elsewhere][keeping the index out of a synced folder]]   |
 
-*Track them*, in the same place and for the same reason that git keeps
-=.gitignore= beside a work tree rather than inside =.git=.
+Keep them in version control with your notes, in the same place and for the same
+reason that git keeps =.gitignore= beside a work tree rather than inside =.git=.
 
-The first two are looked for beside the index directory first and only then
-beside the notes, and the first one found is used whole. That is what lets you
-index a shared folder your own way. The two are the same directory unless
-=.org-semantic-vault.json= says otherwise, so in the ordinary case there is one
-of each.
+The first two are read from beside the index directory first and only then from
+beside the notes, and the copy that is found is used whole. That is what lets a
+shared folder be indexed under your own settings. The two locations are the same
+directory unless =.org-semantic-vault.json= says otherwise, so in the ordinary
+case there is one of each.
 
-Add =/.org-semantic/= to the vault's =.gitignore=. Everything in it is derived,
-so rebuilding is always available and deleting it costs nothing but the time:
-=org-semantic index --full= writes it again in one pass.
-[[#what-you-may-delete][What you may delete]] says what each file in there costs.
+=.org-semantic/= itself holds only cache, generated from your notes, so add
+=/.org-semantic/= to the vault's =.gitignore=. Lose it and one
+=org-semantic index --full= writes it again.
+[[#cache-directory][What is in =.org-semantic/=]] describes each file in it.
 
 *** Keeping the index out of a synced folder
 :PROPERTIES:
@@ -2541,54 +2545,46 @@ org-semantic does not do at all. Those watches can keep *both* indexes current,
 including the changes a save hook cannot see; see
 [[#searching-from-emacs][Searching from Emacs]] for how to hear about them.
 
-* Appendix: what you may delete
+* Appendix
 :PROPERTIES:
-:CUSTOM_ID: what-you-may-delete
+:CUSTOM_ID: appendix
 :END:
-=.org-semantic/= is a cache. Everything in it can be written again by indexing,
-so you may delete any of it, or all of it, and lose nothing but the time it
-takes to rebuild. [[#what-it-writes][What it writes]] says what each file /is/;
-this says what deleting it /costs/.
 
-| delete                             | and it costs                                                                              |
-|------------------------------------+-------------------------------------------------------------------------------------------|
-| =semantic/<model>/=                | one =index --model <model>=: every passage embedded again, so minutes                     |
-| =semantic/<model>/manifest.json=   | the same. That file is what says an index is there, so removing it removes the index       |
-| =semantic/<model>/vectors.f32=     | the same, and until you rebuild a search says the index is corrupt rather than answering   |
-| =tantivy/= with =lexical.json=     | one =index --lexical=: 1.3 s on the reference vault                                       |
-| =index.lock=                       | nothing, and it is the way out of a wedged vault --- see [[#during-a-reindex][during a reindex]] |
-| all of it                          | one =index --full=                                                                        |
-
-Each model keeps its own directory, so deleting one leaves the others answering.
-The word index and the meaning index are independent in the same way: rebuilding
-the word index is a second's work whichever state the meaning index is in.
-
-=lexical.json= alone is safe rather than half-safe. With no record of what the
-word index has seen, the next run rebuilds that index from scratch instead of
-adding to it, so a note you deleted in the meantime does not stay searchable.
-
-** The three files you must not delete
+** What is in =.org-semantic/=
 :PROPERTIES:
-:CUSTOM_ID: files-that-are-yours
+:CUSTOM_ID: cache-directory
 :END:
-They are not in that directory, and that is the point: nothing can work any of
-them out from your notes.
+The directory holds the two indexes and each one's record of which notes it has
+seen. All of it is generated from your notes. If it is deleted or lost, one
+reindex writes it again, and nothing else is lost.
 
-| file                        | delete it and                                                          |
-|-----------------------------+------------------------------------------------------------------------|
-| =.org-semantic-config.json= | the vault is indexed under the defaults, and the next run is refused until you rebuild |
-| =.org-semantic-ignore=      | nothing is left out, so the notes you had excluded come back            |
-| =.org-semantic-vault.json=  | the notes are not found at all, and the vault looks empty               |
+| path                             | what it is                                                    |
+|----------------------------------+---------------------------------------------------------------|
+| =semantic/<model>/chunks.json=   | one entry per passage: where it came from, its tags, its =:ID:= |
+| =semantic/<model>/vectors.f32=   | one embedding per passage, in the same order                  |
+| =semantic/<model>/manifest.json= | what that model's index has seen, and under which settings     |
+| =tantivy/=                       | the word index                                                |
+| =lexical.json=                   | what the word index has seen, and under which settings         |
+| =index.lock=                     | present only while something is indexing this vault           |
 
-Keep them in version control with your notes. The last one matters only if the
-notes are not beside the index; write it again and everything is as it was, with
-no index lost.
+There is one directory per embedding model, each complete in itself, so several
+models can be built side by side and any one of them removed on its own. The
+word index and the meaning index are independent too: rebuilding the word index
+takes about a second whatever state the meaning index is in, where re-embedding a
+whole vault takes minutes.
 
-Each of the three used to live somewhere worse. The policy was a flag whose value
-was copied into the cache directory; the pointer to the notes was inside it too.
-Both were files nothing could rebuild, kept in a directory documented as
-disposable. If one of the old copies is still there, the run says so and names
-where the file belongs now, rather than reading it or ignoring it.
+Rebuilding a part of it costs what building it cost in the first place:
+=index --lexical= for the word index, =index --model NAME= for one model's
+meaning index, and =index --full= for all of it.
+
+Each =manifest.json= is what marks its index as present, so removing that one
+file is equivalent to removing the whole model directory. Removing
+=lexical.json= leaves no record of what the word index has seen, so the next run
+rebuilds that index rather than adding to it.
+
+Your settings are not in this directory. They are in the three configuration
+files beside it, which are described under
+[[#what-it-writes][What it writes]].
 
 * Licence
 :PROPERTIES:
