@@ -48,7 +48,7 @@ It moves whenever anything here ships, including a change to one
 file.  It is not what the binary reports; the two are compared
 through `org-semantic-minimum-binary-version'.")
 
-(defconst org-semantic-minimum-binary-version "0.4.0"
+(defconst org-semantic-minimum-binary-version "0.5.0"
   "The oldest binary this package knows how to talk to.
 
 Raise it when the elisp needs something the server did not have: a

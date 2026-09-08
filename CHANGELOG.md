@@ -58,10 +58,44 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Binary version 0.4.0, unchanged — there is nothing to download, and an existing
-binary keeps working. This is the Emacs package alone.
+Binary version **0.5.0**, and this one has to be downloaded. An older binary
+does not read `.org-semantic-ignore` at all: it indexes every note, reports
+success, and nothing says the file was ignored. That is why the minimum binary
+version moves with this release.
 
 ### Added
+
+- **Files and folders can be kept out of the index.** Name them in
+  `.org-semantic-ignore`, at the root of your notes, one rule per line. The file
+  is read as a subset of `.gitignore`, with two differences: the labels
+  `[both]`, `[semantic]` and `[lexical]` choose which index a rule narrows, and
+  there is no `!` to put a path back.
+
+  It is deliberately not part of the indexing policy, and that is what makes it
+  cheap. Adding a rule re-embeds **nothing** — those notes leave the walk, and
+  both indexes drop them exactly as they drop a note you deleted. Removing a
+  rule costs about half a second for each note that comes back. So the remedy
+  for a change is always a plain `org-semantic index`, never `--full`.
+
+  The file sits beside your notes rather than inside `.org-semantic/`. That
+  directory is derived data you can delete at any time; this file is yours, so
+  track it, exactly as git tracks `.gitignore` itself.
+
+  A rule that uses a character class, an escape, a `!`, or a label that is none
+  of the three is an error naming its line. Nothing is ignored in silence: a
+  rule that quietly matches nothing looks exactly like a rule that worked.
+
+- **A search says when its index was built under other exclusion rules**, and
+  still answers — every hit it returns is a real hit, and only the set of notes
+  the index covers has moved. On the terminal it names the command that settles
+  it. Over JSON-RPC it is a remark of kind `exclude-drift` on the search reply,
+  which is new: remarks used to ride the `index` reply alone. In the Emacs
+  results buffer it is a note on the counts line, beside the one about a run in
+  flight, carrying the key that fixes it.
+
+- `models <vault>` says how many rules the file holds and where it is, and
+  `status` carries `excludeRules` and `excludeStale` for a client that would
+  rather ask than search.
 
 - `M-x org-semantic-find-in-directory` searches the vault scoped to the
   directory you are in, and everything under it. The whole of the scoping is a
