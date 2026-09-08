@@ -3584,6 +3584,9 @@ fn content_hash(bytes: &[u8]) -> u64 {
 struct LoadedIndex {
     chunks: Vec<Chunk>,
     vectors: Vec<f32>,
+    /// The exclusion rules it was built under, so a run can tell whether they
+    /// have moved even when no note has.
+    exclude: u64,
     files: std::collections::BTreeMap<String, u64>,
     stamps: std::collections::BTreeMap<String, Stamp>,
     by_path: std::collections::HashMap<String, Vec<usize>>,
@@ -3747,7 +3750,14 @@ fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
     for (i, c) in chunks.iter().enumerate() {
         by_path.entry(c.path.clone()).or_default().push(i);
     }
-    Some(LoadedIndex { chunks, vectors, files: manifest.files, stamps: manifest.stamps, by_path })
+    Some(LoadedIndex {
+        chunks,
+        vectors,
+        exclude: manifest.exclude,
+        files: manifest.files,
+        stamps: manifest.stamps,
+        by_path,
+    })
 }
 
 /// Write an index, replacing the previous one at a single commit point.
@@ -4567,9 +4577,17 @@ fn cmd_index_lexical(
     // Written directly rather than by falling through to `lexical::sync`, which
     // would allocate a 50 MB writer and take an empty commit to index nothing.
     let restamped = old.as_ref().is_some_and(|m| m.stamps != scan.stamps);
+    // And a change to the exclusion rules is news even when no note moved.
+    // A rule that matches nothing changes no file, so every term above stays
+    // empty and the run would return without recording the new rules -- after
+    // which every search reports a stale list that no reindex can settle.
+    // Found by driving it, not by a test: the run said it had nothing to do
+    // and was right about the notes.
+    let rerecorded = old.as_ref().is_some_and(|m| m.exclude != exclude);
     if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
-        if restamped {
-            writeln!(j.out, "no chunks to write; refreshing the stamps")?;
+        if restamped || rerecorded {
+            let why = if restamped { "the stamps" } else { "the exclusion list" };
+            writeln!(j.out, "no chunks to write; refreshing {why}")?;
             save_lex_manifest(
                 &dir,
                 &LexManifest {
@@ -4985,7 +5003,20 @@ fn cmd_index(
     // the maps is exact, and a `BTreeMap` comparison of a few thousand keys
     // costs nothing beside what it saves.
     let restamped = old.as_ref().is_some_and(|ix| ix.stamps != stamps);
-    if pending.is_empty() && stale.is_empty() && dropped == 0 && !restamped && old.is_some() {
+    // And a change to the exclusion rules is news even when no note moved.
+    // A rule that matches nothing changes no file, so every term above stays
+    // empty and the run would return without recording the new rules -- after
+    // which every search reports a stale list that no reindex can settle.
+    // Found by driving it, not by a test: the run said it had nothing to do
+    // and was right about the notes.
+    let rerecorded = old.as_ref().is_some_and(|ix| ix.exclude != exclude);
+    if pending.is_empty()
+        && stale.is_empty()
+        && dropped == 0
+        && !restamped
+        && !rerecorded
+        && old.is_some()
+    {
         writeln!(j.out, "nothing changed; index left as it is")?;
         report.unchanged = true;
         // Nothing was written, so there is nothing to adopt: a server keeps the
@@ -7821,6 +7852,62 @@ mod tests {
         let plain = Excludes::parse("archive/\n").unwrap();
         assert_eq!(ex.hash(Target::Lexical), plain.hash(Target::Lexical));
         assert_ne!(ex.hash(Target::Semantic), plain.hash(Target::Semantic));
+    }
+
+    /// A rule that matches nothing is still recorded.
+    ///
+    /// It moves no note, so every "did anything change" term stays empty and
+    /// the run returned without writing. Every search then reported a stale
+    /// list that no reindex could settle. Both indexes had it, and both are
+    /// covered here, because the two early returns are separate code.
+    ///
+    /// Found by driving the tool rather than by a test: the run said it had
+    /// nothing to do, and it was right about the notes.
+    #[test]
+    fn a_rule_that_matches_nothing_is_still_recorded() {
+        let v = scratch("exclude-norule");
+        let a = note(&v, "alpha");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let lex = |full| {
+            cmd_index_lexical(
+                &v,
+                full,
+                false,
+                &lang,
+                false,
+                &cfg,
+                &mut Journal::quiet(),
+                &Cancel::default(),
+            )
+            .unwrap()
+        };
+        lex(true);
+        seed(&v, &[a.as_str()]);
+
+        fs::write(v.join(IGNORE_FILE), "no-such-note.org\n").unwrap();
+        let want = |t| Excludes::read(&v).unwrap().hash(t);
+        assert_ne!(want(Target::Semantic), 0, "the rule is there to be recorded");
+
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &cfg,
+            &mut Journal::quiet(),
+            None,
+            &Cancel::default(),
+        )
+        .unwrap();
+        lex(false);
+
+        let semantic: Manifest =
+            serde_json::from_slice(&fs::read(sem(&v).join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(semantic.exclude, want(Target::Semantic), "the semantic run recorded it");
+        let lexical: LexManifest =
+            serde_json::from_slice(&fs::read(lex_manifest_path(&state_dir(&v))).unwrap()).unwrap();
+        assert_eq!(lexical.exclude, want(Target::Lexical), "and so did the lexical one");
     }
 
     #[test]
