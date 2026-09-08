@@ -1521,7 +1521,7 @@ gone, so ask this before searching."
   (let* ((vault (or vault (org-semantic-vault-or-error)))
          (status (org-semantic-status vault))
          (models (append (plist-get status :semantic) nil)))
-    (message "%s%s: semantic [%s], lexical %s, %s%s"
+    (message "%s%s: semantic [%s], lexical %s, %s%s%s"
              (abbreviate-file-name vault)
              ;; Only when they differ.  The vault directory then does not
              ;; say which notes are indexed.
@@ -1541,7 +1541,17 @@ gone, so ask this before searching."
              (if (org-semantic-true-p (plist-get status :loaded))
                  "resident" "not loaded")
              (if (org-semantic-true-p (plist-get status :indexing))
-                 ", indexing" ""))))
+                 ", indexing" "")
+             ;; Only when the vault has rules at all.  A vault that excludes
+             ;; nothing is the ordinary case, and saying so every time would
+             ;; make the line longer for no reader.
+             (let ((rules (or (plist-get status :excludeRules) 0)))
+               (cond ((zerop rules) "")
+                     ((org-semantic-true-p (plist-get status :excludeStale))
+                      (format ", %d exclusion rule%s (an index is behind them)"
+                              rules (if (= rules 1) "" "s")))
+                     (t (format ", %d exclusion rule%s" rules
+                                (if (= rules 1) "" "s"))))))))
 
 (defun org-semantic-memory ()
   "Return what the process is holding, in bytes.
