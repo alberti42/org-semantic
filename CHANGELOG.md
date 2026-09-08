@@ -59,9 +59,16 @@ built. It then publishes a **draft** release for review.
 ## [Unreleased]
 
 Binary version **0.5.0**, and this one has to be downloaded. An older binary
-does not read `.org-semantic-ignore` at all: it indexes every note, reports
-success, and nothing says the file was ignored. That is why the minimum binary
-version moves with this release.
+reads none of the three files this release puts beside your notes: it indexes
+every note whatever `.org-semantic-ignore` says, indexes under the defaults
+whatever `.org-semantic-config.json` says, and cannot find notes that
+`.org-semantic-vault.json` places elsewhere. The first two report success while
+doing the wrong thing, which is why the minimum binary version moves with this
+release.
+
+**There is one thing to do by hand.** If you passed `--config` to build a vault,
+or if that vault keeps its notes elsewhere, move the file the old version left
+inside `.org-semantic/`. The run names it and says where it belongs.
 
 ### Added
 
@@ -148,6 +155,53 @@ version moves with this release.
   `consult-ripgrep` established — the capital is the same search, narrowed to
   here. If you copied the earlier bindings, update them; nothing breaks if you
   do not, since both commands are still there under whatever keys you gave them.
+
+- **The files that are yours moved out of `.org-semantic/`, which is now a cache
+  and nothing else.** Everything left in it can be written again by indexing, so
+  deleting it costs nothing but the time to rebuild. Three files sit beside it
+  instead:
+
+  | file | says |
+  |---|---|
+  | `.org-semantic-config.json` | how the vault is indexed |
+  | `.org-semantic-ignore` | what to leave out |
+  | `.org-semantic-vault.json` | where the notes are, if not here |
+
+  The first two are also looked for beside the index directory, and that copy
+  wins outright — nothing is merged. So you can index a shared folder your own
+  way, keeping your settings and your exclusions out of somebody else's tree.
+
+  **If you have an old copy in the old place, the run says so and names where the
+  file belongs.** It is not read and not ignored. That is the whole migration:
+  move the file.
+
+- **The indexing policy is a file, and no longer a flag that is remembered.**
+  `--config` is gone from `index`; write `.org-semantic-config.json` instead.
+  It stays on `chunks`, where it is a dry run that writes nothing.
+
+  It used to be a flag whose value was copied into the index directory so that
+  later runs need not repeat it. That put a file nothing can rebuild inside a
+  cache, and it needed a rule for a copy that would not parse, a rule for a copy
+  that had gone, and a comparison against the copy to say which setting had
+  moved. A file that is simply there needs none of them.
+
+  Two consequences. A mistake in the policy file now stops the command instead of
+  falling back to the defaults — it is your file, like the exclusion list beside
+  it. And a refused index no longer names the setting that moved: each index
+  records a hash of the policy it was built under, not a copy of it. You wrote
+  the file, so you know what you changed; the same reasoning already applied to
+  the exclusion list.
+
+- **Nothing sends a policy over the connection any more**, and the Emacs setting
+  that held one is gone. A client's own idea of the policy and the vault's file
+  could disagree about which one applied, and a setting left out of the client's
+  copy quietly took its default rather than keeping what the index was built
+  with. The server reads the file, so there is nothing to send.
+
+  A search therefore no longer checks the policy at all, which is what the
+  command line always did. An edited policy is reported by the next index, which
+  refuses until you pass `--full`. In the results buffer a drifted policy leaves
+  one offer, which is to rebuild: there is nothing to waive and nothing to list.
 
 ## [0.5.0] — 2026-08-17
 
