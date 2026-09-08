@@ -893,6 +893,24 @@ impl Server {
             })
             .collect();
         let lexical = lexical::stored_key(&state_dir(&vault)).is_some();
+        let notes = notes_root(&vault)?;
+        // Whether anything built for this vault was built under other exclusion
+        // rules.  One boolean and not one per index, because `status` answers
+        // about the vault: a client wanting to know which index is behind gets
+        // that from a search, whose remark names the one that answered.
+        //
+        // A file that will not parse answers `false`.  It stops the `index` this
+        // would send the reader to, and that is where it is said.
+        let excluding = Excludes::read(&notes).ok();
+        let stale = excluding.as_ref().is_some_and(|ex| {
+            let semantic = built_models(&vault).iter().any(|m| {
+                stored_hash::<StoredExcludes>(&semantic_dir(&vault, m).join("manifest.json"))
+                    .is_some_and(|s| s.exclude != ex.hash(Target::Semantic))
+            });
+            let lexical = stored_hash::<StoredExcludes>(&lex_manifest_path(&state_dir(&vault)))
+                .is_some_and(|s| s.exclude != ex.hash(Target::Lexical));
+            semantic || lexical
+        });
         Ok(serde_json::json!({
             "vault": vault,
             // Where the notes are, which is the vault itself unless its
@@ -900,9 +918,13 @@ impl Server {
             // out: a hit's path is relative to *this* root, and an editor
             // deciding whether a saved file belongs to this vault is asking
             // about this directory rather than about the one holding the index.
-            "notes": notes_root(&vault)?,
+            "notes": notes,
             "semantic": models,
             "lexical": lexical,
+            // How many rules the vault's `.org-semantic-ignore` holds, and
+            // whether any index is behind them.  Both are about this vault.
+            "excludeRules": excluding.as_ref().map(Excludes::len).unwrap_or(0),
+            "excludeStale": stale,
             // About *this* vault, like every other field here: whether its index
             // is resident, so a client knows the next search is warm (~10 ms)
             // rather than a model load (~150–300 ms).  It was the size of the
