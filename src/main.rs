@@ -944,6 +944,15 @@ impl Excludes {
         self.both.iter().chain(own.iter())
     }
 
+    /// How many rules the file holds, over all three groups.
+    fn len(&self) -> usize {
+        self.both.len() + self.semantic.len() + self.lexical.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// What one index records about the rules it was built under.
     ///
     /// Zero when nothing is excluded, and that is load-bearing: a manifest
@@ -6338,10 +6347,25 @@ fn main() -> Result<()> {
                 let vault = Path::new(v);
                 println!("\nIndex in {}", state_dir(vault).display());
                 match notes_root(vault) {
-                    Ok(notes) if notes != vault => {
-                        println!("Notes in {} (said by {VAULT_FILE})", notes.display());
+                    Ok(notes) => {
+                        if notes != vault {
+                            println!("Notes in {} (said by {VAULT_FILE})", notes.display());
+                        }
+                        // The rules are the user's own file, so say where it is
+                        // and how much it holds.  Nothing at all when there is
+                        // no such file: a vault that excludes nothing is the
+                        // ordinary case, and its owner knows.
+                        match Excludes::read(&notes) {
+                            Ok(ex) if !ex.is_empty() => println!(
+                                "Exclusion list: {} rule{} from {}",
+                                ex.len(),
+                                if ex.len() == 1 { "" } else { "s" },
+                                notes.join(IGNORE_FILE).display()
+                            ),
+                            Ok(_) => {}
+                            Err(e) => println!("Exclusion list: {e:#}"),
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => println!("Notes: {e}"),
                 }
             }
