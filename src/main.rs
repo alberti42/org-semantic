@@ -6142,7 +6142,7 @@ fn main() -> Result<()> {
             reject_unknown_flags(
                 &args,
                 3,
-                &["--full", "--rehash", "--lexical", "--both", "--model", "--config"],
+                &["--full", "--rehash", "--lexical", "--both", "--model"],
             )?;
             // Same convention as `search`: bare is semantic, `--lexical` is the
             // word index, and the two are separate artifacts built separately.
@@ -6153,9 +6153,12 @@ fn main() -> Result<()> {
                 Some(i) => model_named(args.get(i + 4).map(String::as_str).unwrap_or(""))?,
                 None => model_named(DEFAULT_MODEL)?,
             };
-            let given = flag_value(&args, 3, "--config").map(PathBuf::from);
             let mut j = Journal::cli();
-            let cfg = resolve_config(vault, &notes_root(vault)?, given.as_deref())?;
+            // No `--config` here.  The policy is the vault's own file, so a
+            // flag naming another one would build an index that disagrees with
+            // that file and be refused on the next run.  `chunks` keeps the
+            // flag, where it is a dry run that writes nothing.
+            let cfg = resolve_config(vault, &notes_root(vault)?, None)?;
             let lang = LangConfig { languages: cfg.languages.clone() };
             if !full {
                 if both || !lexical {
