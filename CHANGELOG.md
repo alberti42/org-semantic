@@ -152,25 +152,21 @@ inside `.org-semantic/`. The run names it and says where it belongs.
   path, so they passed with it. A test now holds the file's name against the one
   in the Rust source.
 
-- **A policy that reads the same is no longer refused.** The check in front of
-  an index compared two things: a key stored in the index, and the settings
-  themselves. When the key disagreed while every setting read the same, the run
-  refused with "no setting reads differently, so this index predates one that
-  now exists" — a sentence that says nothing changed and then asks for a full
-  rebuild. It happens when a new version of the tool starts taking a setting
-  into account that the version which built your index ignored, so your settings
-  did not move and there is nothing to rebuild. The run now notes the new state
-  and carries on. A release that genuinely needs a rebuild reports an
-  out-of-date index instead, which has always been the error for that.
+- **An index too old for this binary to read is no longer reported as a policy
+  change.** The policy recorded in an index was compared before the layout
+  version beside it, so an index this binary cannot read at all was refused for
+  its policy — blaming an edit you never made. The layout is checked first now,
+  and the run says the index predates this version of the tool, which is true and
+  has its own remedy.
 
-- **And when the policy cannot be compared at all, it says so.** Delete
-  `.org-semantic/config.json` and there is no record of what the index was built
-  under. The old message claimed no setting had moved, which was never checked.
-  It now says a copy is no longer kept and that no setting can be named, and it
-  still refuses, because the settings really may have moved. Over JSON-RPC the
-  list of changed settings is empty in this one case; in the Emacs results
-  buffer the offer to list them is no longer made, where it used to answer with
-  a blank line.
+  This is also what lets a later release start keying on a setting it ignored
+  before: raise the layout number with it, and nobody is told their policy moved.
+
+- **A configuration file left in the old place is refused by name.** The three
+  files moved out of `.org-semantic/` in this release. One left behind in there
+  is neither read nor ignored: the run names it and says where it belongs now.
+  Ignoring one would be the quiet failure — a vault indexed under the defaults,
+  reporting success, with every setting silently not applying.
 
 ### Changed
 
@@ -183,6 +179,13 @@ inside `.org-semantic/`. The run names it and says where it belongs.
   six models, the libraries, and the fact that the binary works without Emacs.
   Both files share the opening and the list. Nothing about the tool itself
   changed.
+
+- The manual links to [ltex-ls-plus](https://github.com/ltex-plus/ltex-ls-plus)
+  and to its Emacs client
+  [emacs-ltex-plus](https://github.com/ltex-plus/emacs-ltex-plus), where it
+  explains the `# ltex: language=…` marker. The marker is an ordinary org
+  comment and needs none of that installed; the link is for readers who would
+  rather write the line once and have it grammar-check as well.
 
 - The bindings suggested in the README and the manual moved one command:
   `C-c n S` is now `org-semantic-find-in-directory`, and

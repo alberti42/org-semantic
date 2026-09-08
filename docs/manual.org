@@ -2159,7 +2159,8 @@ is the only place a vault mentions it at all.
 :PROPERTIES:
 :CUSTOM_ID: languages
 :END:
-A note declares its language the way ltex-ls-plus already asks for it:
+A note declares its language the way
+[[https://github.com/ltex-plus/ltex-ls-plus][ltex-ls-plus]] already asks for it:
 
 #+begin_src org
 # ltex: language=de-DE
@@ -2172,7 +2173,10 @@ that section in two.
 
 The keyword is always =ltex=. You do not need ltex installed to use it ---
 =# ltex: language=de-DE= is an ordinary org comment --- and if you do use it, the
-line you already wrote for grammar checking is the one this reads.
+line you already wrote for grammar checking is the one this reads. From Emacs
+that is [[https://github.com/ltex-plus/emacs-ltex-plus][emacs-ltex-plus]], which
+drives ltex-ls-plus over =lsp-mode= and reads the same marker; its
+~lsp-ltex-plus-language~ is where the default =en-US= in the policy comes from.
 
 *A language does two jobs, and only one of them is about stemming.* It selects
 the stemmer that makes =Sprachen= find =Sprache=, which is the lexical index's
