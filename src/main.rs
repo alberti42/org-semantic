@@ -1743,7 +1743,9 @@ fn check_config(previous: Option<u64>, cfg: &Config, target: Target, remedy: &st
 /// The length of the list decides the whole policy:
 ///
 /// - **one** — every note that does not declare its own is that language, and
-///   the classifier never runs (nor is its model downloaded)
+///   no prediction is made.  The classifier is still loaded, and fetched if it
+///   is absent: `prepare_lang` does that unconditionally, because the model is
+///   also what says whether a language code exists.
 /// - **several** — the classifier runs, restricted to answering with one of them
 /// - **none** — `--lang auto`: the classifier runs unrestricted, all 176
 #[derive(Clone, Debug)]
