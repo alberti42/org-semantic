@@ -290,11 +290,6 @@ by a shell sends us nothing when it lands.")
 (defvar-local org-semantic-results--model nil
   "Which model to search, or nil for `org-semantic-model'.")
 
-(defvar-local org-semantic-results--policy t
-  "Whether to send `org-semantic-config' with a search.
-Set to nil when the user chooses to search an index built under a
-policy that has since drifted, which is a decision they make once.")
-
 (defvar-local org-semantic-results--driver nil
   "This buffer's one-search-in-flight driver.")
 
@@ -782,10 +777,7 @@ the header would say \"semantic\" over results found by word."
         :mode org-semantic-results--asked-mode
         :model (or org-semantic-results--model org-semantic-model)
         ;; `any' is the server's spelling; this is the one place the two meet.
-        :any (eq (org-semantic-results--joined) 'or)
-        ;; Absent when waived, and the driver takes that literally, which
-        ;; is how an index under a drifted policy is searched.
-        :config (and org-semantic-results--policy org-semantic-config)))
+        :any (eq (org-semantic-results--joined) 'or)))
 
 
 ;;;; Grouping, and the lines a drawing owns
@@ -1340,15 +1332,18 @@ several lines is therefore this, and not a blank line."
 
 ;;;; Errors
 
-(defconst org-semantic-results--latching '("config-drift" "model-missing")
+(defconst org-semantic-results--latching '("model-missing")
   "The failures asked about once per search rather than once per reply.
 
-Said in full the first time, and kept to a line after that.  Both
-describe a state of the vault and not of the request: a policy that
-has drifted stays drifted, and a model that is not downloaded stays
-so, so a second reply to the same search cannot answer differently.
-A mistyped model, or a vault that has gone, is about the request
-and is not latched.
+Said in full the first time, and kept to a line after that.  This
+one describes a state of the vault and not of the request: a model
+that is not downloaded stays so, so a second reply to the same
+search cannot answer differently.  A mistyped model, or a vault
+that has gone, is about the request and is not latched.
+
+`config-drift' was here too, when a client sent its policy with
+every query and could meet the refusal on each keystroke.  Nothing
+sends a policy now, so a search never raises it.
 
 Per search.  `org-semantic-results--search' clears the latch,
 because a new search is a new question.")
@@ -1459,8 +1454,6 @@ the rest do not."
     ('index-full "rebuilds from scratch, re-embedding everything")
     ('lexical "needs no embedding model")
     ('choose-model "search one of the models that is built")
-    ('waive "search the index as it stands, under the policy it was built with")
-    ('show-changed "list the settings that moved")
     (_ "")))
 
 (defun org-semantic-results--offer-action (action error-object)
@@ -1478,14 +1471,6 @@ as well as something `org-semantic-results--ask' calls."
           ;; about how the user prefers to search, which is
           ;; `org-semantic-results-ranking'.
           ('lexical (org-semantic-results--search "lexical"))
-          ('waive
-           (setq org-semantic-results--policy nil)
-           (org-semantic-results--search))
-          ('show-changed
-           (message "org-semantic: %s"
-                    (mapconcat #'identity
-                               (append (plist-get os-data :changed) nil)
-                               ", ")))
           ('choose-model
            (let ((known (append (or (plist-get os-data :known)
                                     (plist-get os-data :built))

@@ -144,9 +144,8 @@ failed, \"semantic\" or \"lexical\", which decides one offer.
 Returns (KIND MESSAGE . OFFERS).  KIND is the server's label or
 nil, MESSAGE is the sentence to show, and OFFERS is a list of
 \(LABEL . ACTION) where ACTION is one of the symbols `index',
-`index-full', `lexical', `choose-model', `waive' and
-`show-changed'.  Symbols, not functions: the caller arranges what
-each action costs.
+`index-full', `lexical' and `choose-model'.  Symbols, not
+functions: the caller arranges what each action costs.
 
 An error with no KIND gets no offers.  The server labels what a
 client must act on, so no label means there is nothing to decide
@@ -183,15 +182,11 @@ from the prose."
                 '(("Download it" . download)))
               (unless (equal mode "lexical")
                 '(("Lexical search (by word)" . lexical)))))
-            ("config-drift"
-             (append '(("Rebuild fully" . index-full)
-                       ("Search anyway" . waive))
-                     ;; Only when there is a list to show.  The server sends an
-                     ;; empty one when the policy the index was built under is
-                     ;; not on disk to compare against, and the offer then
-                     ;; answered with a blank line in the echo area.
-                     (when (append (plist-get data :changed) nil)
-                       '(("Show what changed" . show-changed)))))
+            ;; One offer, because the policy is a file the reader wrote.
+            ;; There is nothing to waive -- a search does not check the
+            ;; policy -- and nothing to list, since the index records a hash
+            ;; of the policy and not a copy of it.
+            ("config-drift" '(("Rebuild fully" . index-full)))
             ((or "unknown-model" "ambiguous-model")
              '(("Choose a model" . choose-model)))
             (_ build))))
@@ -210,15 +205,12 @@ from the prose."
   (cddr remedy))
 
 (defconst org-semantic-ui--offer-keys
-  '(("Show what changed" . ?c)
-    ("Rebuild fully" . ?b)
+  '(("Rebuild fully" . ?b)
     ("Rebuild from scratch" . ?b))
   "Offers whose key is not the first letter of their label.
 
-Two cases.  A collision: `config-drift' offers \"Search anyway\"
-beside \"Show what changed\".  And two labels for one action: a full
-rebuild is \"Rebuild fully\" or \"Rebuild from scratch\", and answers
-to `b' in both.
+Two labels for one action: a full rebuild is \"Rebuild fully\" or
+\"Rebuild from scratch\", and answers to `b' in both.
 
 Every other offer takes its own initial, so rewording a label moves
 its key.  Keep the two in step.
@@ -292,7 +284,7 @@ the search open with nothing to report."
   :group 'org-semantic)
 
 (defconst org-semantic-ui--search-keys
-  '(:vault :k :per-file :merge-by-section :mode :model :any :config)
+  '(:vault :k :per-file :merge-by-section :mode :model :any)
   "The keyword arguments of `org-semantic-search-async', bar the query.
 A driver's parameters are filtered to these before being passed
 on, so that a caller may carry its own keys in the same plist
@@ -415,18 +407,13 @@ for."
                 (when next
                   (setf (org-semantic-ui-driver-pending os-driver) nil)
                   (org-semantic-ui--fire os-driver next)))))))
-    ;; PARAMS is the whole truth about this search, including the absence
-    ;; of a policy.  `org-semantic-search-async' otherwise falls back to
-    ;; the setting, and a waived `config-drift' could not be waived: the
-    ;; caller drops `:config', and the setting puts it back.
-    (let ((org-semantic-config (plist-get params :config)))
-      (setf (org-semantic-ui-driver-request driver)
-            (apply #'org-semantic-search-async
-                   (plist-get params :query)
-                   (append
-                    (org-semantic-ui--keys params)
-                    (list :success (lambda (reply) (funcall os-settle reply nil))
-                          :failure (lambda (err) (funcall os-settle nil err)))))))))
+    (setf (org-semantic-ui-driver-request driver)
+          (apply #'org-semantic-search-async
+                 (plist-get params :query)
+                 (append
+                  (org-semantic-ui--keys params)
+                  (list :success (lambda (reply) (funcall os-settle reply nil))
+                        :failure (lambda (err) (funcall os-settle nil err))))))))
 
 (defun org-semantic-ui--keys (params)
   "The part of PARAMS `org-semantic-search-async' will accept."

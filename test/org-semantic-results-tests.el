@@ -1450,10 +1450,10 @@ run is already fetching, which is the one error that has to."
 (ert-deftest a-condition-that-holds-is-said-once-however-often-it-is-met ()
   "The point of the latch, and the reason live search needs one.
 
-Both of these describe the vault rather than the request, so
-asking again cannot answer differently.  Ten keystrokes would
-otherwise redraw the same prompt ten times."
-  (dolist (kind '("config-drift" "model-missing"))
+This one describes the vault rather than the request, so asking
+again cannot answer differently.  Ten keystrokes would otherwise
+redraw the same prompt ten times."
+  (dolist (kind '("model-missing"))
     (let ((error-object (list :message (format "%s happened" kind)
                               :data (list :kind kind :remedy "index"))))
       (with-temp-buffer
@@ -1483,27 +1483,6 @@ otherwise redraw the same prompt ten times."
       (should-not org-semantic-results--latched)
       ;; Asked all three times, since the next request really may differ.
       (should (= 3 (length org-semantic-results-tests--asked))))))
-
-(ert-deftest the-drift-prompt-is-raised-once ()
-  "A drifted policy holds until the user acts, so it is said once.
-
-Said in full on every reply, a search-as-you-type buffer would ask
-the same question on every keystroke."
-  (let ((error-object '(:message "the policy has changed"
-                        :data (:kind "config-drift" :remedy "reindex-full"
-                               :changed ["languages"]))))
-    (with-temp-buffer
-      (org-semantic-results-mode)
-      (setq org-semantic-results--vault "/vault"
-            org-semantic-results--query "q")
-      (org-semantic-results-tests--answering ?q
-        (org-semantic-results--render-error error-object)
-        (should (member "config-drift" org-semantic-results--latched))
-        (should (= 1 (length org-semantic-results-tests--asked)))
-        (org-semantic-results--render-error error-object)
-        ;; Said again, but as a line rather than asked again.
-        (should (string-match-p "the policy has changed" (buffer-string)))
-        (should (= 1 (length org-semantic-results-tests--asked)))))))
 
 (ert-deftest an-offer-is-asked-in-the-minibuffer-and-not-drawn ()
   "The offers are a question now, not a row of buttons in the buffer.
@@ -1755,41 +1734,31 @@ would be a question with one answer."
     (should (string-match-p "vanished" (buffer-string)))
     (should-not org-semantic-results-tests--asked)))
 
-(ert-deftest an-offer-that-would-show-nothing-is-not-made ()
-  "\"Show what changed\" needs something to show.
+(ert-deftest a-drifted-policy-offers-only-a-rebuild ()
+  "There is one thing to do about it, so there is one offer.
 
-The server sends an empty list when the policy the index was built
-under is not on disk to compare against, so no setting can be
-named.  The offer stayed on the prompt and answered with a blank
-line in the echo area."
-  (let ((named (org-semantic-ui-remedy-offers
-                (org-semantic-ui-remedy
-                 (list :message "drifted"
-                       :data (list :kind "config-drift" :remedy "reindex-full"
-                                   :changed ["exclude_tagged"]))
-                 "semantic")))
-        (nothing (org-semantic-ui-remedy-offers
-                  (org-semantic-ui-remedy
-                   (list :message "drifted"
-                         :data (list :kind "config-drift" :remedy "reindex-full"
-                                     :changed []))
-                   "semantic"))))
-    (should (rassq 'show-changed named))
-    (should-not (rassq 'show-changed nothing))
-    ;; The rest of the prompt is untouched: there is still something to do.
-    (should (rassq 'index-full nothing))
-    (should (rassq 'waive nothing))))
+The policy is a file the reader wrote, so nothing can be listed
+that they do not already have open -- the index records a hash of
+it, not a copy.  And nothing can be waived: a search does not
+check the policy, so the refusal comes from a rebuild they asked
+for."
+  (let ((offers (org-semantic-ui-remedy-offers
+                 (org-semantic-ui-remedy
+                  (list :message "drifted"
+                        :data (list :kind "config-drift" :remedy "reindex-full"))
+                  "semantic"))))
+    (should (rassq 'index-full offers))
+    (should (= 1 (length offers)))))
 
 (ert-deftest org-semantic-ui-offer-keys-are-unambiguous ()
   "A key is a label's own initial, so the collisions are what to check.
 
 `[d] Download it' can be read without being learned, which is why
-the key follows the label -- but `config-drift' offers \"Search
-anyway\" beside \"Show what changed\" and both begin with an S, so
-one of them has to be overridden.  What has to hold, for every
-failure a client can meet and under either ranking: the keys on
-offer are distinct, and none of them is `q', which always means
-leave it."
+the key follows the label -- but \"Rebuild fully\" and \"Rebuild from
+scratch\" are two labels for one action and must answer to one key.
+What has to hold, for every failure a client can meet and under
+either ranking: the keys on offer are distinct, and none of them is
+`q', which always means leave it."
   (let ((kinds '("no-index" "model-missing" "config-drift" "index-layout"
                  "unknown-model" "ambiguous-model" "index-corrupt" "indexing"))
         (remedies '("index" "reindex-full" "wait")))
@@ -1800,12 +1769,7 @@ leave it."
             (let* ((offers (org-semantic-ui-remedy-offers
                             (org-semantic-ui-remedy
                              (list :message "something"
-                                   ;; With a setting named, so `config-drift'
-                                   ;; still offers "Show what changed" beside
-                                   ;; "Search anyway" -- the one collision this
-                                   ;; test exists for.
                                    :data (list :kind kind :remedy remedy
-                                               :changed ["exclude_tagged"]
                                                :indexing indexing))
                              mode)))
                    (keys (mapcar #'org-semantic-ui-offer-key offers)))
@@ -1817,7 +1781,6 @@ leave it."
     ;; which is the property that makes the prompt readable rather than learnt.
     (should (eq ?d (org-semantic-ui-offer-key '("Download it" . index))))
     (should (eq ?b (org-semantic-ui-offer-key '("Build it" . index))))
-    (should (eq ?c (org-semantic-ui-offer-key '("Show what changed" . show-changed))))
     ;; And one action answers to one key however it is labelled: a full rebuild
     ;; is `b' whether it is offered as fully or from scratch, because no failure
     ;; ever offers a build beside a rebuild -- so `r' would tell them apart for

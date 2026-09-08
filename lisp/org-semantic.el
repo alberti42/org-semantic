@@ -141,28 +141,6 @@ seconds."
                  (const :tag "Semantic only" "semantic")
                  (const :tag "Lexical only" "lexical")))
 
-(defcustom org-semantic-config nil
-  "The indexing policy to send with every request, or nil to send none.
-
-What a vault is indexed *as* -- its languages, its TODO keywords,
-how large a passage may get -- is policy, and the server checks
-the policy a client holds against the one an index was built
-under.  Set this and a drifted setting fails a search with
-`config-drift' instead of answering from passages split by rules
-you no longer hold.  Leave it nil and the index is searched as it
-stands, which is what the command line does.
-
-The value is a plist serialised to JSON, so arrays must be
-vectors:
-
-  (:languages [\"en-US\" \"de-DE\"] :fold_diacritics :json-false)
-
-Sending a policy is all-or-nothing: it is compared whole, so a
-partial one reads as a change to everything it leaves out.  Copy
-config.example.json and translate it, or leave this nil until
-there is something to say."
-  :type '(choice (const :tag "Send none" nil) (plist)))
-
 (defcustom org-semantic-timeout 30
   "Seconds to wait for anything but an index.
 
@@ -366,7 +344,7 @@ each promises to carry in `org-semantic-error-data':
                 instead of fetching it
   index-layout  target, found, expected, remedy
   index-corrupt target, chunks, vectors, remedy
-  config-drift  target, changed (setting names), remedy
+  config-drift  target, remedy
   unknown-model known
   ambiguous-model  built
   indexing      remedy (\"wait\")
@@ -950,7 +928,7 @@ to stop the work keeps it."
 ;;;; Searching
 
 (cl-defun org-semantic-search (query &key vault k per-file merge-by-section
-                                     mode model any config)
+                                     mode model any)
   "Search VAULT for QUERY and return the reply, waiting for it.
 
 The reply is a plist: `:hits', a vector of hits, and `:indexing',
@@ -970,8 +948,8 @@ nine hits.
 
 MERGE-BY-SECTION folds a section that answered as several
 passages into one hit.  ANY makes a lexical query match notes
-carrying any of its terms rather than all.  MODEL and CONFIG
-default to `org-semantic-model' and `org-semantic-config'.
+carrying any of its terms rather than all.  MODEL defaults to
+`org-semantic-model'.
 
 An empty QUERY returns no hits and is not an error, so it is safe
 to send on every keystroke.  Debouncing is the caller's business."
@@ -982,12 +960,11 @@ to send on every keystroke.  Debouncing is the caller's business."
     :query query :k k :perFile per-file
     :mergeBySection (and merge-by-section t)
     :mode mode :model (or model org-semantic-model)
-    :any (and any t)
-    :config (or config org-semantic-config))))
+    :any (and any t))))
 
 (cl-defun org-semantic-search-async (query &key vault k per-file
                                            merge-by-section mode model any
-                                           config success failure)
+                                           success failure)
   "Search VAULT for QUERY without waiting, and call SUCCESS with the reply.
 
 Arguments are as in `org-semantic-search'; FAILURE is called with
@@ -1004,8 +981,7 @@ which does this."
     :query query :k k :perFile per-file
     :mergeBySection (and merge-by-section t)
     :mode mode :model (or model org-semantic-model)
-    :any (and any t)
-    :config (or config org-semantic-config))
+    :any (and any t))
    :success success :failure failure))
 
 (defun org-semantic-hits (reply)
@@ -1081,7 +1057,7 @@ text can be older than the note."
 
 ;;;; Indexing
 
-(cl-defun org-semantic-index (&key vault mode full rehash model config
+(cl-defun org-semantic-index (&key vault mode full rehash model
                                    success failure progress)
   "Index VAULT, without waiting, and return the request id.
 
@@ -1130,8 +1106,7 @@ them can be dropped."
             :vault os-vault
             :mode (or mode org-semantic-index-mode)
             :full (and full t) :rehash (and rehash t)
-            :model (or model org-semantic-model)
-            :config (or config org-semantic-config))
+            :model (or model org-semantic-model))
            :timeout org-semantic-index-timeout
            :progress progress
            :success (lambda (result)
