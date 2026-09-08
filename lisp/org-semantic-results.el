@@ -307,6 +307,9 @@ policy that has since drifted, which is a decision they make once.")
 (defvar-local org-semantic-results--indexing nil
   "Whether the last reply said an index was running.")
 
+(defvar-local org-semantic-results--drifted nil
+  "Whether the last reply said the exclusion list has moved.")
+
 (defvar-local org-semantic-results--latched nil
   "The failure kinds already said in full for the search in flight.
 Cleared by `org-semantic-results--search'.  See
@@ -850,6 +853,28 @@ drawing owns the line and the rest are dimmed."
 
 ;;;; Drawing
 
+(defun org-semantic-results--drift-p (reply)
+  "Does REPLY warn that the index was built under other exclusion rules?
+The server sends this as a remark and not an error, because the search
+still answered.  Every hit is a real hit, and only the set of notes the
+index covers has moved."
+  (and (cl-some (lambda (r) (equal (plist-get r :kind) "exclude-drift"))
+                (plist-get reply :remarks))
+       t))
+
+(defun org-semantic-results--header-notes ()
+  "What the counts line adds about the index these results came from.
+Each note carries the separator the line already uses, so none, one or
+both of them read the same way."
+  (let ((said (delq nil
+                    (list (and org-semantic-results--indexing
+                               "indexing: this list is one version behind")
+                          (and org-semantic-results--drifted
+                               (substitute-command-keys
+                                "exclusion list changed: \\[org-semantic-results-reindex] \
+updates the index"))))))
+    (if said (concat "  ·  " (mapconcat #'identity said "  ·  ")) "")))
+
 (defun org-semantic-results--render (reply)
   "Draw REPLY over the whole buffer."
   (let* ((hits (org-semantic-hits reply))
@@ -861,6 +886,7 @@ drawing owns the line and the rest are dimmed."
          (dropped 0))
     (setq org-semantic-results--indexing
           (org-semantic-true-p (plist-get reply :indexing)))
+    (setq org-semantic-results--drifted (org-semantic-results--drift-p reply))
     (erase-buffer)
     (org-semantic-results--insert-header hits elapsed t)
     (dolist (file (org-semantic-results--group hits))
@@ -933,9 +959,7 @@ index reads as an answer."
                          notes (if (= notes 1) "" "s")
                          (length hits) (if (= (length hits) 1) "" "s")
                          (if elapsed (format " in %.2f s" elapsed) "")
-                         (if org-semantic-results--indexing
-                             "  ·  indexing: this list is one version behind"
-                           ""))
+                         (org-semantic-results--header-notes))
                  'face 'org-semantic-results-location
                  'org-semantic-header t 'read-only t))
       (insert (propertize "\n" 'org-semantic-header t 'read-only t)))))
