@@ -5512,6 +5512,32 @@ fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static M
     }
 }
 
+/// Say when the index answering was built under different exclusion rules.
+///
+/// The search still answers, because every hit it returns is a real hit. Only
+/// the set of notes the index covers has moved, so this is a warning and never
+/// a failure. The remedy is a plain incremental run and never `--full`: a rule
+/// added costs no embedding at all, and one removed costs only the notes that
+/// come back.
+///
+/// STORED is `None` when there is no manifest to read, and then there is no
+/// index either. That is reported by the search itself, in its own words.
+///
+/// A file that will not parse says nothing here. It already fails the `index`
+/// this message would send the reader to, and saying so twice helps nobody.
+fn warn_stale_excludes(vault: &Path, notes: &Path, target: Target, stored: Option<u64>) {
+    let Some(stored) = stored else { return };
+    let Ok(current) = Excludes::read(notes) else { return };
+    if current.hash(target) == stored {
+        return;
+    }
+    eprintln!(
+        "this index was built with a different exclusion list, so these results follow \
+         the old list\nrun `org-semantic index {}` to update it",
+        vault.display()
+    );
+}
+
 fn cmd_search(
     vault: &Path,
     query: &str,
@@ -5527,6 +5553,12 @@ fn cmd_search(
     // `dir:` predicate is relative to -- a chunk's path is relative to that
     // root, not to the directory the index sits in.
     let notes = notes_root(vault)?;
+    warn_stale_excludes(
+        vault,
+        &notes,
+        Target::Semantic,
+        stored_hash::<Manifest>(&semantic_dir(vault, m).join("manifest.json")).map(|m| m.exclude),
+    );
 
     // Predicates constrain which chunks are considered; only the remaining free
     // text is embedded.
@@ -6063,6 +6095,12 @@ fn cmd_lexical(
     let analyzer = lexical::Analyzer::from_key(&stored)
         .ok_or_else(|| anyhow!("unreadable lexical index — run `index --lexical`"))?;
     let notes = notes_root(vault)?;
+    warn_stale_excludes(
+        vault,
+        &notes,
+        Target::Lexical,
+        stored_hash::<LexManifest>(&lex_manifest_path(&dir)).map(|m| m.exclude),
+    );
     let mut f = parse_query(query);
     f.relative_to(&notes)?;
     if !f.is_empty() && !json {
