@@ -802,7 +802,6 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-auto-reindex-mode~     | =nil=          | reindex a vault when one of its notes is saved --- above    |
 | ~org-semantic-auto-reindex-delay~    | =2.0=          | seconds of quiet after a save before it runs                |
 | ~org-semantic-auto-reindex-quietly~  | =t=            | whether a run that worked says so                           |
-| ~org-semantic-config~                | =nil=          | the indexing policy to send --- below                       |
 | ~org-semantic-require-fresh-index~   | =nil=          | never answer from an index that is being rebuilt --- below  |
 | ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
 | ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
@@ -906,51 +905,18 @@ behaving correctly. Setting it in your shell profile alone is enough for both if
 Emacs is started from a shell; a daemon started by =launchd= or systemd is not,
 and needs it in the plist or unit file, or here.
 
-~org-semantic-config~ is the one worth care. It is [[#what-gets-indexed][the same policy]] the command
-line passes with =--config=, and it holds the policy *itself*, not the name of a
-file --- the same object =config.example.json= contains, written as a plist. The
-key names are the JSON ones, so they keep their underscores.
+*There is no setting for the indexing policy, and there was one.* It held the
+policy itself, as a plist, and was sent with every request --- so Emacs and the
+vault's own file could disagree about which policy applied, and a setting left
+out of the plist quietly took its default rather than keeping what the index was
+built with. The policy is [[#what-gets-indexed][one file beside your notes]] now,
+=.org-semantic-config.json=, which every run reads: yours from a terminal, the
+server this Emacs starts, and a cron job alike. Copy =config.example.json= and
+edit it.
 
-Three Lisp values need care, because JSON has three things that all spell
-themselves =nil= in Emacs: an array is a *vector*, false is ~:json-false~, and
-=nil= means JSON =null=, which the server will not parse. A list where a vector
-belongs is the mistake to expect.
-
-This is the whole of the default policy --- the plist form of
-=config.example.json=. Copy it and edit, as you would the file:
-
-#+name: config-plist
-#+begin_src emacs-lisp
-(setq org-semantic-config
-      '(:languages ["en-US"]
-        :fold_diacritics :json-false
-        :blocks (:src     (:semantic "placeholder" :lexical t)
-                 :example (:semantic "placeholder" :lexical t)
-                 :results (:semantic :json-false   :lexical t)
-                 :quote   (:semantic t             :lexical t)
-                 :verse   (:semantic t             :lexical t))
-        :planning_line (:semantic :json-false :lexical t)
-        :chunk (:semantic_tokens 350 :lexical_chars 1500)
-        :exclude_tagged ["noexport" "ARCHIVE"]
-        :todo_keywords ["TODO" "DONE"]))
-#+end_src
-
-It is sent with searches as well as with indexing, so that an index built under
-older settings fails the search rather than answering from passages split by
-rules you no longer hold. The buffer then offers to rebuild, to search it anyway,
-or to show what moved --- once, not on every keystroke.
-
-*A setting you leave out is not left alone --- it takes its default.* The policy
-is read whole, so ~(:languages ["de-DE"])~ does not mean "German, and everything
-else as before": it means German with every other setting at the value above. If
-you indexed with =--config= and a file, say the same thing here, or the search
-will report drift on the settings you did not repeat.
-
-An unknown key is an error rather than an ignored one, for the reason a mistyped
-flag is: a setting that does nothing looks exactly like a typo that does nothing.
-
-Leave it =nil= --- the default --- and the index is searched as it stands, which
-is what the command line does and is never wrong.
+An unknown key in that file is an error rather than an ignored one, for the
+reason a mistyped flag is: a setting that does nothing looks exactly like a typo
+that does nothing.
 
 *Past searches come back with =M-p=.* Every prompt --- =C-c n s=, searching for
 the thing at point, and =s= in the results buffer --- shares one history,
@@ -1078,8 +1044,8 @@ Methods:
 | method            | params                                                                                   | returns                                       |
 |-------------------+------------------------------------------------------------------------------------------+-----------------------------------------------|
 | =initialize=      | =capabilities=                                                                           | =serverInfo= --- the release this process is  |
-| =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any=, =config= | ={"hits": [...], "indexing": false}= |
-| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model=, =config= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
+| =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...], "indexing": false}= |
+| =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
 | =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
@@ -1144,11 +1110,12 @@ showing such a vault raises the second.
 An empty query returns no hits rather than an error, so it is safe to send on
 every keystroke; debouncing is the editor's policy, not the server's.
 
-=config= is optional on =search=, and when present it is *checked against what
-the index was built under* --- see
-[[#what-gets-indexed][what gets indexed]] for what that is for and what a client
-should do with the error. Leaving it out searches whatever is there, which is
-what the CLI does.
+*No request carries a policy.* =search= and =index= each took an optional
+=config=, so a client's own idea of the policy and the vault's file could
+disagree about which one applied. The policy is a file the server reads --- see
+[[#what-gets-indexed][what gets indexed]] --- so an =index= is refused when the
+file no longer matches what the index holds, and a search answers whatever is
+there.
 
 *** Which binary you are talking to
 :PROPERTIES:
@@ -1207,9 +1174,9 @@ place LSP puts one:
 { "jsonrpc": "2.0", "id": 7,
   "error": {
     "code": -32000,
-    "message": "the semantic index was built under a different policy — todo_keywords: was [DONE, TODO], now [DONE, TODO, WAITING]\nreindex with `full` to rebuild under the new one, or restore the previous setting",
+    "message": "the semantic index was built under a different policy than .org-semantic-config.json now holds\nreindex with `full` to rebuild under the new one",
     "data": { "kind": "config-drift", "target": "semantic",
-              "changed": ["todo_keywords"], "remedy": "reindex-full" } } }
+              "remedy": "reindex-full" } } }
 #+end_src
 
 The absence of =data= is meaningful: an error without it is one to display, with
@@ -1217,7 +1184,7 @@ nothing to decide.
 
 | =kind=            | what happened                                                | =data= also carries          |
 |-------------------+--------------------------------------------------------------+------------------------------|
-| =config-drift=    | the policy sent differs from the one the index was built under | =target=, =changed=          |
+| =config-drift=    | the policy file differs from the one the index was built under | =target=                     |
 | =index-layout=    | the index predates this version of the tool                  | =target=, =found=, =expected= |
 | =no-index=        | nothing is built for this vault yet                          | =target=, and =built= when other models are |
 | =index-corrupt=   | the chunk table and the vectors disagree in length           | =target=, =chunks=, =vectors= |
