@@ -1474,9 +1474,10 @@ severity: every one of these is a warning.
 | =kind=                        | what it tells you                                        |
 |-------------------------------+----------------------------------------------------------|
 | =unreadable-file=             | that note is *missing from the index*, not merely absent from your results |
+| =no-notes=                    | there are no =.org= files to index, so nothing was written |
+| =notes-elsewhere=             | =.org= files sit in the vault directory while the notes are somewhere else, so they are not indexed |
 | =heading-shortened=           | the section is filed under a cut heading path            |
 | =index-rebuilt=               | you asked for an incremental run and paid for a full one, and why |
-| =stale-policy=                | the cached policy would not parse, so the defaults were used |
 | =unknown-configured-language= | a language in your policy is not one the classifier knows |
 | =unknown-declared-language=   | a note's own =# ltex: language== names one, and says where |
 | =model-downloaded=            | why a five-second index took ninety                      |
@@ -2069,6 +2070,13 @@ The file is optional, and without one nothing is excluded. It is not part of the
 policy, and that is the point: changing it re-embeds nothing, so the remedy for a
 change is always a plain =org-semantic index= and never =--full=.
 
+*A private copy wins*, exactly as it does for the policy: the file is looked for
+beside the index directory first, and only then beside the notes. So you can
+leave folders out of somebody else's shared vault without writing anything into
+their tree. The two are the same directory unless
+[[#index-elsewhere][the index lives elsewhere]], and nothing is merged --- the
+file that is found is the whole list. =models <vault>= says which one was used.
+
 *Adding a rule costs no embedding at all.* Those notes leave the walk, and both
 indexes drop them exactly as they drop a note you deleted. Removing a rule costs
 about half a second for each note that comes back, and nothing else. Neither
@@ -2117,8 +2125,8 @@ set of notes the index covers has moved. Over JSON-RPC the same thing arrives as
 a remark of kind =exclude-drift=; in the Emacs results buffer it is a note on the
 counts line, carrying the key that settles it.
 
-=models <vault>= says how many rules the file holds and where it is, which is the
-only place a vault mentions it at all.
+=models <vault>= says how many rules the file holds and which file that is, which
+is the only place a vault mentions it at all.
 
 ** Languages
 :PROPERTIES:

@@ -8096,6 +8096,50 @@ mod tests {
         );
     }
 
+    /// Every warning kind is named in the manual, and no kind is named that has
+    /// gone.
+    ///
+    /// Found by a reader, not by a test: the table still listed a warning about
+    /// a cached policy months after the cache was removed, and had never listed
+    /// the two that say a vault has no notes.  Both directions are quiet -- a
+    /// client author reads the table and writes a branch for a kind that never
+    /// arrives, or meets one the table does not mention.
+    #[test]
+    fn every_warning_kind_is_in_the_manual() {
+        let src = format!("{}{}", include_str!("main.rs"), include_str!("serve.rs"));
+        // Every one is built the same way, which is what makes this checkable.
+        let mut kinds: Vec<&str> = src
+            .match_indices("Remark::new(")
+            .filter_map(|(i, _)| {
+                let rest = &src[i + "Remark::new(".len()..];
+                let rest = rest.trim_start();
+                let rest = rest.strip_prefix('"')?;
+                rest.split('"').next()
+            })
+            .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert!(kinds.len() > 5, "the kinds are found at all: {kinds:?}");
+
+        let manual = include_str!("../docs/manual.org");
+        let table = manual
+            .split_once("| =kind=                        | what it tells you")
+            .expect("the warnings table")
+            .1
+            .split_once("\n\n")
+            .expect("its end")
+            .0;
+        for kind in &kinds {
+            assert!(table.contains(&format!("={kind}=")), "{kind} is not in the table");
+        }
+        // And nothing in the table has gone.
+        for row in table.lines().filter(|l| l.starts_with("| =")) {
+            let named = row.trim_start_matches("| =").split('=').next().unwrap();
+            assert!(kinds.contains(&named), "the table names {named}, which nothing raises");
+        }
+    }
+
     /// `USAGE` is copied into the manual.  Nobody diffs that copy by hand, so it
     /// goes stale: adding `--version` left the manual describing a tool that had
     /// none.
