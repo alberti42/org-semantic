@@ -759,6 +759,25 @@ struct Chunk {
 /// tree for the same reason, and this follows that shape.
 const IGNORE_FILE: &str = ".org-semantic-ignore";
 
+/// Which of a user file's two homes holds it: the vault directory, else the
+/// notes.
+///
+/// The vault directory wins outright, and nothing is merged.  That is what lets
+/// somebody index a shared folder their own way -- their settings stay out of
+/// the shared tree -- and a merge would make the effective file one that exists
+/// nowhere on disk.
+///
+/// The two are the same directory unless the vault says its notes are
+/// elsewhere, so the ordinary case is one file and no precedence at all.
+fn user_file(vault: &Path, notes: &Path, name: &str) -> Option<PathBuf> {
+    let private = vault.join(name);
+    if private.exists() {
+        return Some(private);
+    }
+    let shared = notes.join(name);
+    shared.exists().then_some(shared)
+}
+
 /// Which list a rule joins.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RuleGroup {
@@ -870,13 +889,12 @@ impl Excludes {
     /// A file that is present and will not read is an error. This file is the
     /// user's own, like a policy named with `--config`, so a mistake in it must
     /// stop the command rather than quietly change what is indexed.
-    fn read(notes: &Path) -> Result<Excludes> {
-        let path = notes.join(IGNORE_FILE);
-        let text = match fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Excludes::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    fn read(vault: &Path, notes: &Path) -> Result<Excludes> {
+        let Some(path) = user_file(vault, notes, IGNORE_FILE) else {
+            return Ok(Excludes::default());
         };
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         Excludes::parse(&text).with_context(|| format!("in {}", path.display()))
     }
 
@@ -1072,7 +1090,7 @@ struct Walk {
 
 fn walk_notes(vault: &Path, target: Target) -> Result<Walk> {
     let notes = notes_root(vault)?;
-    let excludes = Excludes::read(&notes)?;
+    let excludes = Excludes::read(vault, &notes)?;
     let rules: Vec<&Rule> = excludes.rules(target).collect();
     let mut files = Vec::new();
     org_files(&notes, &notes, &rules, &mut files)?;
@@ -5661,7 +5679,7 @@ fn choose_index(vault: &Path, want: Option<&'static Model>) -> Result<&'static M
 /// this message would send the reader to, and saying so twice helps nobody.
 fn warn_stale_excludes(vault: &Path, notes: &Path, target: Target, stored: Option<u64>) {
     let Some(stored) = stored else { return };
-    let Ok(current) = Excludes::read(notes) else { return };
+    let Ok(current) = Excludes::read(vault, notes) else { return };
     if current.hash(target) == stored {
         return;
     }
@@ -6471,12 +6489,12 @@ fn main() -> Result<()> {
                         // and how much it holds.  Nothing at all when there is
                         // no such file: a vault that excludes nothing is the
                         // ordinary case, and its owner knows.
-                        match Excludes::read(&notes) {
+                        match Excludes::read(vault, &notes) {
                             Ok(ex) if !ex.is_empty() => println!(
                                 "Exclusion list: {} rule{} from {}",
                                 ex.len(),
                                 if ex.len() == 1 { "" } else { "s" },
-                                notes.join(IGNORE_FILE).display()
+                                user_file(vault, &notes, IGNORE_FILE).unwrap_or_default().display()
                             ),
                             Ok(_) => {}
                             Err(e) => println!("Exclusion list: {e:#}"),
@@ -7972,6 +7990,50 @@ mod tests {
     ///
     /// Found by driving the tool rather than by a test: the run said it had
     /// nothing to do, and it was right about the notes.
+    /// A private list wins outright, and nothing is merged.
+    ///
+    /// This is what lets somebody index a shared folder their own way.  A merge
+    /// would make the effective list one that exists in neither file, and
+    /// reading only the shared one would put their exclusions into the shared
+    /// tree.
+    #[test]
+    fn a_private_exclusion_list_wins_over_the_shared_one() {
+        let state = scratch("ignore-private");
+        let notes = state.parent().unwrap().join("ignore-private-notes");
+        fs::create_dir_all(&notes).unwrap();
+        note(&notes, "alpha");
+        note(&notes, "beta");
+        fs::write(vault_file(&state), r#"{"notes":"../ignore-private-notes"}"#).unwrap();
+        let root = notes_root(&state).unwrap();
+
+        // Beside the notes, and it is used.
+        fs::write(notes.join(IGNORE_FILE), "beta.org\n").unwrap();
+        let shared = Excludes::read(&state, &root).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            walk_notes(&state, Target::Lexical).unwrap().files.len(),
+            1,
+            "beta is left out by the shared list"
+        );
+
+        // Beside the cache directory, and it replaces the other one whole.
+        fs::write(state.join(IGNORE_FILE), "alpha.org\nno-such-note.org\n").unwrap();
+        let private = Excludes::read(&state, &root).unwrap();
+        assert_eq!(private.len(), 2, "both of its rules, and neither of the other file's");
+        assert_ne!(
+            private.hash(Target::Lexical),
+            shared.hash(Target::Lexical),
+            "the two lists are not the same list"
+        );
+        let walked = walk_notes(&state, Target::Lexical).unwrap();
+        assert_eq!(walked.files.len(), 1, "one note is left out, not two");
+        assert!(
+            walked.files[0].ends_with("beta.org"),
+            "and it is alpha that went, so nothing was merged: {:?}",
+            walked.files
+        );
+    }
+
     #[test]
     fn a_rule_that_matches_nothing_is_still_recorded() {
         let v = scratch("exclude-norule");
@@ -7995,7 +8057,7 @@ mod tests {
         seed(&v, &[a.as_str()]);
 
         fs::write(v.join(IGNORE_FILE), "no-such-note.org\n").unwrap();
-        let want = |t| Excludes::read(&v).unwrap().hash(t);
+        let want = |t| Excludes::read(&v, &v).unwrap().hash(t);
         assert_ne!(want(Target::Semantic), 0, "the rule is there to be recorded");
 
         cmd_index(

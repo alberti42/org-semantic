@@ -389,7 +389,7 @@ impl Server {
         // that will not parse says nothing here; it already fails the `index`
         // this would send the reader to.
         let target = if lexical_mode { Target::Lexical } else { Target::Semantic };
-        let wanted = Excludes::read(&notes).ok().map(|ex| ex.hash(target));
+        let wanted = Excludes::read(&vault, &notes).ok().map(|ex| ex.hash(target));
         // Said on every reply, because a hit list answered mid-rebuild is a
         // version behind and the client is the one that decides whether to say
         // so.  It costs a boolean; asking `status` per keystroke would not.
@@ -901,7 +901,7 @@ impl Server {
         //
         // A file that will not parse answers `false`.  It stops the `index` this
         // would send the reader to, and that is where it is said.
-        let excluding = Excludes::read(&notes).ok();
+        let excluding = Excludes::read(&vault, &notes).ok();
         let stale = excluding.as_ref().is_some_and(|ex| {
             let semantic = built_models(&vault).iter().any(|m| {
                 stored_hash::<StoredExcludes>(&semantic_dir(&vault, m).join("manifest.json"))
