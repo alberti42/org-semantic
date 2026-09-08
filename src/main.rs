@@ -782,6 +782,18 @@ struct Rule {
 }
 
 impl Rule {
+    /// The rule as one string, in the one spelling that means what it means.
+    ///
+    /// Two spellings of the same rule must hash alike, so this is rebuilt from
+    /// what the parser decided rather than kept as the line was typed.
+    /// `journal/2019/` and `/journal/2019/` name one rule, and both come back
+    /// as the second.
+    fn canonical(&self) -> String {
+        let lead = if self.anchored { "/" } else { "" };
+        let tail = if self.dir_only { "/" } else { "" };
+        format!("{lead}{}{tail}", self.parts.join("/"))
+    }
+
     /// Does this rule exclude PARTS, a path's components below the notes root?
     ///
     /// IS_DIR decides whether a rule written with a trailing `/` applies. Every
@@ -931,6 +943,23 @@ impl Excludes {
         };
         self.both.iter().chain(own.iter())
     }
+
+    /// What one index records about the rules it was built under.
+    ///
+    /// Zero when nothing is excluded, and that is load-bearing: a manifest
+    /// written before this field existed reads as zero, which is the truth
+    /// about it. So no index already on disk reports a change nobody made.
+    fn hash(&self, target: Target) -> u64 {
+        let mut joined = String::new();
+        for r in self.rules(target) {
+            joined.push_str(&r.canonical());
+            joined.push('\n');
+        }
+        if joined.is_empty() {
+            return 0;
+        }
+        content_hash(joined.as_bytes())
+    }
 }
 
 /// The group a label names, or `None` when the line names none of the three.
@@ -1024,6 +1053,8 @@ fn excluded(notes: &Path, path: &Path, rules: &[&Rule], is_dir: bool) -> bool {
 struct Walk {
     notes: PathBuf,
     files: Vec<PathBuf>,
+    /// What the rules this walk used hash to, for the index to record.
+    exclude: u64,
 }
 
 fn walk_notes(vault: &Path, target: Target) -> Result<Walk> {
@@ -1033,7 +1064,7 @@ fn walk_notes(vault: &Path, target: Target) -> Result<Walk> {
     let mut files = Vec::new();
     org_files(&notes, &notes, &rules, &mut files)?;
     files.sort();
-    Ok(Walk { notes, files })
+    Ok(Walk { notes, files, exclude: excludes.hash(target) })
 }
 
 /// fastText's `lid.176`, product-quantized to 917 kB.  Fetched on first use
@@ -3484,6 +3515,12 @@ struct Manifest {
     /// Hash of the normalized `Config` this index was built under.
     #[serde(default)]
     config: u64,
+    /// Hash of the exclusion rules this index was built under.
+    ///
+    /// Zero means nothing was excluded, so a manifest written before this
+    /// field existed reads correctly rather than reporting a change.
+    #[serde(default)]
+    exclude: u64,
     /// Recorded so that changing the embedding model invalidates every vector.
     /// Vectors from two different models are not comparable, and mixing them
     /// silently degrades every search rather than failing.
@@ -3714,10 +3751,12 @@ fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
 /// No fsync.  This makes the *process* dying safe, which is the case that
 /// happens; surviving power loss would mean syncing the files and the directory,
 /// for derived data whose loss costs one `index --full`.
+#[allow(clippy::too_many_arguments)]
 fn save_index(
     dir: &Path,
     m: &Model,
     cfg: &Config,
+    exclude: u64,
     chunks: &[Chunk],
     vectors: &[f32],
     files: std::collections::BTreeMap<String, u64>,
@@ -3734,6 +3773,7 @@ fn save_index(
     let manifest = serde_json::to_vec(&Manifest {
         version: INDEX_VERSION,
         config: cfg.hash_for(Target::Semantic),
+        exclude,
         model: m.name.into(),
         dim: m.dim,
         files,
@@ -4304,6 +4344,10 @@ struct LexManifest {
     key: String,
     #[serde(default)]
     config: u64,
+    /// Hash of the exclusion rules this index was built under. Zero means
+    /// nothing was excluded, so an older manifest reads correctly.
+    #[serde(default)]
+    exclude: u64,
     files: std::collections::BTreeMap<String, u64>,
     #[serde(default)]
     stamps: std::collections::BTreeMap<String, Stamp>,
@@ -4353,7 +4397,7 @@ fn cmd_index_lexical(
     stop: &Cancel,
 ) -> Result<IndexReport> {
     let t0 = Instant::now();
-    let Walk { notes, files } = walk_notes(vault, Target::Lexical)?;
+    let Walk { notes, files, exclude } = walk_notes(vault, Target::Lexical)?;
     report_empty(&notes, &files, "lexical", j);
     report_stranded(vault, &notes, "lexical", j);
 
@@ -4513,6 +4557,7 @@ fn cmd_index_lexical(
                 &LexManifest {
                     key: analyzer.key(),
                     config: cfg.hash_for(Target::Lexical),
+                    exclude,
                     files: scan.hashes,
                     stamps: scan.stamps,
                 },
@@ -4544,6 +4589,7 @@ fn cmd_index_lexical(
         &LexManifest {
             key: analyzer.key(),
             config: cfg.hash_for(Target::Lexical),
+            exclude,
             files: scan.hashes,
             stamps: scan.stamps,
         },
@@ -4638,7 +4684,7 @@ fn cmd_index(
     stop: &Cancel,
 ) -> Result<Indexed> {
     let t0 = Instant::now();
-    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
+    let Walk { notes, files, exclude } = walk_notes(vault, Target::Semantic)?;
     report_empty(&notes, &files, "semantic", j);
     report_stranded(vault, &notes, "semantic", j);
 
@@ -5038,7 +5084,7 @@ fn cmd_index(
         )?;
     }
 
-    let written = save_index(&dir, m, cfg, &chunks, &vectors, hashes, stamps)?;
+    let written = save_index(&dir, m, cfg, exclude, &chunks, &vectors, hashes, stamps)?;
     writeln!(
         j.out,
         "wrote {} ({:.1} MB of vectors) in {:.2}s total",
@@ -5547,7 +5593,7 @@ fn cmd_search(
 /// full run.  Reports the chunk-length distribution too, since throughput on
 /// this workload is set by tokens rather than by chunk count.
 fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
-    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
+    let Walk { notes, files, .. } = walk_notes(vault, Target::Semantic)?;
     // Packed with the real tokenizer, or this measures chunks the indexer would
     // never produce.
     let m = model_named(DEFAULT_MODEL)?;
@@ -5636,7 +5682,7 @@ fn cmd_bench(vault: &Path, n: usize, which_config: &str) -> Result<()> {
 fn cmd_tokens(vault: &Path, limit: usize, m: &Model) -> Result<()> {
     let tok = tokenizer_for(m)?;
 
-    let Walk { notes, files } = walk_notes(vault, Target::Semantic)?;
+    let Walk { notes, files, .. } = walk_notes(vault, Target::Semantic)?;
     // The same packing the index applies — one pass, in tokens — so this reports
     // what is actually embedded rather than the raw sections.
     let measure = |s: &str| n_tokens(&tok, s);
@@ -5938,7 +5984,7 @@ fn cmd_chunks(
             Target::Lexical => "lexical",
         }
     );
-    let Walk { notes, files } = walk_notes(vault, target)?;
+    let Walk { notes, files, .. } = walk_notes(vault, target)?;
     for f in files.iter().filter(|f| f.to_string_lossy().contains(needle)) {
         let text = fs::read_to_string(f)?;
         let measure = |s: &str| n_tokens(&tok, s);
@@ -6989,8 +7035,17 @@ mod tests {
             paths.iter().map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap())).collect();
         let m = model_named(DEFAULT_MODEL).unwrap();
         let vectors = vec![0.0f32; chunks.len() * m.dim];
-        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps)
-            .unwrap();
+        save_index(
+            &semantic_dir(dir, m),
+            m,
+            &Config::default(),
+            0,
+            &chunks,
+            &vectors,
+            files,
+            stamps,
+        )
+        .unwrap();
     }
 
     /// Seed an index holding the chunks the vault really produces, so that the
@@ -7022,8 +7077,17 @@ mod tests {
             paths.iter().map(|p| ((*p).to_string(), stamp_of(&dir.join(p)).unwrap())).collect();
         let vectors: Vec<f32> =
             (0..chunks.len()).flat_map(|i| std::iter::repeat_n(i as f32 + 1.0, m.dim)).collect();
-        save_index(&semantic_dir(dir, m), m, &Config::default(), &chunks, &vectors, files, stamps)
-            .unwrap();
+        save_index(
+            &semantic_dir(dir, m),
+            m,
+            &Config::default(),
+            0,
+            &chunks,
+            &vectors,
+            files,
+            stamps,
+        )
+        .unwrap();
     }
 
     /// A note whose bytes changed but whose passages did not: every vector is
@@ -8436,6 +8500,7 @@ mod tests {
         let stale = Manifest {
             version: INDEX_VERSION - 1,
             config: 0,
+            exclude: 0,
             model: m.name.into(),
             dim: m.dim,
             files: Default::default(),
@@ -8695,6 +8760,7 @@ mod tests {
             &semantic_dir(&v, other),
             other,
             &Config::default(),
+            0,
             &[],
             &[],
             Default::default(),
