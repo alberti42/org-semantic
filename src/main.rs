@@ -1549,7 +1549,7 @@ fn as_set(items: &[String]) -> Vec<String> {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            languages: vec!["en-US".into()],
+            languages: Vec::new(),
             fold_diacritics: false,
             blocks: Blocks::default(),
             planning_line: PlanningLinePolicy::default(),
@@ -1748,16 +1748,17 @@ fn check_config(previous: Option<u64>, cfg: &Config, target: Target, remedy: &st
 ///   also what says whether a language code exists.
 /// - **several** — the classifier runs, restricted to answering with one of them
 /// - **none** — `--lang auto`: the classifier runs unrestricted, all 176
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct LangConfig {
-    /// Mirrors `lsp-ltex-plus-language`, whose default is "en-US".
+    /// Empty by default, which means every note is classified.
+    ///
+    /// It was `["en-US"]`, mirroring `lsp-ltex-plus-language`.  A list of one
+    /// does not mean "probably this language" — it means *never classify* — so
+    /// that default was the one value that could not correct itself: wrong on
+    /// every note of a vault written in something else, for ever, with nothing
+    /// to see.  Told nothing, detect.  See CLAUDE.md for what was weighed,
+    /// including why the system locale is not the answer either.
     languages: Vec<String>,
-}
-
-impl Default for LangConfig {
-    fn default() -> Self {
-        LangConfig { languages: vec!["en-US".into()] }
-    }
 }
 
 impl LangConfig {
@@ -3077,14 +3078,14 @@ mod lexical {
         /// self-contained; bump it whenever the schema changes, so a stale index
         /// is discarded rather than opened against the wrong schema.
         pub fn key(&self) -> String {
-            format!("v5 langs={} fold={}", self.langs.join("+"), self.fold)
+            format!("v6 langs={} fold={}", self.langs.join("+"), self.fold)
         }
 
         /// Rebuild the analyzer from a stored key.  This is what lets the
         /// lexical index be searched without `chunks.json`: the languages come
         /// back from the index's own metadata rather than from the corpus.
         pub fn from_key(key: &str) -> Option<Self> {
-            let rest = key.strip_prefix("v5 ")?;
+            let rest = key.strip_prefix("v6 ")?;
             let (langs, fold) = rest.split_once(" fold=")?;
             Some(Analyzer {
                 langs: langs.strip_prefix("langs=")?.split('+').map(String::from).collect(),
@@ -3436,7 +3437,7 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
 /// the semantic index wrote it empty, so a v8 index parses perfectly and answers
 /// every `lang:` query with nothing. A rebuild is the only thing that fills it,
 /// and this is what asks for one.
-const INDEX_VERSION: u32 = 9;
+const INDEX_VERSION: u32 = 10;
 
 /// Modification time and size, as a cheap pre-filter.  Deliberately not the
 /// authority on whether a note changed: `git checkout`, a sync or `touch` all
@@ -10030,10 +10031,14 @@ mod tests {
     }
 
     /// ltex applies a magic comment from its own line onward, so a note may
-    /// switch part-way; chunks before it keep the default.
+    /// switch part-way; chunks before it keep the configured language.
+    ///
+    /// Configured rather than default, and deliberately: the default is `auto`
+    /// now, which would make this assert on the classifier's opinion of the
+    /// single word `alpha`.
     #[test]
     fn language_applies_from_its_line_onward() {
-        let cfg = LangConfig::default();
+        let cfg = LangConfig::parse("en-US");
         let c = chunk_file(
             Path::new("/v/N.org"),
             "N.org",
@@ -10054,7 +10059,9 @@ mod tests {
     /// makes it fixable rather than merely known.
     #[test]
     fn a_language_nobody_recognises_is_reported_where_it_was_declared() {
-        let cfg = LangConfig::default();
+        // One language configured, so the fallback is that language rather than
+        // whatever the classifier makes of `beta`.
+        let cfg = LangConfig::parse("en-US");
         let mut j = Journal::quiet();
         let c = chunk_file(
             Path::new("/v/N.org"),
@@ -10073,6 +10080,36 @@ mod tests {
         assert_eq!(rs[0].path.as_deref(), Some("N.org"));
         assert_eq!(rs[0].line, Some(5), "the line the declaration is on");
         assert!(rs[0].message.contains("klingon"), "names it: {}", rs[0].message);
+    }
+
+    /// Told nothing, classify.
+    ///
+    /// The default was `["en-US"]`, and a list of one means *never classify* —
+    /// so every note of a German vault was labelled English, on every run, with
+    /// nothing to see. An empty list is the honest answer to being told nothing,
+    /// and it is the one that a note can correct by being read.
+    #[test]
+    fn no_language_configured_means_every_note_is_classified() {
+        assert!(Config::default().languages.is_empty(), "the policy asks for no language");
+        let cfg = LangConfig::default();
+        assert!(cfg.detects(), "so every undeclared note is classified");
+        assert_eq!(cfg.undeclared(), LANG_AUTO, "and nothing is asserted before it is");
+
+        // Prose rather than a word: the classifier is reliable on a sentence and
+        // guesses on a token, which is what the manual says of it.
+        let german = "Die Wörter der deutschen Sprache sind oft sehr lang und \
+                      zusammengesetzt, was das Lesen erschwert.";
+        let c = chunk_file(
+            Path::new("/v/N.org"),
+            "N.org",
+            &format!("#+title: T\n* Ein Abschnitt\n{german}\n"),
+            speaking!(&cfg),
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        assert_eq!(c.len(), 1, "one passage: {c:?}");
+        assert_eq!(c[0].lang, "de", "read out of the note, not taken from a constant");
     }
 
     #[test]

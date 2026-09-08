@@ -1,5 +1,5 @@
 {
-  "languages": ["en-US"],
+  "languages": [],
   "fold_diacritics": false,
   "blocks": {
     "src":     { "semantic": "placeholder", "lexical": true },
