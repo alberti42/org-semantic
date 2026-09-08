@@ -1785,17 +1785,42 @@ fn check_config(
     if prev == cfg.hash_for(target) {
         return Ok(());
     }
-    // A hash that moved while every setting reads the same means the *shape* of
-    // the policy changed, not its content: a setting exists now that did not
-    // when this index was written, and the stored copy is silent about it
-    // rather than disagreeing.  Saying "the stored policy differs" there sends
-    // someone hunting for an edit they never made.
-    let changed = previous_cfg.map(|old| cfg.differences(old, target)).unwrap_or_default();
-    let detail = match changed.as_slice() {
-        [] => "no setting reads differently, so this index predates one that now exists".into(),
-        cs => cs.iter().map(Change::to_string).collect::<Vec<_>>().join("; "),
+    // The hash disagrees.  Three states reach here and they are not one
+    // condition: the caller's settings moved, the policy this index was built
+    // under is not on disk to compare against, or every setting reads the same.
+    // They were one message, which said "no setting reads differently, so this
+    // index predates one that now exists" for the last two — a sentence that
+    // asserts nothing changed and then refuses, and that for a missing policy
+    // asserts something never checked.
+    let Some(old) = previous_cfg else {
+        // Nothing was compared, so no setting can be named.  Reachable by
+        // deleting the cached policy, and by a schema change that makes it
+        // unparseable: `resolve_config` then falls back to the defaults, which
+        // is a different policy from the one this index holds.
+        return Err(fault(
+            "config-drift",
+            serde_json::json!({ "target": what, "changed": [], "remedy": "reindex-full" }),
+            format!(
+                "the {what} index was built under a policy this vault no longer keeps a copy \
+                 of, so which setting moved cannot be named\n\
+                 {remedy}"
+            ),
+        ));
     };
+    let changed = cfg.differences(old, target);
+    if changed.is_empty() {
+        // Every setting reads the same, so the *caller's* policy did not move:
+        // what moved is how this binary builds the policy key.  That is our
+        // change, and `INDEX_VERSION` is the mechanism for a code change an
+        // index must be rebuilt for — so refusing here charged every user a
+        // full re-embed on any release that merely started keying on a setting,
+        // even where the new default reproduced the old behaviour exactly.
+        // Accepted instead, and the run records the new key so the manifest
+        // settles rather than taking this path for ever.
+        return Ok(());
+    }
     let names: Vec<&str> = changed.iter().map(|c| c.setting.as_str()).collect();
+    let detail = changed.iter().map(Change::to_string).collect::<Vec<_>>().join("; ");
     Err(fault(
         "config-drift",
         serde_json::json!({ "target": what, "changed": names, "remedy": "reindex-full" }),
@@ -3591,6 +3616,10 @@ struct LoadedIndex {
     /// The exclusion rules it was built under, so a run can tell whether they
     /// have moved even when no note has.
     exclude: u64,
+    /// The policy key it was built under, for the same reason: this binary may
+    /// key on a setting the one that wrote the index did not, and a run that
+    /// moves no note is still the run that has to record the new key.
+    config: u64,
     files: std::collections::BTreeMap<String, u64>,
     stamps: std::collections::BTreeMap<String, Stamp>,
     by_path: std::collections::HashMap<String, Vec<usize>>,
@@ -3758,6 +3787,7 @@ fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
         chunks,
         vectors,
         exclude: manifest.exclude,
+        config: manifest.config,
         files: manifest.files,
         stamps: manifest.stamps,
         by_path,
@@ -4588,9 +4618,22 @@ fn cmd_index_lexical(
     // Found by driving it, not by a test: the run said it had nothing to do
     // and was right about the notes.
     let rerecorded = old.as_ref().is_some_and(|m| m.exclude != exclude);
+    // And so is a policy key that moved while every setting reads the same:
+    // this binary keys on something the binary that wrote the index did not.
+    // The check in front of the run accepts that rather than demanding a
+    // rebuild, so this run is the one that has to write the new key down --
+    // otherwise every later run reaches the same accepting path and the record
+    // never settles.  Same shape as the two terms above, and the same reason.
+    let repolicied = old.as_ref().is_some_and(|m| m.config != cfg.hash_for(Target::Lexical));
     if !rebuilding && scan.stale.is_empty() && scan.dropped.is_empty() {
-        if restamped || rerecorded {
-            let why = if restamped { "the stamps" } else { "the exclusion list" };
+        if restamped || rerecorded || repolicied {
+            let why = if restamped {
+                "the stamps"
+            } else if rerecorded {
+                "the exclusion list"
+            } else {
+                "the policy"
+            };
             writeln!(j.out, "no chunks to write; refreshing {why}")?;
             save_lex_manifest(
                 &dir,
@@ -5014,11 +5057,19 @@ fn cmd_index(
     // Found by driving it, not by a test: the run said it had nothing to do
     // and was right about the notes.
     let rerecorded = old.as_ref().is_some_and(|ix| ix.exclude != exclude);
+    // And so is a policy key that moved while every setting reads the same:
+    // this binary keys on something the binary that wrote the index did not.
+    // The check in front of the run accepts that rather than demanding a
+    // rebuild, so this run is the one that has to write the new key down --
+    // otherwise every later run reaches the same accepting path and the record
+    // never settles.  Same shape as the two terms above, and the same reason.
+    let repolicied = old.as_ref().is_some_and(|ix| ix.config != cfg.hash_for(Target::Semantic));
     if pending.is_empty()
         && stale.is_empty()
         && dropped == 0
         && !restamped
         && !rerecorded
+        && !repolicied
         && old.is_some()
     {
         writeln!(j.out, "nothing changed; index left as it is")?;
@@ -8495,6 +8546,115 @@ mod tests {
             "order is not a difference: {:?}",
             reordered.differences(&old, t)
         );
+    }
+
+    /// Every setting reads the same, so the caller's policy did not move: what
+    /// moved is how this binary builds the key.  That is our change, and
+    /// refusing it charged a full re-embed for a release that merely started
+    /// keying on a setting whose default reproduced the old behaviour.
+    ///
+    /// It also said so in as many words — "no setting reads differently, so this
+    /// index predates one that now exists" — which asserts nothing changed and
+    /// then refuses.
+    #[test]
+    fn a_key_that_moved_while_every_setting_agrees_is_accepted() {
+        let cfg = Config::default();
+        let t = Target::Semantic;
+        let stored = cfg.hash_for(t).wrapping_add(1);
+        assert_ne!(
+            stored,
+            cfg.hash_for(t),
+            "the stored key has to disagree for this to mean anything"
+        );
+        check_config(Some(stored), &cfg, Some(&cfg), t, CLI_REMEDY)
+            .expect("the settings agree, so there is nothing to refuse");
+    }
+
+    /// And with no copy of the policy to compare against, nothing was compared:
+    /// the empty list of differences means "not asked", not "nothing moved".
+    /// Reachable by deleting the cached policy, which is a file a reader may
+    /// well decide is disposable.
+    #[test]
+    fn a_policy_no_longer_on_disk_is_refused_without_naming_a_setting() {
+        let cfg = Config::default();
+        let t = Target::Lexical;
+        let e = check_config(Some(cfg.hash_for(t).wrapping_add(1)), &cfg, None, t, CLI_REMEDY)
+            .expect_err("nothing is known about the difference, so it cannot be waved through");
+        let msg = e.to_string();
+        assert!(msg.contains("no longer keeps a copy"), "says what is missing: {msg}");
+        assert!(
+            !msg.contains("no setting reads differently"),
+            "and does not claim a comparison it never made: {msg}"
+        );
+        let f = e.downcast_ref::<Fault>().expect("drift is a labelled fault");
+        assert_eq!(f.data["changed"], serde_json::json!([]), "no setting can be named");
+    }
+
+    /// A key that moved on its own moves no note, so every other term in each
+    /// run's "did anything change" test stays empty.  Without a term of its own
+    /// the run returns early, the record keeps the old key, and every later run
+    /// reaches the accepting path again — the record never settles.
+    ///
+    /// The same failure the exclusion list had, and found the same way.
+    #[test]
+    fn a_policy_key_that_moved_alone_is_written_down() {
+        let v = scratch("policy-key");
+        let a = note(&v, "alpha");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let lex = |full| {
+            cmd_index_lexical(
+                &v,
+                full,
+                false,
+                &lang,
+                false,
+                &cfg,
+                &mut Journal::quiet(),
+                &Cancel::default(),
+            )
+            .unwrap()
+        };
+        lex(true);
+        seed(&v, &[a.as_str()]);
+
+        // What a binary keying on one setting more would have left behind: the
+        // policy on disk is current, and the record's key is not.
+        let sem_path = sem(&v).join("manifest.json");
+        let lex_path = lex_manifest_path(&state_dir(&v));
+        let bend = |path: &Path| {
+            let mut m: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            m["config"] = serde_json::json!(1u64);
+            fs::write(path, serde_json::to_vec(&m).unwrap()).unwrap();
+        };
+        bend(&sem_path);
+        bend(&lex_path);
+
+        cmd_index(
+            &v,
+            false,
+            false,
+            model_named(DEFAULT_MODEL).unwrap(),
+            &cfg,
+            &mut Journal::quiet(),
+            None,
+            &Cancel::default(),
+        )
+        .unwrap();
+        lex(false);
+
+        let semantic: Manifest = serde_json::from_slice(&fs::read(&sem_path).unwrap()).unwrap();
+        assert_eq!(
+            semantic.config,
+            cfg.hash_for(Target::Semantic),
+            "the semantic run wrote the new key down"
+        );
+        let lexical: LexManifest = serde_json::from_slice(&fs::read(&lex_path).unwrap()).unwrap();
+        assert_eq!(lexical.config, cfg.hash_for(Target::Lexical), "and so did the lexical one");
+
+        // And it settles: with the key recorded, there is nothing left to do.
+        assert!(lex(false).unchanged, "the next run has nothing to say");
     }
 
     /// The label rides alongside the sentence, never inside it.
