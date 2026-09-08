@@ -72,6 +72,22 @@ inside `.org-semantic/`. The run names it and says where it belongs.
 
 ### Added
 
+- **Every release asset now carries a build attestation.** A signed statement
+  that this file was produced by this repository's release workflow, at a named
+  commit — checked with the `gh` command line and no account:
+
+  ```
+  gh attestation verify org-semantic-0.6.0-bin-x86_64-linux.tar.gz \
+      --repo alberti42/org-semantic
+  ```
+
+  `SHA256SUMS` says a download is intact and nothing about where it came from,
+  since it is published beside the files it describes. An attestation is kept in
+  GitHub's own store instead, so replacing an asset does not let anyone replace
+  its provenance. It matters most for the Linux and Windows binaries, which
+  carry no signature of their own; the macOS one is Developer ID signed and
+  notarized as before.
+
 - **Files and folders can be kept out of the index.** Name them in
   `.org-semantic-ignore`, at the root of your notes, one rule per line. The file
   is read as a subset of `.gitignore`, with two differences: the labels

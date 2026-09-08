@@ -47,8 +47,15 @@ on:
         default: 'Unreleased'
         required: true
 
+# `contents` publishes the release.  The other two are what let GitHub sign a
+# provenance attestation for every asset: `id-token` mints the OIDC token that
+# proves which workflow is asking, and `attestations` writes the result to the
+# repository's attestation store.  Both are needed, and neither is granted by
+# default.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   TEAM_ID: 9V3X7C8VCK
@@ -179,6 +186,12 @@ jobs:
             | gzip -9n > "org-semantic-$SECTION-src.tar.gz"
           tar -tzf "org-semantic-$SECTION-src.tar.gz" | wc -l
           ls -l "org-semantic-$SECTION-src.tar.gz"
+      # The source archive gets one too.  It is reproducible from the tag, so a
+      # reader can already rebuild it and compare -- but that requires having
+      # the repository, and an attestation does not.
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: org-semantic-*-src.tar.gz
       - uses: actions/upload-artifact@v5
         with:
           name: source
@@ -341,6 +354,32 @@ jobs:
             *)       tar czf "$ASSET" "$BIN" ;;
           esac
           ls -l "$ASSET"
+
+      # **`SHA256SUMS` is integrity; this is origin.**  The checksum file is
+      # published beside the assets it describes, so whoever could replace a
+      # binary could replace the checksum with it: it says a download was not
+      # corrupted, and nothing about where the download came from.
+      #
+      # An attestation is a signed statement that *this* workflow, at *this*
+      # commit, in *this* repository produced these bytes.  GitHub keeps it in
+      # its own store rather than as a release asset, which is the point --
+      # swapping an asset does not let anyone swap its provenance.  Anyone can
+      # then check a download:
+      #
+      #     gh attestation verify <file> --repo alberti42/org-semantic
+      #
+      # It matters most for Linux and Windows, which carry no signature of their
+      # own; the macOS binary is Developer ID signed and notarized as well.
+      #
+      # **Here rather than in the `release` job, and that is the load-bearing
+      # part.** `release` is the one job a dry run does not run, so an
+      # attestation step there could never be tested before a tag existed. In
+      # the job that built the file it is exercised by every dry run, and it
+      # names the job that actually produced the bytes rather than a later one
+      # that collected them.
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ env.ASSET }}
 
       - name: Clean up the keychain
         if: always() && runner.os == 'macOS'
