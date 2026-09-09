@@ -10,8 +10,9 @@ EMACS ?= emacs
 # In dependency order: one Emacs compiles the whole list, so a file that
 # requires an earlier one picks up the .elc just produced.
 ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
-	lisp/org-semantic-results.el \
-	test/org-semantic-tests.el test/org-semantic-results-tests.el
+	lisp/org-semantic-results.el lisp/org-semantic-doctor.el \
+	test/org-semantic-tests.el test/org-semantic-results-tests.el \
+	test/org-semantic-doctor-tests.el
 
 all: build
 
@@ -29,6 +30,7 @@ test-elisp:
 	$(EMACS) --batch --no-init-file -L lisp -L test -l ert \
 		-l test/org-semantic-tests.el \
 		-l test/org-semantic-results-tests.el \
+		-l test/org-semantic-doctor-tests.el \
 		-f ert-run-tests-batch-and-exit
 
 lint: lint-rust lint-elisp

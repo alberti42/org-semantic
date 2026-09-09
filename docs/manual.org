@@ -513,7 +513,7 @@ here --- and =S= is no more than =s= with the =dir:= predicate of
 there like anything else typed. The =C-c n= prefix is what org-roam's own manual
 suggests for its commands, and these four compose with it rather than colliding
 --- org-roam uses =f=, =i=, =l=, =g=, =c= and =j=, and none of those. Everything else ---
-~org-semantic-cancel~, ~org-semantic-show-status~, ~org-semantic-show-memory~,
+~org-semantic-cancel~, ~org-semantic-doctor~, ~org-semantic-show-memory~,
 ~org-semantic-restart~, ~org-semantic-quit~ --- is rare enough to leave on =M-x=.
 
 That last line is the one worth explaining, since it is off by default and easy
@@ -868,9 +868,9 @@ separate question with its own answer.
 =l= answers this once by word, and leaves the buffer's own ranking alone; if you
 would rather always search that way, say so in
 ~org-semantic-results-ranking~. =q= or =C-g= declines, which costs nothing: =R=
-indexes the vault whenever you like, and =M-x org-semantic-show-status= says
-which models are cached before you ask --- one it lists as absent is one that
-would refuse.
+indexes the vault whenever you like, and =M-x org-semantic-doctor= says which
+models are cached before you ask --- one it reports as not downloaded is one
+that would refuse.
 
 Each key is its label's own initial, so the menu is read rather than learnt: the
 same call is =d= where it is offered as "Download it" and =b= where it is
@@ -2390,7 +2390,7 @@ From Emacs, ~org-semantic-vault-root~ names the *vault* --- =~/state/notes= in t
 example above --- because that is what every request is keyed by. Nothing else
 changes: a hit already comes back with the absolute file it is in, and
 ~org-semantic-auto-reindex-mode~ asks whether a saved file is in the **notes**, so
-saving one still reindexes. ~M-x org-semantic-show-status~ names both.
+saving one still reindexes. ~M-x org-semantic-doctor~ names both.
 
 *Two things live outside the vault*, both downloaded once and shared by every
 vault: the embedding model, in =$XDG_CACHE_HOME/fastembed=, and the language

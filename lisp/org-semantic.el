@@ -1498,45 +1498,6 @@ gone, so ask this before searching."
    "status"
    (org-semantic--params :vault (or vault (org-semantic-vault-or-error)))))
 
-;;;###autoload
-(defun org-semantic-show-status (&optional vault)
-  "Say in the echo area what VAULT has."
-  (interactive)
-  (let* ((vault (or vault (org-semantic-vault-or-error)))
-         (status (org-semantic-status vault))
-         (models (append (plist-get status :semantic) nil)))
-    (message "%s%s: semantic [%s], lexical %s, %s%s%s"
-             (abbreviate-file-name vault)
-             ;; Only when they differ.  The vault directory then does not
-             ;; say which notes are indexed.
-             (let ((notes (plist-get status :notes)))
-               (if (and notes (not (equal notes vault)))
-                   (format " (notes in %s)" (abbreviate-file-name notes))
-                 ""))
-             ;; A model whose weights are gone is named as such.  The index
-             ;; is there and cannot be searched, which otherwise looks the
-             ;; same as a working one until a search refuses.
-             (mapconcat (lambda (m)
-                          (if (org-semantic-true-p (plist-get m :cached))
-                              (plist-get m :name)
-                            (concat (plist-get m :name) " (not downloaded)")))
-                        models " ")
-             (if (org-semantic-true-p (plist-get status :lexical)) "yes" "no")
-             (if (org-semantic-true-p (plist-get status :loaded))
-                 "resident" "not loaded")
-             (if (org-semantic-true-p (plist-get status :indexing))
-                 ", indexing" "")
-             ;; Only when the vault has rules at all.  A vault that excludes
-             ;; nothing is the ordinary case, and saying so every time would
-             ;; make the line longer for no reader.
-             (let ((rules (or (plist-get status :excludeRules) 0)))
-               (cond ((zerop rules) "")
-                     ((org-semantic-true-p (plist-get status :excludeStale))
-                      (format ", %d exclusion rule%s (an index is behind them)"
-                              rules (if (= rules 1) "" "s")))
-                     (t (format ", %d exclusion rule%s" rules
-                                (if (= rules 1) "" "s"))))))))
-
 (defun org-semantic-memory ()
   "Return what the process is holding, in bytes.
 

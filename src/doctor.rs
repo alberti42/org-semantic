@@ -41,6 +41,11 @@ struct Finding {
     /// Which index this is about, where only one of them is.
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<&'static str>,
+    /// The model to fetch, when the remedy is to download one. A client
+    /// cannot take it from the sentence, and a vault may have an index under
+    /// more than one model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 /// One semantic index, which is one model's.
@@ -139,6 +144,7 @@ impl Report {
                     remedy: Some("edit"),
                     file: Some(vault_file(vault).display().to_string()),
                     target: None,
+                    model: None,
                 });
                 None
             }
@@ -169,6 +175,7 @@ impl Report {
                 remedy: None,
                 file: None,
                 target: None,
+                model: None,
             });
         }
 
@@ -185,6 +192,7 @@ impl Report {
                 remedy: Some("index"),
                 file: None,
                 target: None,
+                model: None,
             });
         }
         check_drift(vault, &state, &excludes, &policy, &semantic, &lexical, &mut f);
@@ -328,6 +336,7 @@ fn report_unreadable_files(
             remedy: Some("edit"),
             file: notes.and_then(|n| user_file(vault, n, name)).map(|p| p.display().to_string()),
             target: None,
+            model: None,
         });
     };
     if let Some(Err(e)) = excludes {
@@ -361,6 +370,7 @@ fn describe_semantic(vault: &Path, f: &mut Vec<Finding>) -> Vec<SemanticIndex> {
                 remedy: Some("reindex-full"),
                 file: None,
                 target: Some("semantic"),
+                model: None,
             });
         }
         if !cached {
@@ -375,6 +385,7 @@ fn describe_semantic(vault: &Path, f: &mut Vec<Finding>) -> Vec<SemanticIndex> {
                 remedy: Some("download"),
                 file: None,
                 target: Some("semantic"),
+                model: Some(m.name.to_string()),
             });
         }
         out.push(SemanticIndex {
@@ -406,6 +417,7 @@ fn describe_lexical(state: &Path, f: &mut Vec<Finding>) -> Option<LexicalIndex> 
             remedy: Some("reindex-full"),
             file: None,
             target: Some("lexical"),
+            model: None,
         });
     }
     Some(LexicalIndex {
@@ -447,6 +459,7 @@ fn check_drift(
             remedy: Some("reindex-full"),
             file: None,
             target: Some(target),
+            model: None,
         });
     };
     let list_moved = |target: &'static str, f: &mut Vec<Finding>| {
@@ -460,6 +473,7 @@ fn check_drift(
             remedy: Some("index"),
             file: None,
             target: Some(target),
+            model: None,
         });
     };
     for s in semantic.iter().filter(|s| s.readable) {
@@ -509,6 +523,7 @@ fn report_running(vault: &Path, state: &Path, f: &mut Vec<Finding>) {
             remedy: Some("wait"),
             file: None,
             target: None,
+            model: None,
         });
     } else {
         f.push(Finding {
@@ -521,6 +536,7 @@ fn report_running(vault: &Path, state: &Path, f: &mut Vec<Finding>) {
             remedy: None,
             file: None,
             target: None,
+            model: None,
         });
     }
 }
