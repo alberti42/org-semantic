@@ -97,6 +97,14 @@ is no longer true.
   English alone, with its German and Italian notes stemmed wrongly. Nothing
   failed and `lang:de` still answered, because the label is stored separately.
 
+- **A failure reported in Emacs now says what is wrong, not only which file.** A
+  mistake in `.org-semantic-ignore` — a misspelt `[semantic]` label, say — was
+  reported as `in /…/.org-semantic-ignore` and nothing else, so there was no way
+  to tell which line was wrong or why. The line number and the reason were
+  produced all along and dropped on the way to the editor. Every failure the
+  server reports carries its full reason now. The command line was never
+  affected: it printed the whole thing.
+
 ## [0.6.0] — 2026-09-08
 
 Binary version **0.5.0**, and this one has to be downloaded. An older binary
