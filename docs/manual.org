@@ -2588,8 +2588,10 @@ If you want one of these, or something not listed here, open an issue on the
   connector expressed. It is left out until there is evidence, on a real vault,
   that one combined list beats choosing the right search.
 - *Editing a note in the results buffer* :: The buffer is read-only. =RET= opens
-  the note at the line under point, and =f= shows each hit in its note as point
-  arrives, so the note is one key away and editing it there is enough.
+  the note at the line under point and goes there. =f= (/follow/) instead shows
+  each passage in its note as point moves across the results, and leaves point
+  in the list --- so the note is one =C-x o= away. Editing it in that window
+  achieves the goal most of the time.
 - *One search over two or more vaults* :: A search takes one vault. Two vaults
   means two searches.
 
