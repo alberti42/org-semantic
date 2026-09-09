@@ -87,7 +87,21 @@ is no longer true.
 - **`M-x org-semantic-show-status` is gone; use `M-x org-semantic-doctor`.** The
   old command printed a machine reply at a person — seven facts on one
   echo-area line, in the reply's own words, and nothing about what to do. The
-  `status` method it read is unchanged and still there for clients.
+  `status` method it read is still there for clients, with one field changed;
+  see below.
+
+- **`status` no longer reports an exclusion list it could not read.** Its
+  `excludeRules` answered `0` for an `.org-semantic-ignore` that will not
+  parse, so a vault excluding nothing and a vault whose rules are a mistake
+  read the same — and the second is the one nobody can see. That field and
+  `excludeStale` beside it are now **absent** in that case, which is the
+  honest answer: absent means unknown, not zero.
+
+  This matters only if you drive the server yourself. A client that reads
+  `excludeRules` as a number must treat a missing one as "unknown" rather than
+  as zero. `status` deliberately does not say *why* the file will not read: it
+  is asked on every save, and a reason is a sentence for a person, so ask
+  `doctor` for that.
 
 - **A vault with no language configured now has every note classified.** The
   default was `["en-US"]`, and a list of one does not mean "probably this
