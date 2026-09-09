@@ -337,6 +337,30 @@ fn a_condition_worth_acting_on_arrives_labelled() {
     assert_eq!(err(3)["data"]["kind"], "no-index", "a missing vault has no semantic index");
 }
 
+/// A message must carry the reason and not only the file it was reading.
+///
+/// The reader has one sentence and no terminal. `anyhow` puts the file in an
+/// outer layer and the reason in an inner one, and printing the outer layer
+/// alone gave "in /…/.org-semantic-ignore" — true, and no help at all.
+#[test]
+fn a_failure_says_why_and_not_only_where() {
+    let v = vault("bad-rule", 1);
+    std::fs::write(std::path::Path::new(&v).join(".org-semantic-ignore"), "[semnatic]\ncode/\n")
+        .unwrap();
+    let msgs = talk(
+        &[json!({ "jsonrpc": "2.0", "id": 4, "method": "index",
+                  "params": { "vault": v, "mode": "lexical" } })],
+        None,
+    );
+    let m = msgs.iter().find(|m| m["id"] == 4).expect("a reply")["error"]["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(m.contains(".org-semantic-ignore"), "it says which file: {m}");
+    assert!(m.contains("line 1"), "and which line: {m}");
+    assert!(m.contains("is not a group label"), "and what is wrong with it: {m}");
+}
+
 /// What the indexer found but survived, carried back with the reply rather than
 /// written to a stderr nobody correlates with a request.
 #[test]

@@ -1031,13 +1031,17 @@ fn replied(id: RequestId, done: Result<serde_json::Value>, j: &mut Journal) -> R
 /// A `Fault` adds LSP's third member, `data`, carrying the label and whatever
 /// that label promises. Its absence is meaningful: an error with no `data` is
 /// one to show, not one to act on.
+///
+/// The message is the whole chain of causes, in `{:#}`, and not the outermost
+/// layer alone. A reader has only this sentence: the layer that says which file
+/// was being read names no reason, and the reason names no file.
 fn failed(id: RequestId, e: &anyhow::Error) -> Response {
     let labelled = e.downcast_ref::<Fault>();
     Response {
         id,
         response_result: Err(ResponseError {
             code: labelled.map_or(-32000, Fault::code),
-            message: e.to_string(),
+            message: format!("{e:#}"),
             data: labelled.and_then(|f| serde_json::to_value(f).ok()),
         }),
     }
