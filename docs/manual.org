@@ -427,6 +427,8 @@ notes by meaning, and a lexical one, which finds them by word.
 
   tokens <vault> [limit] [--model NAME]     token lengths, and what would truncate
 
+  doctor <vault> [--json]                   what the vault has, and what is wrong
+
   models [vault]                            embedding models, and which are built
 
   serve                                     JSON-RPC 2.0 over stdio, for an editor

@@ -15,6 +15,7 @@
 //! database — a vault of a thousand notes is a few megabytes of vectors, and a
 //! brute-force dot product over that is exact and takes under a millisecond.
 
+mod doctor;
 mod serve;
 
 use anyhow::{anyhow, Context, Result};
@@ -605,6 +606,8 @@ notes by meaning, and a lexical one, which finds them by word.
          different --config would do, without building anything.
 
   tokens <vault> [limit] [--model NAME]     token lengths, and what would truncate
+
+  doctor <vault> [--json]                   what the vault has, and what is wrong
 
   models [vault]                            embedding models, and which are built
 
@@ -6324,6 +6327,27 @@ fn main() -> Result<()> {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        // What a vault has and what is wrong with it, for a person. `status`
+        // over the wire answers what it has, for a program; this is the other
+        // question and it may cost more to answer.
+        Some("doctor") => {
+            let vault = vault_arg(&args, "doctor <vault> [--json]")?;
+            reject_unknown_flags(&args, 3, &["--json"])?;
+            let json = args.iter().skip(3).any(|a| a == "--json");
+            let report = doctor::Report::on(vault);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                doctor::print(&report, &mut io::stdout())?;
+            }
+            // A problem is reported by the exit status too, so a script or a
+            // cron job can act on it without reading the JSON.
+            if report.healthy() {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
         Some("models") => {
             reject_unknown_flags(&args, 2, &[])?;
             // With a vault, say which of them are actually built for it.
@@ -8267,6 +8291,87 @@ mod tests {
     /// flake.
     ///
     /// This test reads its own source, because there is no other way to check it.
+    /// Build the word index of a vault, which needs no embedding model.
+    fn lexical_index(v: &Path) {
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        cmd_index_lexical(
+            v,
+            true,
+            false,
+            &lang,
+            false,
+            &cfg,
+            &mut Journal::quiet(),
+            &Cancel::default(),
+        )
+        .unwrap();
+    }
+
+    /// A broken configuration file is named, with its reason, and nothing
+    /// about the vault is claimed that could not be worked out.
+    ///
+    /// This is the whole point of the command: the same mistake used to be
+    /// reported as `0 exclusion rules`, which reads as a healthy vault.
+    #[test]
+    fn the_doctor_names_a_file_it_cannot_read() {
+        let v = scratch("doctor-broken");
+        note(&v, "alpha");
+        fs::write(v.join(IGNORE_FILE), "[semnatic]\ncode/\n").unwrap();
+        let r = doctor::Report::on(&v);
+        assert!(!r.healthy(), "a file that will not read is a problem");
+        let said = doctor::rendered(&r);
+        assert!(said.contains("line 1"), "the line is named: {said}");
+        assert!(said.contains("is not a group label"), "and the reason: {said}");
+        assert!(said.contains("will not read"), "and the file is listed as unread: {said}");
+        // The count is not guessed at, which is what `status` used to do.
+        assert!(!said.contains("0 rules"), "no count is invented: {said}");
+    }
+
+    /// A vault nothing is wrong with says so, and says what it has.
+    #[test]
+    fn the_doctor_reports_a_healthy_vault_as_healthy() {
+        let v = scratch("doctor-healthy");
+        note(&v, "alpha");
+        fs::write(v.join(IGNORE_FILE), "archive/\n").unwrap();
+        lexical_index(&v);
+        let r = doctor::Report::on(&v);
+        let said = doctor::rendered(&r);
+        assert!(r.healthy(), "nothing is wrong with it: {said}");
+        assert!(said.contains("Nothing to report"), "and it says so: {said}");
+        assert!(said.contains("1 rule"), "the rules are counted: {said}");
+        assert!(said.contains("1 .org file"), "and the notes are: {said}");
+    }
+
+    /// An index behind the exclusion list is reported, and the remedy is the
+    /// cheap one: a plain incremental run, never `--full`.
+    #[test]
+    fn the_doctor_reports_an_index_behind_the_exclusion_list() {
+        let v = scratch("doctor-drift");
+        note(&v, "alpha");
+        note(&v, "beta");
+        lexical_index(&v);
+        assert!(doctor::Report::on(&v).healthy(), "built under the list it now holds");
+        fs::write(v.join(IGNORE_FILE), "beta.org\n").unwrap();
+        let said = doctor::rendered(&doctor::Report::on(&v));
+        assert!(said.contains("different exclusion list"), "it is behind: {said}");
+        assert!(said.contains("--both"), "and the remedy is an incremental run: {said}");
+        assert!(!said.contains("--full"), "which is not a rebuild: {said}");
+    }
+
+    /// A vault whose notes cannot be located still reports, because that is
+    /// exactly when somebody asks.
+    #[test]
+    fn the_doctor_reports_on_a_vault_it_cannot_resolve() {
+        let v = scratch("doctor-nowhere");
+        fs::write(v.join(VAULT_FILE), r#"{"notes":"/no/such/place"}"#).unwrap();
+        let r = doctor::Report::on(&v);
+        assert!(!r.healthy());
+        let said = doctor::rendered(&r);
+        assert!(said.contains("Downloads"), "the rest of the report still answers: {said}");
+        assert!(said.contains("not known"), "and the notes are not claimed: {said}");
+    }
+
     #[test]
     fn no_two_tests_share_a_scratch_directory() {
         let src = include_str!("main.rs");
