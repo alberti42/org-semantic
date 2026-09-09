@@ -2430,6 +2430,68 @@ re-embedded only if its content actually differs. Deleted notes are dropped.
 a timestamp-preserving restore, =rsync --times=, =touch -r=. At 0.09 s it is
 cheap enough to run on every Emacs start.
 
+** When something is wrong
+:PROPERTIES:
+:CUSTOM_ID: doctor
+:END:
+=org-semantic doctor <vault>= says what a vault has and what is wrong with it,
+in one report. From Emacs it is =M-x org-semantic-doctor=, which draws the same
+thing in a buffer.
+
+#+begin_example
+Vault  ~/org/Work
+Index  ~/org/Work/.org-semantic
+Found  951 .org files
+
+Built
+  semantic  e5-small        949 notes
+  lexical   de, en, it      951 notes
+
+Configuration
+  .org-semantic-config.json   3 settings
+  .org-semantic-ignore        will not read
+  .org-semantic-vault.json    absent
+
+Downloads
+  models      ~/.cache/fastembed  (470 MB)
+  classifier  ~/.cache/org-semantic/lid.176.ftz  (downloaded)
+
+Problems
+  in ~/org/Work/.org-semantic-ignore: line 1: `[semnatic]` is not a group
+  label; expected `[both]`, `[semantic]` or `[lexical]`
+    run: org-semantic index ~/org/Work --both
+#+end_example
+
+The facts come first because a problem only makes sense beside them. Which
+indexes exist, where the notes are, what each of the three configuration files
+holds, and where the gigabytes are --- that last one being the only thing about
+a vault's search that no file in the vault says.
+
+*Absent is stated, never left out.* Two of the three configuration files are
+optional, so a line saying a file is not there is what answers "why does my
+setting do nothing".
+
+Then two groups, never one list. *Problems* make a search answer wrongly or not
+at all: a file that will not read, an index built under settings that have since
+changed, a model that has an index here and is no longer downloaded. *Worth
+knowing* breaks nothing and explains a report that looks wrong for a minute ---
+a run going on right now, or a lock left by one that was interrupted.
+
+In the buffer, =RET= on a problem does what it needs: it opens the file that
+will not read, or starts the run that brings an index up to date. The line under
+each problem says which. =g= asks again, which is what to press after fixing
+something.
+
+For a script, =--json= gives the same report with each finding labelled, and the
+exit status is 1 when anything is wrong:
+
+#+begin_src sh
+org-semantic doctor ~/org/Work --json | jq '.findings[] | .kind'
+#+end_src
+
+It reports on a vault that is broken, which is when you would ask. A vault whose
+notes cannot even be located says so and then says everything else it knows.
+
 * Design
 :PROPERTIES:
 :CUSTOM_ID: design

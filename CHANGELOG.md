@@ -68,7 +68,26 @@ indexes once: the language written onto every passage can change, so an index
 built by 0.5.0 is refused and rewritten rather than left saying something that
 is no longer true.
 
+### Added
+
+- **`org-semantic doctor <vault>`, and `M-x org-semantic-doctor`, say what a
+  vault has and what is wrong with it.** One report: where the notes are, what
+  is built, what each of the three configuration files holds, where the
+  downloads live — and then every problem, with what to do about it. In Emacs it
+  is a buffer, and `RET` on a problem does what it needs: open the file that
+  will not read, or start the run that brings an index up to date. `--json`
+  gives a script the same report, and the exit status is 1 when anything is
+  wrong.
+
+  It reports on a vault that is broken, which is when you would ask: a vault
+  whose notes cannot even be located still says everything else it knows.
+
 ### Changed
+
+- **`M-x org-semantic-show-status` is gone; use `M-x org-semantic-doctor`.** The
+  old command printed a machine reply at a person — seven facts on one
+  echo-area line, in the reply's own words, and nothing about what to do. The
+  `status` method it read is unchanged and still there for clients.
 
 - **A vault with no language configured now has every note classified.** The
   default was `["en-US"]`, and a list of one does not mean "probably this
