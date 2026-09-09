@@ -8258,6 +8258,68 @@ mod tests {
         }
     }
 
+    /// Every method the server answers is in the manual's table, and no method
+    /// is listed that it does not answer.
+    ///
+    /// Both directions are quiet. A method the table omits is one a client
+    /// author never learns exists -- `doctor` and `download` were both absent,
+    /// one of them for a whole release. A method the table names and the server
+    /// does not answer sends that author to write a call that comes back
+    /// "unknown method".
+    ///
+    /// The names are read out of the dispatch itself, so adding an arm to it is
+    /// what fails this rather than remembering to.
+    #[test]
+    fn every_method_is_in_the_manual() {
+        let org = include_str!("../docs/manual.org");
+        let serve = include_str!("serve.rs");
+
+        // The dispatch arms: `"name" => server.something(...)`. Mode strings
+        // (`"both"`, `"lexical"`) are matched to a tuple and so do not appear.
+        let mut answered: Vec<&str> = serve
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('"'))
+            .filter_map(|r| r.split_once("\" =>"))
+            .filter(|(_, tail)| tail.contains("server.") || tail.contains("break"))
+            .map(|(name, _)| name)
+            .collect();
+        // Answered on the loop rather than in that match, and part of the
+        // protocol either way.
+        answered.extend(["initialize", "initialized", "shutdown", "reload"]);
+        answered.sort_unstable();
+        answered.dedup();
+        assert!(answered.len() > 8, "the dispatch must have been read: {answered:?}");
+
+        // Only the rows of the table under `Methods:`. Scoped to that one
+        // table because several others in the manual also open their first
+        // column with `=name=`, and comparing against all of them would make
+        // the second direction below meaningless.
+        let table = org.split("\nMethods:\n").nth(1).expect("the manual has no Methods: table");
+        let listed: Vec<&str> = table
+            .lines()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'))
+            .filter_map(|l| l.trim().strip_prefix("| ="))
+            .filter_map(|r| r.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(listed.len() > 8, "the table must have been read: {listed:?}");
+
+        for m in &answered {
+            // `initialized` is the notification that finishes the handshake and
+            // returns nothing, so the table covers it under `initialize`.
+            if *m == "initialized" {
+                continue;
+            }
+            assert!(listed.contains(m), "the server answers `{m}` and the manual does not list it");
+        }
+        for m in &listed {
+            assert!(
+                answered.contains(m),
+                "the manual lists `{m}` and the server does not answer it"
+            );
+        }
+    }
+
     /// Every warning kind is named in the manual, and no kind is named that has
     /// gone.
     ///

@@ -1069,13 +1069,36 @@ Methods:
 | =initialize=      | =capabilities=                                                                           | =serverInfo= --- the binary version of this process |
 | =search=          | =vault=, =query=, =k=, =perFile=, =mergeBySection=, =mode= (=semantic= or =lexical=), =model=, =any= | ={"hits": [...], "indexing": false}= |
 | =index=           | =vault=, =mode= (=semantic=, =lexical= or =both=), =full=, =rehash=, =model= | what each index did, as numbers --- and [[#progress][=$/progress=]] while it runs |
-| =status=          | =vault=                                                                                  | which indexes this vault has, whether it is resident, whether one is being built |
+| =status=          | =vault=                                                                                  | what this vault has, for a client deciding what to offer --- the fields are below |
+| =doctor=          | =vault=                                                                                  | what this vault has and [[#doctor][what is wrong with it]], as sentences for a person |
+| =download=        | =model=                                                                                  | fetch that model's weights, and nothing else  |
 | =reload=          | ---                                                                                      | drop cached indexes after a rebuild           |
 | =close=           | =vault=                                                                                  | forget that vault; how many entries went      |
 | =memory=          | ---                                                                                      | what this process holds, in bytes             |
 | =$/cancelRequest= | =id=                                                                                     | --- (a notification; [[#cancelling][stops that run]]) |
 | =shutdown=        | ---                                                                                      | stop accepting work, and wait for a run in flight |
 | =exit=            | ---                                                                                      | end the process                               |
+
+*=status= is a machine reply, and =doctor= is the one written for a person.*
+Every field below is a fact for a client to branch on --- whether to offer a
+search, whether to say the list is a version behind, whether a download is
+needed first. None of it is phrased to be read aloud, which is why there is no
+command that prints it: =M-x org-semantic-doctor= answers the same questions in
+sentences, and adds what to do about each one.
+
+| field           | means                                                                        |
+|-----------------+------------------------------------------------------------------------------|
+| =vault=         | the vault asked about, as the server resolved it                             |
+| =notes=         | where its notes are --- the vault itself unless [[#index-elsewhere][=.org-semantic-vault.json=]] says otherwise |
+| =semantic=      | one entry per model with an index, each carrying =name=, =dim=, =about= and =cached= |
+| =cached=        | whether that model is still downloaded here. An index outlives its model, and a search refuses when it is gone |
+| =lexical=       | whether the word index exists                                                |
+| =loaded=        | whether this vault is resident, so the next search is warm rather than a model load |
+| =indexing=      | whether a run is going, *in any process* --- a shell or another Emacs counts |
+| =excludeRules=  | how many rules =.org-semantic-ignore= holds. Absent when that file will not read, and absence is the answer: the count used to read =0=, which is also what a vault excluding nothing says |
+| =excludeStale=  | whether any index was built under a different list. Absent for the same reason |
+
+Ask =doctor= instead when a person is going to read it.
 
 Both modalities take the same request and return the same shape, so an editor can
 offer one command with a toggle and never branch on the reply. Each hit carries
