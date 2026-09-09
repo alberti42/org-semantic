@@ -2542,50 +2542,55 @@ another vault is a different argument, not a different configuration.
 :PROPERTIES:
 :CUSTOM_ID: planned
 :END:
-Reading org notes well is the primary goal of this tool. So, the focus of future
-work is on extending support for org notes. However, supporting other file
-formats will also be considered.
+Reading org notes well is the goal of this tool, so most of the future work
+extends what it does with org. Other file formats are under consideration too.
 
-- *Search todos by priority* :: org's priority cookie (e.g., =[#A]=) is read off
-  every heading and stored on every passage. There is predicate to
-  filter on the priority.
+- *Search by priority* :: org's priority cookie (e.g., =[#A]=) is read off every
+  heading and stored on every passage. There is no predicate to filter on it
+  yet.
 - *A search that narrows as you type* :: so that matches are shown in the
   minibuffer, beside the results buffer that exists today.
-- *Semantic searches follow =[[id:…]]= links* :: so that a short passage from the linked note is indexed together with the link to carry some context of the linked note.
-- *Semantic searches follow attached images* :: An attached picture is found
-  today only through the words near it. To find it by its content needs an image
-  model such as CLIP, and a second set of vectors that cannot share this
-  index. It is possible, but requires significant more work.
-- * file format but org* :: Only =.org= files are read. Word and OpenDocument
-  files, PDFs, Markdown files and images are ignored, wherever they sit in the
-  tree.  A tool that reads every format
-  ends up reading only headings and paragraphs, because that is all the formats
-  have in common.
-- *Built-in converters for other formats* :: Only =.org= files are indexed
-  today. To handle other formats, the plan is a plugin system rather than a
-  second parser. A set of plugins is responsible for converting one document
-  (e.g., an =.odt=, =.md=, =.pdf=) into an org note. Everything after that is
-  what the tool already does.
+- *Semantic searches follow =[[id:…]]= links* :: so that a short passage of the
+  linked note is indexed beside the link, and carries some of that note's
+  context.
+- *Find an image by what it shows* :: An attached picture is found today only
+  through the words near it. Finding it by its content needs an image model such
+  as CLIP, and a second set of vectors that cannot share this index. It is
+  possible, and it is a lot more work.
+- *Other file formats, through converters* :: Only =.org= files are read today.
+  Word and OpenDocument files, PDFs, Markdown files and images are ignored,
+  wherever they sit in the tree. The plan is a set of plugins rather than a
+  second parser: each plugin turns one document --- an =.odt=, an =.md=, a
+  =.pdf= --- into an org note, and everything after that is what the tool
+  already does. A tool that reads every format itself ends up reading only
+  headings and paragraphs, because that is all the formats have in common.
 
 ** Not planned
 :PROPERTIES:
 :CUSTOM_ID: not-planned
 :END:
-If you want one of these or a different future not listed below, open an issue on
-the [[https://github.com/alberti42/org-semantic/issues][issue tracker]].
+If you want one of these, or something not listed here, open an issue on the
+[[https://github.com/alberti42/org-semantic/issues][issue tracker]].
 
-- *Logical connectors for semantic searches* :: A search is either by meaning or
-  by word, and each gives a list of its own. A search by word can use a phrase,
-  or =AND=, =OR= and =NOT= logical connectors. A search by meaning does not
-  support logical connectors like word search does.
-- *One list from both rankings* :: Semantic and lexical searches are not
-  combined. Such lists could be combined using the /reciprocal rank fusion/
-  method. Combined searches are for now excluded because semantic searches do not
-  support logical connectors like lexical searches do, thus giving rise to an
-  asymmetry in the search predicate between the two search modalities. It is left
-  out until there is evidence, on a real vault, that one combined list produces
-  much better result than choosing the right search.
-- *Editing a note in the results buffer* :: The buffer is read-only today.
+- *Logical connectors for semantic searches* :: A search by word can use a
+  phrase, or the =AND=, =OR= and =NOT= connectors. A search by meaning cannot.
+  A query becomes one vector there, and the ranking is by distance from it, so
+  there is nothing for a connector to act on. The predicates of
+  [[#filters][Filters]] are the exception, and they work on both rankings:
+  =tag:=, =dir:=, =todo:= and =lang:= all narrow either one, and each of them
+  negates with a leading =-=.
+- *One list from both rankings* :: The two searches are never combined. Their
+  scores share no scale, but that is not the obstacle --- /reciprocal rank
+  fusion/ ranks by position in each list rather than by score, so two such lists
+  can be merged. The obstacle is the asymmetry above: one combined list would
+  mix hits that obeyed your whole query with hits that could not obey the half
+  of it a connector expressed. It is left out until there is evidence, on a real
+  vault, that one combined list beats choosing the right search.
+- *Editing a note in the results buffer* :: The buffer is read-only today. A
+  line number comes from the index and can be older than the note. In org a
+  line that has drifted lands on =:END:= or =#+end_src=, and those compare equal
+  to the line that was meant --- so writing back needs a way to be sure the
+  whole passage is still where the index says, not just its first line.
 - *One search over two or more vaults* :: A search takes one vault. Two vaults
   means two searches.
 
