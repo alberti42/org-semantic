@@ -300,7 +300,7 @@ reason --- =org-semantic-<version>-src.tar.gz=, with its hash in the same
 it, and build it:
 
 #+begin_src sh
-V=0.5.0
+V=0.7.0
 BASE=https://github.com/alberti42/org-semantic/releases/download/v$V
 curl -LO $BASE/org-semantic-$V-src.tar.gz
 curl -LO $BASE/SHA256SUMS
@@ -890,7 +890,7 @@ configuring either:
 
 #+begin_src sh
 mkdir -p ~/.config/emacs/org-semantic
-tar xzf org-semantic-0.5.0-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
+tar xzf org-semantic-0.7.0-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
 #+end_src
 
 Release assets are =org-semantic-<version>-bin-<platform>= for the binaries and
@@ -1188,7 +1188,7 @@ Ask the *file*, before starting anything:
 
 #+begin_src console
 $ org-semantic --version
-0.5.0
+0.6.0
 #+end_src
 
 Ask the *process*, which is a different question the moment a new binary has
@@ -1199,7 +1199,7 @@ one moment a client is certain to be listening:
 #+begin_src json
 --> { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }
 <-- { "capabilities": {},
-      "serverInfo": { "name": "org-semantic", "version": "0.5.0" } }
+      "serverInfo": { "name": "org-semantic", "version": "0.6.0" } }
 #+end_src
 
 *** Errors you are meant to act on
