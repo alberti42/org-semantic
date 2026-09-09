@@ -2534,59 +2534,60 @@ a useful answer and "meetings.org" nine times.
 *The index belongs to the vault it describes*, so pointing org-semantic at
 another vault is a different argument, not a different configuration.
 
-* Planned and not planned
+* Future developments
 :PROPERTIES:
-:CUSTOM_ID: planned-and-not-planned
+:CUSTOM_ID: future-developments
 :END:
 ** Planned
 :PROPERTIES:
 :CUSTOM_ID: planned
 :END:
-New work goes into reading org better. It does not go into reading other file
-formats.
+Reading org notes well is the primary goal of this tool. So, the focus of future
+work is on extending support for org notes. However, supporting other file
+formats will also be considered.
 
-- *Search by priority.* A priority is already read from every heading. There is
-  no way to search on it yet.
-- *Follow an =[[id:…]]= link*, so that a passage can carry some context from the
-  note it points at.
-- *A search that narrows as you type*, in the minibuffer, beside the results
-  buffer that exists now.
-- *Editing a note in the results buffer.* The buffer is read-only today. Before
-  it can be written to, there has to be a way to check that a line number from
-  the index still points at the same line of the note.
+- *Search todos by priority* :: org's priority cookie (e.g., =[#A]=) is read off
+  every heading and stored on every passage. There is predicate to
+  filter on the priority.
+- *A search that narrows as you type* :: so that matches are shown in the
+  minibuffer, beside the results buffer that exists today.
+- *Semantic searches follow =[[id:…]]= links* :: so that a short passage from the linked note is indexed together with the link to carry some context of the linked note.
+- *Semantic searches follow attached images* :: An attached picture is found
+  today only through the words near it. To find it by its content needs an image
+  model such as CLIP, and a second set of vectors that cannot share this
+  index. It is possible, but requires significant more work.
+- * file format but org* :: Only =.org= files are read. Word and OpenDocument
+  files, PDFs, Markdown files and images are ignored, wherever they sit in the
+  tree.  A tool that reads every format
+  ends up reading only headings and paragraphs, because that is all the formats
+  have in common.
+- *Built-in converters for other formats* :: Only =.org= files are indexed
+  today. To handle other formats, the plan is a plugin system rather than a
+  second parser. A set of plugins is responsible for converting one document
+  (e.g., an =.odt=, =.md=, =.pdf=) into an org note. Everything after that is
+  what the tool already does.
 
 ** Not planned
 :PROPERTIES:
 :CUSTOM_ID: not-planned
 :END:
-Each item below is a decision, not something forgotten. None of them is closed
-for good. If you want one of them, open an issue on the
-[[https://github.com/alberti42/org-semantic/issues][issue tracker]]. Say what you
-were looking for, and why the answer you got was the wrong one.
+If you want one of these or a different future not listed below, open an issue on
+the [[https://github.com/alberti42/org-semantic/issues][issue tracker]].
 
-- *One list from both rankings.* A search is either by meaning or by word, and
-  each gives a list of its own. A word search can use a phrase, or =AND=, =OR=
-  and =NOT=. A meaning search can use none of them. One combined list would
-  therefore mix hits that obeyed your whole query with hits that could not. Such
-  lists can be combined all the same: /reciprocal rank fusion/ merges two lists
-  by position instead of by score, and [[#markdown-vdb][markdown-vdb]] works
-  that way. It is left out until there is evidence, on a real vault, that one
-  combined list is better than choosing the right search.
-- *Any file format but org.* Only =.org= files are read. Word and OpenDocument
-  files, PDFs, Markdown files and images are ignored, wherever they sit in the
-  tree. Reading org well is the point of the tool. A tool that reads every format
-  ends up reading only headings and paragraphs, because that is all the formats
-  have in common.
-- *Finding an image by what it shows.* An attached picture is found today only
-  through the words near it. To find it by its content needs an image model such
-  as CLIP, and a second set of vectors that cannot share this index. It is
-  possible. Nobody is working on it.
-- *Built-in converters for other formats.* If other formats are ever handled,
-  the plan is a plugin rather than a second parser. You would supply a command
-  that turns one document --- an =.odt=, say --- into an org note. Everything
-  after that is what the tool already does. None of this is written.
-- *One search over two vaults.* A search takes one vault. Two vaults means two
-  searches.
+- *Logical connectors for semantic searches* :: A search is either by meaning or
+  by word, and each gives a list of its own. A search by word can use a phrase,
+  or =AND=, =OR= and =NOT= logical connectors. A search by meaning does not
+  support logical connectors like word search does.
+- *One list from both rankings* :: Semantic and lexical searches are not
+  combined. Such lists could be combined using the /reciprocal rank fusion/
+  method. Combined searches are for now excluded because semantic searches do not
+  support logical connectors like lexical searches do, thus giving rise to an
+  asymmetry in the search predicate between the two search modalities. It is left
+  out until there is evidence, on a real vault, that one combined list produces
+  much better result than choosing the right search.
+- *Editing a note in the results buffer* :: The buffer is read-only today.
+- *One search over two or more vaults* :: A search takes one vault. Two vaults
+  means two searches.
 
 * Related work
 :PROPERTIES:
@@ -2609,7 +2610,7 @@ wire up yourself.
 :PROPERTIES:
 :CUSTOM_ID: markdown-vdb
 :END:
-[[https://github.com/geckse/markdown-vdb][markdown-vdb]] reaches a very similar architecture for Markdown --- one Rust binary, the index on disk, notes never modified. What sets it apart is where the embeddings come from: an external provider --- OpenAI, Ollama, any OpenAI-compatible endpoint --- so a search reaches out to a network or a local model server, and an API key and its cost or a running server come with it. org-semantic runs the model inside its own process and calls nothing over the network. Its front-end is aimed at AI agents --- it ships Claude Code skills rather than an Emacs package. (It also merges the two rankings into one list, using /reciprocal rank fusion/ --- a way of combining two orderings without needing their scores to be comparable. org-semantic keeps them as separate commands for now; see [[#planned-and-not-planned][Planned and not planned]].)
+[[https://github.com/geckse/markdown-vdb][markdown-vdb]] reaches a very similar architecture for Markdown --- one Rust binary, the index on disk, notes never modified. What sets it apart is where the embeddings come from: an external provider --- OpenAI, Ollama, any OpenAI-compatible endpoint --- so a search reaches out to a network or a local model server, and an API key and its cost or a running server come with it. org-semantic runs the model inside its own process and calls nothing over the network. Its front-end is aimed at AI agents --- it ships Claude Code skills rather than an Emacs package. (It also merges the two rankings into one list, using /reciprocal rank fusion/ --- a way of combining two orderings without needing their scores to be comparable. org-semantic keeps them as separate commands for now; see [[#future-developments][Future developments]].)
 
 ** mdvault
 :PROPERTIES:
