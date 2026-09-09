@@ -857,11 +857,8 @@ impl Server {
         // rules.  One boolean and not one per index, because `status` answers
         // about the vault: a client wanting to know which index is behind gets
         // that from a search, whose remark names the one that answered.
-        //
-        // A file that will not parse answers `false`.  It stops the `index` this
-        // would send the reader to, and that is where it is said.
-        let excluding = Excludes::read(&vault, &notes).ok();
-        let stale = excluding.as_ref().is_some_and(|ex| {
+        let excluding = Excludes::read(&vault, &notes);
+        let stale = excluding.as_ref().is_ok_and(|ex| {
             let semantic = built_models(&vault).iter().any(|m| {
                 stored_hash::<StoredExcludes>(&semantic_dir(&vault, m).join("manifest.json"))
                     .is_some_and(|s| s.exclude != ex.hash(Target::Semantic))
@@ -882,8 +879,15 @@ impl Server {
             "lexical": lexical,
             // How many rules the vault's `.org-semantic-ignore` holds, and
             // whether any index is behind them.  Both are about this vault.
-            "excludeRules": excluding.as_ref().map(Excludes::len).unwrap_or(0),
-            "excludeStale": stale,
+            //
+            // Both are absent when that file will not read, and absence is the
+            // whole point: the count answered `0`, so a vault that excludes
+            // nothing and one whose rules are a mistake read the same, and the
+            // second is the one nobody can see. `status` does not say why, and
+            // must not: it is asked on every save by a client deciding what to
+            // offer, while a reason is a sentence for a person.
+            "excludeRules": excluding.as_ref().map(|ex| ex.len()).ok(),
+            "excludeStale": excluding.as_ref().ok().map(|_| stale),
             // About *this* vault, like every other field here: whether its index
             // is resident, so a client knows the next search is warm (~10 ms)
             // rather than a model load (~150–300 ms).  It was the size of the

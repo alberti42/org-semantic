@@ -295,6 +295,36 @@ fn a_failing_index_leaves_no_progress_owed() {
     assert!(reply[0].get("error").is_some(), "it failed, and said so: {reply:?}");
 }
 
+/// `status` may not answer a question it cannot answer.
+///
+/// The rule count answered `0` for an exclusion file that will not read, so a
+/// vault excluding nothing and a vault whose rules are a mistake read the same.
+/// It is absent now. `status` does not say why: it is asked on every save.
+#[test]
+fn status_counts_no_rules_it_could_not_read() {
+    let v = vault("bad-rule-status", 1);
+    let ignore = std::path::Path::new(&v).join(".org-semantic-ignore");
+    let ask = || {
+        let msgs = talk(
+            &[json!({ "jsonrpc": "2.0", "id": 8, "method": "status",
+                      "params": { "vault": v } })],
+            None,
+        );
+        msgs.iter().find(|m| m["id"] == 8).expect("a reply")["result"].clone()
+    };
+
+    std::fs::write(&ignore, "archive/\ncode/\n").unwrap();
+    let good = ask();
+    assert_eq!(good["excludeRules"], 2, "a file that reads is counted");
+    assert_eq!(good["excludeStale"], false, "and compared against the index");
+
+    std::fs::write(&ignore, "[semnatic]\ncode/\n").unwrap();
+    let bad = ask();
+    assert!(bad["excludeRules"].is_null(), "a file that will not read is not counted: {bad}");
+    assert!(bad["excludeStale"].is_null(), "and nothing is claimed about the index: {bad}");
+    assert_eq!(bad["vault"], good["vault"], "the rest of the reply still answers");
+}
+
 /// Errors a client must act on carry a label; the rest carry none, and that
 /// absence is what says "show this, there is nothing to decide".
 #[test]
