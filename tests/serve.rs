@@ -295,6 +295,48 @@ fn a_failing_index_leaves_no_progress_owed() {
     assert!(reply[0].get("error").is_some(), "it failed, and said so: {reply:?}");
 }
 
+/// The doctor answers over the wire, and its findings are what a person reads.
+///
+/// The method exists so an editor draws the same report the terminal prints.
+/// Two things are asserted about it that a client depends on: a finding names
+/// its kind, so a client offers the right key, and it names the file to edit.
+#[test]
+fn the_doctor_answers_over_the_wire() {
+    let v = vault("doctor-wire", 1);
+    let ignore = std::path::Path::new(&v).join(".org-semantic-ignore");
+    let ask = || {
+        let msgs = talk(
+            &[json!({ "jsonrpc": "2.0", "id": 9, "method": "doctor",
+                      "params": { "vault": v } })],
+            None,
+        );
+        msgs.iter().find(|m| m["id"] == 9).expect("a reply")["result"].clone()
+    };
+
+    std::fs::write(&ignore, "[semnatic]\ncode/\n").unwrap();
+    let r = ask();
+    let f = &r["findings"][0];
+    assert_eq!(f["kind"], "exclude-unreadable", "labelled: {r}");
+    assert_eq!(f["severity"], "problem");
+    assert_eq!(f["remedy"], "edit", "and the remedy is a machine word: {r}");
+    assert!(
+        f["file"].as_str().unwrap().ends_with(".org-semantic-ignore"),
+        "naming the file to open: {r}"
+    );
+    assert!(
+        f["message"].as_str().unwrap().contains("is not a group label"),
+        "with the reason a person reads: {r}"
+    );
+
+    std::fs::write(&ignore, "archive/\n").unwrap();
+    let good = ask();
+    assert!(
+        good["findings"].as_array().unwrap().iter().all(|x| x["kind"] != "exclude-unreadable"),
+        "a file that reads is not a finding: {good}"
+    );
+    assert_eq!(good["files"][1]["holds"], "1 rule", "it is counted instead: {good}");
+}
+
 /// `status` may not answer a question it cannot answer.
 ///
 /// The rule count answered `0` for an exclusion file that will not read, so a

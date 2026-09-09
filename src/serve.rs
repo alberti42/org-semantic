@@ -831,6 +831,23 @@ impl Server {
         Ok(serde_json::json!({ "rss": rss(), "vaults": vaults, "models": models }))
     }
 
+    /// What is wrong with a vault, and what it has, for a person to read.
+    ///
+    /// The other half of `status`, and deliberately a separate method: that one
+    /// is asked on every save by a client deciding what to offer, so it must
+    /// stay cheap and every field in it is a fact to branch on. This walks the
+    /// notes and reads the manifests, and its findings are sentences.
+    ///
+    /// Nothing here is cached. A reader asks because something looks wrong, and
+    /// an answer from before they edited the file is the one answer that helps
+    /// nobody.
+    fn doctor(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
+        let vault = PathBuf::from(
+            p.get("vault").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing `vault`"))?,
+        );
+        Ok(serde_json::to_value(doctor::Report::on(&vault))?)
+    }
+
     /// What a vault has, so an editor can offer the right commands and say why
     /// one is unavailable rather than failing when it is used.
     fn status(&self, p: &serde_json::Value) -> Result<serde_json::Value> {
@@ -1098,6 +1115,7 @@ pub fn serve() -> Result<()> {
                 let answer = match req.method.as_str() {
                     "search" => server.search(&req.params).map(Some),
                     "status" => server.status(&req.params).map(Some),
+                    "doctor" => server.doctor(&req.params).map(Some),
                     "memory" => server.memory().map(Some),
                     // A resident process must be able to drop what it holds
                     // without being restarted: an index rebuilt underneath it is
