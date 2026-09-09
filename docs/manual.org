@@ -2543,7 +2543,8 @@ another vault is a different argument, not a different configuration.
 :CUSTOM_ID: planned
 :END:
 Reading org notes well is the goal of this tool, so most of the future work
-extends what it does with org. Other file formats are under consideration too.
+extends coverage of org-mode features. Indexing other file formats is under
+consideration too, and would be done through a plugin system of converters.
 
 - *Search by priority* :: org's priority cookie (e.g., =[#A]=) is read off every
   heading and stored on every passage. There is no predicate to filter on it
@@ -2559,11 +2560,12 @@ extends what it does with org. Other file formats are under consideration too.
   possible, and it is a lot more work.
 - *Other file formats, through converters* :: Only =.org= files are read today.
   Word and OpenDocument files, PDFs, Markdown files and images are ignored,
-  wherever they sit in the tree. The plan is a set of plugins rather than a
-  second parser: each plugin turns one document --- an =.odt=, an =.md=, a
-  =.pdf= --- into an org note, and everything after that is what the tool
-  already does. A tool that reads every format itself ends up reading only
-  headings and paragraphs, because that is all the formats have in common.
+  wherever they sit in the vault. The plan is a set of plugins rather than a
+  second parser: each plugin turns one document (e.g., an =.odt=, an =.md=, a
+  =.pdf=) into an org note, and everything after that is what the tool already
+  does. A tool that reads every format itself has two ends, and both are bad: it
+  reads only headings and paragraphs, because that is all the formats have in
+  common, or it grows into a second pandoc.
 
 ** Not planned
 :PROPERTIES:
@@ -2573,24 +2575,21 @@ If you want one of these, or something not listed here, open an issue on the
 [[https://github.com/alberti42/org-semantic/issues][issue tracker]].
 
 - *Logical connectors for semantic searches* :: A search by word can use a
-  phrase, or the =AND=, =OR= and =NOT= connectors. A search by meaning cannot.
-  A query becomes one vector there, and the ranking is by distance from it, so
-  there is nothing for a connector to act on. The predicates of
-  [[#filters][Filters]] are the exception, and they work on both rankings:
-  =tag:=, =dir:=, =todo:= and =lang:= all narrow either one, and each of them
-  negates with a leading =-=.
+  phrase, or the =AND=, =OR= and =NOT= connectors. A search by meaning cannot. A
+  query becomes one vector there, and the ranking is by distance from it, so
+  there is nothing for a logical connector to act on. The predicates of
+  [[#filters][Filters]] are the exception, as they work for both searches:
+  =tag:=, =dir:=, =todo:= and =lang:= all narrow the selection.
 - *One list from both rankings* :: The two searches are never combined. Their
-  scores share no scale, but that is not the obstacle --- /reciprocal rank
-  fusion/ ranks by position in each list rather than by score, so two such lists
-  can be merged. The obstacle is the asymmetry above: one combined list would
-  mix hits that obeyed your whole query with hits that could not obey the half
-  of it a connector expressed. It is left out until there is evidence, on a real
-  vault, that one combined list beats choosing the right search.
-- *Editing a note in the results buffer* :: The buffer is read-only today. A
-  line number comes from the index and can be older than the note. In org a
-  line that has drifted lands on =:END:= or =#+end_src=, and those compare equal
-  to the line that was meant --- so writing back needs a way to be sure the
-  whole passage is still where the index says, not just its first line.
+  scores share no scale, but that is not the real obstacle. /Reciprocal rank
+  fusion/ ranks by position in each list rather than by score, so it merges the
+  two without one. The obstacle is the asymmetry above: one list would mix hits
+  that obeyed your whole query with hits that could not obey the half of it a
+  connector expressed. It is left out until there is evidence, on a real vault,
+  that one combined list beats choosing the right search.
+- *Editing a note in the results buffer* :: The buffer is read-only. =RET= opens
+  the note at the line under point, and =f= shows each hit in its note as point
+  arrives, so the note is one key away and editing it there is enough.
 - *One search over two or more vaults* :: A search takes one vault. Two vaults
   means two searches.
 
