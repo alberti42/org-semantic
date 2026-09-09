@@ -1483,17 +1483,26 @@ which does not exist is not built."
 ;;;; What the server holds
 
 (defun org-semantic-status (&optional vault)
-  "Return what VAULT has: its built indexes, and whether one is being built.
+  "Return what VAULT has, as facts for a caller to branch on.
 
-Every field is about that vault: which models have a semantic
-index, whether a lexical one exists, whether the index is resident
-here, and whether an index is running.  The server's release comes
+Which models have a semantic index, whether a lexical one exists,
+where the notes are, whether this vault is resident here, and
+whether a run is going in any process.  The server's release comes
 from the handshake, not from here.
 
 Each entry in `:semantic' carries `:cached', which says whether the
 model that built that index is still downloaded on this machine.
 An index outlives its model, and a search refuses when the model is
-gone, so ask this before searching."
+gone, so ask this before searching.
+
+`:excludeRules' and `:excludeStale' are both absent when
+`.org-semantic-ignore' will not read.  Absent means unknown and not
+zero: a vault that excludes nothing answers 0, and a vault whose
+rules are a mistake answers nothing at all.
+
+This reply is written for a program.  `org-semantic-doctor' answers
+the same questions in sentences, and says what to do about each
+one."
   (org-semantic--call
    "status"
    (org-semantic--params :vault (or vault (org-semantic-vault-or-error)))))
