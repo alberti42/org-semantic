@@ -8183,6 +8183,81 @@ mod tests {
         );
     }
 
+    /// Every anchor either document links to exists, and no top-level section
+    /// of the manual is missing from the landing page's contents.
+    ///
+    /// Renaming a heading is safe and renaming its `:CUSTOM_ID:` is not: the
+    /// published anchor comes from the ID, so a link keeps pointing at a
+    /// heading that no longer answers to it. That happened -- `Status` became
+    /// `Future developments`, the ID moved with it, and `README.md` went on
+    /// linking to `#status`, which lands the reader at the top of the page with
+    /// nothing to say why. A dead in-page anchor raises no error anywhere.
+    ///
+    /// The contents are checked at the **top level only**. Below that they are
+    /// hand-picked -- six subsections are deliberately absent -- so a
+    /// completeness rule there would be a rule nobody agreed to. A whole
+    /// top-level section missing is different: the contents are the only index
+    /// the site has, so the section is unreachable.
+    #[test]
+    fn every_anchor_resolves_and_every_section_is_in_the_contents() {
+        let org = include_str!("../docs/manual.org");
+        let md = include_str!("../README.md");
+
+        // `:CUSTOM_ID: x` -- the published anchor for the heading above it.
+        let ids: Vec<&str> = org
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(":CUSTOM_ID:"))
+            .map(str::trim)
+            .collect();
+        assert!(ids.len() > 20, "the IDs must have been found at all: {}", ids.len());
+
+        // Every `[[#x]` in the manual, and every `.../#x` in the README.
+        let inside = org.split("[[#").skip(1).filter_map(|r| r.split_once(']').map(|(a, _)| a));
+        let landing = md
+            .split("alberti42.github.io/org-semantic/#")
+            .skip(1)
+            .filter_map(|r| r.split_once(')').map(|(a, _)| a));
+        let mut linked: Vec<&str> = Vec::new();
+        for (from, anchors) in [
+            ("the manual", Box::new(inside) as Box<dyn Iterator<Item = _>>),
+            ("README.md", Box::new(landing)),
+        ] {
+            for a in anchors {
+                assert!(ids.contains(&a), "{from} links to #{a}, which no heading answers to");
+                linked.push(a);
+            }
+        }
+
+        // Every `* Heading` takes the next `:CUSTOM_ID:` under it. `** X` does
+        // not match, since the prefix tested is an asterisk and a space.
+        let mut top: Vec<&str> = Vec::new();
+        let mut lines = org.lines();
+        while let Some(l) = lines.next() {
+            if !l.starts_with("* ") {
+                continue;
+            }
+            let id = lines
+                .by_ref()
+                .take(5)
+                .find_map(|n| n.trim().strip_prefix(":CUSTOM_ID:"))
+                .map(str::trim)
+                .unwrap_or_else(|| panic!("`{l}` has no :CUSTOM_ID:, so nothing can link to it"));
+            top.push(id);
+        }
+        assert!(top.len() > 5, "the sections must have been found at all: {top:?}");
+        for id in &top {
+            // `what-it-does` is the one exception: the README reproduces that
+            // list, so a link would send the reader from it to itself.
+            if *id == "what-it-does" {
+                continue;
+            }
+            assert!(
+                linked.contains(id),
+                "the manual has a top-level `{id}` that the README contents do not list"
+            );
+        }
+    }
+
     /// Every warning kind is named in the manual, and no kind is named that has
     /// gone.
     ///

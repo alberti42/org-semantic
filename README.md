@@ -255,9 +255,11 @@ Either way the embedding model downloads on first use.
   - [What gets indexed](https://alberti42.github.io/org-semantic/#what-gets-indexed) — the policy file
   - [Languages](https://alberti42.github.io/org-semantic/#languages)
   - [What it writes](https://alberti42.github.io/org-semantic/#what-it-writes)
+  - [When something is wrong](https://alberti42.github.io/org-semantic/#doctor) — `doctor`, and what it reports
 - [Design](https://alberti42.github.io/org-semantic/#design) — chunking, the token limit, why no ANN
-- [Status](https://alberti42.github.io/org-semantic/#status) — what works, what is missing
+- [Future developments](https://alberti42.github.io/org-semantic/#future-developments) — what is planned, and what is not
 - [Related work](https://alberti42.github.io/org-semantic/#related-work)
+- [Appendix](https://alberti42.github.io/org-semantic/#appendix) — what is in `.org-semantic/`
 - [Licence](https://alberti42.github.io/org-semantic/#licence) — MIT
 
 The site is generated from [`docs/manual.org`](docs/manual.org), which is the
