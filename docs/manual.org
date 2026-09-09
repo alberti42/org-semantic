@@ -2580,12 +2580,12 @@ If you want one of these, or something not listed here, open an issue on the
   there is nothing for a logical connector to act on. The predicates of
   [[#filters][Filters]] are the exception, as they work for both searches:
   =tag:=, =dir:=, =todo:= and =lang:= all narrow the selection.
-- *One list from both rankings* :: The two searches are never combined. Their
-  scores share no scale, but that is not the real obstacle. /Reciprocal rank
-  fusion/ ranks by position in each list rather than by score, so it merges the
-  two without one. The obstacle is the asymmetry above: one list would mix hits
-  that obeyed your whole query with hits that could not obey the half of it a
-  connector expressed. It is left out until there is evidence, on a real vault,
+- *One list from both rankings* :: The two searches stay separate ---
+  [[#two-rankings-never-merged][Two rankings, never merged]] says why, and shows
+  it on one query. Their scores share no scale, but that is not the real
+  obstacle: /reciprocal rank fusion/ ranks by position in each list rather than
+  by score, so it merges two lists without one. What stands in the way is the
+  asymmetry above, and it stays out until there is evidence, on a real vault,
   that one combined list beats choosing the right search.
 - *Editing a note in the results buffer* :: The buffer is read-only. =RET= opens
   the note at the line under point and goes there. =f= (/follow/) instead shows
