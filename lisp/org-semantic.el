@@ -869,6 +869,15 @@ puts JSON null in the method field and sends the frame, and the
 server stops."
   (if (stringp name) (intern name) name))
 
+(defun org-semantic--async (connection method params &rest args)
+  "Send METHOD with PARAMS on CONNECTION, and return (ID TIMER).
+`jsonrpc-async-request' drops the id and returns nil before
+Emacs 31.  Without an id nothing can route a progress report or
+cancel a run.  The function under it returns the id in every
+version, and from Emacs 31 the public one does no more than call
+it."
+  (apply #'jsonrpc--async-request-1 connection method params args))
+
 (defun org-semantic--bool (value)
   "Return VALUE as a JSON boolean, mapping nil to false rather than null."
   (if value t :json-false))
@@ -914,7 +923,7 @@ to stop the work keeps it."
          (os-id nil)
          (os-forget (lambda () (remhash os-id org-semantic--watchers))))
     (setq os-id
-          (car (jsonrpc-async-request
+          (car (org-semantic--async
                 connection (org-semantic--method method) params
                 :timeout (or timeout org-semantic-timeout)
                 :success-fn (lambda (result)
