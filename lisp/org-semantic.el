@@ -778,12 +778,12 @@ directory."
     (let ((org-semantic--starting t))
       (condition-case err
           (let ((info (jsonrpc-request
-                       connection "initialize"
+                       connection 'initialize
                        ;; Nothing is negotiated.  The handshake starts the
                        ;; session and reports the server's release.
                        (list :capabilities (make-hash-table :test 'equal))
                        :timeout org-semantic-timeout)))
-            (jsonrpc-notify connection "initialized" :jsonrpc-omit)
+            (jsonrpc-notify connection 'initialized nil)
             (setq org-semantic--server-version
                   (plist-get (plist-get info :serverInfo) :version))
             (org-semantic--check-version org-semantic--server-version
@@ -819,16 +819,16 @@ A hard quit still sends `exit' rather than deleting the process.
   (let ((os-connection org-semantic--connection))
     (cond
      ((not (org-semantic-running-p)) (org-semantic--forget-connection))
-     (hard (jsonrpc-notify os-connection "exit" :jsonrpc-omit)
+     (hard (jsonrpc-notify os-connection 'exit nil)
            (jsonrpc-shutdown os-connection 'cleanup))
      (t
       ;; Asynchronously, and with an index's timeout: `shutdown' waits
       ;; for a run in flight, which is minutes.
       (jsonrpc-async-request
-       os-connection "shutdown" :jsonrpc-omit
+       os-connection 'shutdown nil
        :timeout org-semantic-index-timeout
        :success-fn (lambda (_result)
-                     (jsonrpc-notify os-connection "exit" :jsonrpc-omit)
+                     (jsonrpc-notify os-connection 'exit nil)
                      (jsonrpc-shutdown os-connection 'cleanup))
        :error-fn (lambda (_error) (jsonrpc-shutdown os-connection 'cleanup))
        :timeout-fn (lambda () (jsonrpc-shutdown os-connection 'cleanup)))))))
@@ -862,6 +862,13 @@ false is therefore `:json-false'."
         (when value (setq out (cons value (cons key out))))))
     (nreverse out)))
 
+(defun org-semantic--method (name)
+  "Return NAME as a method name jsonrpc.el can send.
+The jsonrpc.el in Emacs 29 takes a symbol only.  Given a string it
+puts JSON null in the method field and sends the frame, and the
+server stops."
+  (if (stringp name) (intern name) name))
+
 (defun org-semantic--bool (value)
   "Return VALUE as a JSON boolean, mapping nil to false rather than null."
   (if value t :json-false))
@@ -878,7 +885,8 @@ Synchronous, so it blocks Emacs.  Use it for a search, which takes
 milliseconds, and never for an index.  A failure arrives as a
 labelled `org-semantic-error'."
   (condition-case err
-      (jsonrpc-request (org-semantic-connection) method params
+      (jsonrpc-request (org-semantic-connection)
+                       (org-semantic--method method) params
                        :timeout (or timeout org-semantic-timeout))
     (jsonrpc-error (org-semantic--rethrow err))))
 
@@ -907,7 +915,7 @@ to stop the work keeps it."
          (os-forget (lambda () (remhash os-id org-semantic--watchers))))
     (setq os-id
           (car (jsonrpc-async-request
-                connection method params
+                connection (org-semantic--method method) params
                 :timeout (or timeout org-semantic-timeout)
                 :success-fn (lambda (result)
                               (funcall os-forget)
@@ -1180,7 +1188,7 @@ only answer there."
     (if (not id)
         (message "org-semantic: no index of %s to stop"
                  (abbreviate-file-name vault))
-      (jsonrpc-notify (org-semantic-connection) "$/cancelRequest"
+      (jsonrpc-notify (org-semantic-connection) '$/cancelRequest
                       (list :id id))
       (message "org-semantic: stopping the index of %s"
                (abbreviate-file-name vault)))))
@@ -1514,7 +1522,7 @@ one."
 be counted exactly.  There is no figure for the ONNX runtime,
 which cannot be asked about from inside the process, and nothing
 is derived: a caller that wants the remainder subtracts."
-  (org-semantic--call "memory" :jsonrpc-omit))
+  (org-semantic--call "memory" nil))
 
 ;;;###autoload
 (defun org-semantic-show-memory ()
@@ -1534,7 +1542,7 @@ For an index rebuilt outside this session, by a shell run or
 another Emacs.  An index the server built itself needs none of
 this: it adopts what it wrote."
   (interactive)
-  (org-semantic--call "reload" :jsonrpc-omit)
+  (org-semantic--call "reload" nil)
   (message "org-semantic: cached indexes dropped"))
 
 ;;;###autoload
