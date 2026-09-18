@@ -3637,7 +3637,7 @@ impl Index {
             return Err(corrupt_index(chunks.len(), raw.len() / (m.dim * 4)));
         }
         let vectors: Vec<f32> =
-            raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         Ok(Index::of(Built { chunks, vectors, exclude }, m.dim))
     }
 
@@ -3685,8 +3685,7 @@ fn load_index(dir: &Path, m: &Model, j: &mut Journal) -> Option<LoadedIndex> {
         ));
         return None;
     }
-    let vectors: Vec<f32> =
-        raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let vectors: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
     let mut by_path: std::collections::HashMap<String, Vec<usize>> = Default::default();
     for (i, c) in chunks.iter().enumerate() {
         by_path.entry(c.path.clone()).or_default().push(i);
@@ -6096,17 +6095,10 @@ fn cmd_chunks(
                 c.lang,
                 c.heading.split(" > ").last().unwrap_or("")
             );
-            println!("    head: {:?}", &c.text.chars().take(60).collect::<String>());
+            println!("    head: {:?}", c.text.chars().take(60).collect::<String>());
             println!(
                 "    tail: {:?}",
-                &c.text
-                    .chars()
-                    .rev()
-                    .take(60)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
+                c.text.chars().rev().take(60).collect::<String>().chars().rev().collect::<String>()
             );
         }
     }
