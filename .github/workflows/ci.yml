@@ -93,6 +93,26 @@ jobs:
       - name: Install Emacs
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends emacs
 
+      # TEMPORARY, and the one thing the ERT output does not print: what the
+      # server said on stderr when the Emacs client, rather than a shell, was
+      # driving it.
+      - name: Ask the client to start the server, and print its stderr
+        continue-on-error: true
+        run: |
+          emacs --version | head -1
+          emacs --batch --no-init-file -L lisp -L test --eval '(progn
+            (require (quote org-semantic))
+            (setq org-semantic-executable (expand-file-name "target/release/org-semantic"))
+            (message "binary: %S" (org-semantic--binary))
+            (message "version: %S" (org-semantic-binary-version))
+            (let ((dir (make-temp-file "probe" t)))
+              (with-temp-file (expand-file-name "a.org" dir) (insert "* One\nA note.\n"))
+              (condition-case e (message "status: %S" (org-semantic-status dir))
+                (error (message "signalled: %S" e))))
+            (message "--- server stderr ---")
+            (when (get-buffer "*org-semantic stderr*")
+              (message "%s" (with-current-buffer "*org-semantic stderr*" (buffer-string)))))'
+
       # target/release/org-semantic exists now, so the two tests that spawn it
       # run here instead of skipping.
       - run: make test-elisp
