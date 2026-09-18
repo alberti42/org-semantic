@@ -73,6 +73,12 @@ Binary version **0.6.0**, unchanged: there is nothing to download.
   so the server could not read the handshake and stopped. Every command that
   needs the server failed with `Server died`. Emacs 30 and later were never
   affected, which is why it went unseen.
+- **Progress reports and `M-x org-semantic-cancel` work before Emacs 31.**
+  `jsonrpc-async-request` returns the request id from Emacs 31 on, and nil
+  before it. The client kept what it returned, so on Emacs 29 and 30 it held
+  no id: every progress report was dropped, `org-semantic-indexing-p` said no
+  run was going, and a run could not be stopped. Nothing failed and nothing
+  was logged.
 
 ## [0.7.0] — 2026-09-09
 
