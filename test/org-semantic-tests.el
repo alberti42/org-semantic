@@ -1116,6 +1116,9 @@ does not read the fixture as a call to `jsonrpc-error'."
                        (unless (member phase phases) (push phase phases))))
          :success (lambda (result) (setq outcome (list 'ok result)))
          :failure (lambda (error) (setq outcome (list 'failed error))))
+        ;; Both of these need the request id, and `jsonrpc-async-request'
+        ;; answers nil before Emacs 31: the run is recorded under the id,
+        ;; and so is the watcher every report is routed to.
         (should (org-semantic-indexing-p dir))
         (should (org-semantic-tests--wait 120 (lambda () outcome)))
         (should (eq (car outcome) 'ok))
@@ -1175,13 +1178,16 @@ session runs under it: a handshake, a request, and a quit."
            (let ((method (plist-get args :method)))
              (when method
                (push method sent)
-               ;; lisp/jsonrpc.el:432, in Emacs 29.1 through 29.4.
-               (setq args
-                     (plist-put args :method
-                                (cond ((keywordp method)
-                                       (substring (symbol-name method) 1))
-                                      ((symbolp method)
-                                       (symbol-name method)))))))
+               ;; lisp/jsonrpc.el:432, in Emacs 29.1 through 29.4.  On an
+               ;; Emacs 29 the rule is already there, and applying it twice
+               ;; would blank a method this fix spells correctly.
+               (when (version<= "30" emacs-version)
+                 (setq args
+                       (plist-put args :method
+                                  (cond ((keywordp method)
+                                         (substring (symbol-name method) 1))
+                                        ((symbolp method)
+                                         (symbol-name method))))))))
            (apply send connection args))
          '((name . emacs-29)))
         (unwind-protect
