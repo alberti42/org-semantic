@@ -61,6 +61,19 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+Binary version **0.6.0**, unchanged: there is nothing to download.
+
+### Fixed
+
+- **The package works on Emacs 29 again.** The client named every JSON-RPC
+  method with a string, and the `jsonrpc.el` in Emacs 29 takes a symbol only:
+  given a string it puts JSON `null` in the method field and sends the frame,
+  so the server could not read the handshake and stopped. Every command that
+  needs the server failed with `Server died`. Emacs 30 and later were never
+  affected, which is why it went unseen.
+
 ## [0.7.0] — 2026-09-09
 
 Binary version **0.6.0**. This one has to be downloaded, and it rebuilds both
