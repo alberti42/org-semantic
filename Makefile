@@ -47,14 +47,14 @@ lint-rust:
 # byte-compile that cannot find it fails on the `require' rather than on
 # anything about the code.
 #
-# Both checkdoc flags are set rather than left at their defaults, so the
-# target reports the same thing on every Emacs.  The experimental verb check
-# defaults to t up to Emacs 30 and nil from 31, and it looks for its verbs
-# anywhere in the first sentence rather than at the front: it read the "says"
-# of "Warn when FOUND is too old ...  WHERE says what was asked" as the
-# docstring's own verb and asked for the imperative, so CI was red up to 30
-# and green from 31 on one unchanged docstring.  Upstream turning it off by
-# default is upstream agreeing.
+# The experimental verb check is set rather than left at its default, so the
+# target reports the same thing on every Emacs.  It defaults to t up to
+# Emacs 30 and nil from 31, and it looks for its verb anywhere in the first
+# sentence rather than at the front: it read the "says" of "Warn when FOUND
+# is too old ...  WHERE says what was asked" as the docstring's own verb and
+# asked for the imperative, so CI was red up to 30 and green from 31 on one
+# unchanged docstring.  Upstream turning it off by default is upstream
+# agreeing.
 lint-elisp:
 	$(EMACS) --batch --no-init-file -L lisp -L test \
 		--eval "(setq byte-compile-error-on-warn t)" \
@@ -64,7 +64,6 @@ lint-elisp:
 		$(EMACS) --batch --no-init-file -L lisp -L test \
 			--eval "(progn \
 			          (require 'checkdoc) \
-			          (setq checkdoc-force-docstrings-flag nil) \
 			          (setq checkdoc-verb-check-experimental-flag nil) \
 			          (defvar said 0) \
 			          (advice-add 'display-warning :before \
