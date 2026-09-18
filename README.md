@@ -1,5 +1,9 @@
 # org-semantic
 
+![Made for GNU Emacs](https://img.shields.io/badge/Made%20for-GNU%20Emacs-7F5AB6?logo=gnuemacs&logoColor=white)
+[![CI](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml/badge.svg)](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/alberti42/org-semantic)](LICENSE)
+
 org-semantic brings embedding search to org-mode. A model reads each passage of
 your notes and turns it into a vector, placed so that passages saying the same
 thing sit close together, whatever words they used. Your query becomes a vector

@@ -1,0 +1,79 @@
+# What `make test' and `make lint' already define, on every push to main and
+# every pull request: the Rust side and the Emacs client under lisp/.
+#
+# Two jobs, because they need different things.  The Emacs job needs no Rust
+# toolchain, so it runs across the matrix; the Rust job builds the binary
+# once and is where `cargo' lives.
+#
+# The two Emacs tests that drive the real binary look for it at
+# target/release and skip when it is not there, which is every job but the
+# Rust one -- so that job installs Emacs after building and runs the Emacs
+# suite again, with nothing skipped.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  elisp:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs_version: ['29.1', '29.4', '30.2', '31.1', 'snapshot']
+    name: Emacs ${{ matrix.emacs_version }}
+    # A snapshot Emacs breaks for reasons that are not this package's;
+    # it is here as early warning, not as a gate.
+    continue-on-error: ${{ matrix.emacs_version == 'snapshot' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs_version }}
+
+      - name: Report version
+        run: emacs --version | head -1
+
+      # Byte-compilation with warnings fatal, then checkdoc over each file.
+      - run: make lint-elisp
+
+      - run: make test-elisp
+
+  rust:
+    runs-on: ubuntu-latest
+    name: Rust, and the Emacs tests that need the binary
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Report versions
+        run: |
+          cargo --version
+          rustc --version
+
+      # Formatting and lints first: they are the fast failures.
+      - run: cargo fmt --check
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo build --release --locked
+
+      # The tests that need an embedding model are `#[ignore]'d, so this runs
+      # offline: the concurrency tests ask for `mode: "lexical"' on both sides.
+      - run: cargo test --release --locked
+
+      - name: Install Emacs
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends emacs
+
+      # target/release/org-semantic exists now, so the two tests that spawn it
+      # run here instead of skipping.
+      - run: make test-elisp
