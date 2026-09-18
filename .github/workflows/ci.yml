@@ -71,6 +71,25 @@ jobs:
       # offline: the concurrency tests ask for `mode: "lexical"' on both sides.
       - run: cargo test --release --locked
 
+      # TEMPORARY: the Emacs suite reports "Server died" here and nowhere
+      # else, and the client keeps the server's stderr in a buffer the ERT
+      # output does not print.  Drive the handshake by hand so the log has it.
+      - name: Probe the server by hand
+        continue-on-error: true
+        run: |
+          ./target/release/org-semantic --version || echo "version exit: $?"
+          python3 - > handshake.bin <<'PY'
+          import sys
+          def frame(body):
+              return "Content-Length: %d\r\n\r\n%s" % (len(body), body)
+          sys.stdout.write(frame('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'))
+          sys.stdout.write(frame('{"jsonrpc":"2.0","method":"initialized"}'))
+          sys.stdout.write(frame('{"jsonrpc":"2.0","id":2,"method":"shutdown"}'))
+          sys.stdout.write(frame('{"jsonrpc":"2.0","method":"exit"}'))
+          PY
+          ./target/release/org-semantic serve < handshake.bin; echo "serve exit: $?"
+          ldd ./target/release/org-semantic || true
+
       - name: Install Emacs
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends emacs
 
