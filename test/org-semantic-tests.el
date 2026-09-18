@@ -1157,6 +1157,42 @@ does not read the fixture as a call to `jsonrpc-error'."
       ;; And a vault can be handed back.
       (org-semantic-close dir))))
 
+(ert-deftest a-method-name-survives-the-jsonrpc-el-in-emacs-29 ()
+  "That jsonrpc.el takes a symbol only, and is silent about a string.
+
+It puts JSON null in the method field and sends the frame, so the
+server cannot parse it and stops.  Every request then fails as
+\"Server died\", which is what CI reports on Emacs 29.
+
+So the rule Emacs 29 uses is put back on top of this Emacs, and a whole
+session runs under it: a handshake, a request, and a quit."
+  (org-semantic-tests--with-server
+    (org-semantic-tests--with-vault dir
+      (let ((sent '()))
+        (advice-add
+         'jsonrpc-connection-send :around
+         (lambda (send connection &rest args)
+           (let ((method (plist-get args :method)))
+             (when method
+               (push method sent)
+               ;; lisp/jsonrpc.el:432, in Emacs 29.1 through 29.4.
+               (setq args
+                     (plist-put args :method
+                                (cond ((keywordp method)
+                                       (substring (symbol-name method) 1))
+                                      ((symbolp method)
+                                       (symbol-name method)))))))
+           (apply send connection args))
+         '((name . emacs-29)))
+        (unwind-protect
+            (should (org-semantic-status dir))
+          (advice-remove 'jsonrpc-connection-send 'emacs-29))
+        ;; The handshake and the request, and not one of them a string.
+        (should (memq 'initialize sent))
+        (should (memq 'initialized sent))
+        (should (memq 'status sent))
+        (dolist (method sent) (should (symbolp method)))))))
+
 (ert-deftest closing-a-vault-says-nothing-unless-it-was-asked-for ()
   "A command reports; a function returns.
 
