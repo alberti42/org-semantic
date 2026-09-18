@@ -569,9 +569,9 @@ answering with the default vault instead of with none."
 
 So a type describing only what makes sense *globally* -- a directory, or
 nothing -- warns about the value t that the docstring tells a vault to
-write, and it warns on merely visiting a note in it.  `safe-local-variable' passing
-is not enough: that decides whether the value is applied, this decides
-whether Emacs complains while applying it."
+write, and it warns on merely visiting a note in it.  `safe-local-variable'
+passing is not enough: that decides whether the value is applied, this
+decides whether Emacs complains while applying it."
   (let ((type (widget-convert (custom-variable-type 'org-semantic-vault-root))))
     (dolist (value '(nil t "/abs/notes" "notes" "~/notes"))
       (should (widget-apply type :match value))))
