@@ -1199,6 +1199,36 @@ session runs under it: a handshake, a request, and a quit."
         (should (memq 'status sent))
         (dolist (method sent) (should (symbolp method)))))))
 
+(ert-deftest a-request-keeps-its-id-before-emacs-31 ()
+  "That `jsonrpc-async-request' answers nil until Emacs 31.
+
+The id is what a progress report is routed by and what
+`$/cancelRequest' names, so a client that reads it out of that
+function has none: reports go nowhere, no run is reported in flight,
+and nothing can stop one.  Every part of that is silent.
+
+So the old answer is put back on top of this Emacs, whatever version
+it is.  Without it the test passes on Emacs 31 and later and guards
+only the older ones."
+  (org-semantic-tests--with-server
+    (org-semantic-tests--with-vault dir
+      (advice-add 'jsonrpc-async-request :override
+                  (lambda (connection method params &rest args)
+                    (apply #'jsonrpc--async-request-1
+                           connection method params args)
+                    nil)
+                  '((name . before-31)))
+      (unwind-protect
+          (let* ((done nil)
+                 (id (org-semantic-index
+                      :vault dir :mode "lexical"
+                      :success (lambda (_) (setq done t))
+                      :failure (lambda (_) (setq done t)))))
+            (should (integerp id))
+            (should (org-semantic-indexing-p dir))
+            (should (org-semantic-tests--wait 120 (lambda () done))))
+        (advice-remove 'jsonrpc-async-request 'before-31)))))
+
 (ert-deftest closing-a-vault-says-nothing-unless-it-was-asked-for ()
   "A command reports; a function returns.
 
