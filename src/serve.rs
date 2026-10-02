@@ -676,7 +676,12 @@ impl Server {
             // that costs is nothing beside the download, and it means a reply of
             // `downloaded: true` is a model that was read back, not bytes that
             // landed.
-            let done = model_with(m.which.clone(), None, false)
+            // Caught, so that a panic still frees the model below and still
+            // answers.  Otherwise every later fetch of it is refused.
+            let done = std::panic::catch_unwind(|| model_with(m.which.clone(), None, false))
+                .unwrap_or_else(|p| {
+                    Err(anyhow!("the download stopped by an internal error: {}", panicked(&p)))
+                })
                 .map(|_| serde_json::json!({ "model": m.name, "downloaded": true }));
             j.progress_done();
             lock(&me.fetching).remove(m.name);
