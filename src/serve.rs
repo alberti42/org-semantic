@@ -579,7 +579,14 @@ impl Server {
         let vault = plan.vault.clone();
         let mine = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            let done = me.run(plan, &mut j, &mine);
+            // A panic unwinds past the reply below, and a client waits on that
+            // reply for ever.  Caught, it is the run's error instead.
+            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                me.run(plan, &mut j, &mine)
+            }))
+            .unwrap_or_else(|p| {
+                Err(anyhow!("indexing stopped by an internal error: {}", panicked(&p)))
+            });
             // Explicit, so that moving this line is a visible decision: the vault
             // stays claimed until the run is finished with it.
             drop(claim);
@@ -1044,6 +1051,15 @@ fn replied(id: RequestId, done: Result<serde_json::Value>, j: &mut Journal) -> R
         }
         Err(e) => failed(id, &e),
     }
+}
+
+/// The message a panic was raised with.  `panic!` with a literal carries a
+/// `&str`, and with format arguments a `String`.
+fn panicked(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".into())
 }
 
 /// An application error as a JSON-RPC one, never a process exit: a mistyped
