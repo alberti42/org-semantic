@@ -2213,6 +2213,8 @@ fn chunk_file(
             in_block = None;
             stands_for = None;
             block_opened_at = None;
+            // A run of `: ' lines ends here too, so the next section starts its own.
+            literal_run = None;
             let depth = h.level.saturating_sub(1);
             stack.truncate(depth);
             tag_stack.truncate(depth);
@@ -2261,6 +2263,7 @@ fn chunk_file(
             paras.clear();
             open = false;
             stands_for = None;
+            literal_run = None;
             cur_lang = policy.declared(&l, rel, n);
             continue;
         }
@@ -6618,6 +6621,15 @@ mod tests {
         assert_eq!(c.len(), 1, "the section is not divided: {c:?}");
         assert_eq!(c[0].lang, "en-US");
         assert!(c[0].text.contains("# ltex: language=de-DE"), "{}", c[0].text);
+    }
+
+    #[test]
+    fn a_headline_ends_a_run_of_fixed_width_lines() {
+        // Without the reset, the second run counted as the first one going on,
+        // and the section under `Two' got no placeholder for it.
+        let c = chunks_of("* One\nintro\n: a\n* Two\n: b\nafter\n");
+        let two = c.iter().find(|x| x.heading == "Note > Two").unwrap();
+        assert!(two.text.contains("[example]"), "{}", two.text);
     }
 
     #[test]
