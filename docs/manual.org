@@ -1525,6 +1525,7 @@ severity: every one of these is a warning.
 | =kind=                        | what it tells you                                        |
 |-------------------------------+----------------------------------------------------------|
 | =unreadable-file=             | that note is *missing from the index*, not merely absent from your results |
+| =unparsable-file=             | the same, because of a bug in org-semantic; the next run tries the note again |
 | =no-notes=                    | there are no =.org= files to index, so nothing was written |
 | =notes-elsewhere=             | =.org= files sit in the vault directory while the notes are somewhere else, so they are not indexed |
 | =heading-shortened=           | the section is filed under a cut heading path            |

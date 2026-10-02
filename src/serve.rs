@@ -1058,15 +1058,6 @@ fn replied(id: RequestId, done: Result<serde_json::Value>, j: &mut Journal) -> R
     }
 }
 
-/// The message a panic was raised with.  `panic!` with a literal carries a
-/// `&str`, and with format arguments a `String`.
-fn panicked(p: &Box<dyn std::any::Any + Send>) -> String {
-    p.downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| p.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no message".into())
-}
-
 /// An application error as a JSON-RPC one, never a process exit: a mistyped
 /// vault must not end the session.
 ///

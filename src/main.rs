@@ -2004,6 +2004,10 @@ fn chunk_file(
     target: Target,
     budget: &Budget,
 ) -> Vec<Chunk> {
+    #[cfg(test)]
+    if PLANTED_PANIC.with(|p| p.borrow().as_deref() == Some(rel)) {
+        panic!("planted in {rel}");
+    }
     let measure = budget.measure;
     // The unit the caller measures in decides which budget applies: the
     // semantic index counts the model's tokens, the lexical one characters.
@@ -4253,6 +4257,46 @@ fn report_unreadable(scan: &Scan, j: &mut Journal) {
     }
 }
 
+/// The message a panic was raised with.  `panic!` with a literal carries a
+/// `&str`, and with format arguments a `String`.
+fn panicked(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".into())
+}
+
+/// Chunk one note, or give the reason it could not be chunked.  A panic in the
+/// chunker is a bug.  It costs the note that caused it, not the whole run.
+fn chunk_guarded(chunk: impl FnOnce() -> Vec<Chunk>) -> std::result::Result<Vec<Chunk>, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(chunk)).map_err(|p| panicked(&p))
+}
+
+/// A note the chunker failed on, so it is missing from the index.  The run
+/// leaves it out of the manifest, so the next run tries it again.
+fn unparsable_note(path: &str, why: &str) -> Remark {
+    Remark::new(
+        "unparsable-file",
+        format!("could not be parsed, so it is not indexed (a bug in org-semantic): {why}"),
+    )
+    .at(path)
+}
+
+/// Report the notes the chunker failed on, and take them out of what the
+/// manifest records.  A note with no hash and no stamp is new to the next run.
+fn forget_unparsable(
+    failed: &[(String, String)],
+    hashes: &mut std::collections::BTreeMap<String, u64>,
+    stamps: &mut std::collections::BTreeMap<String, Stamp>,
+    j: &mut Journal,
+) {
+    for (path, why) in failed {
+        hashes.remove(path);
+        stamps.remove(path);
+        j.remark(unparsable_note(path, why));
+    }
+}
+
 /// What a previous run recorded about the notes it saw: a content hash and a
 /// `(mtime, size)` stamp, each keyed by vault-relative path.  Borrowed from
 /// whichever manifest the caller loaded, since the two indexes keep their own.
@@ -4431,7 +4475,7 @@ fn cmd_index_lexical(
         .flatten()
         .and_then(|b| serde_json::from_slice(&b).ok());
 
-    let scan = scan_vault(
+    let mut scan = scan_vault(
         &notes,
         &files,
         old.as_ref().map(|m| (&m.files, &m.stamps)),
@@ -4451,18 +4495,26 @@ fn cmd_index_lexical(
     // read again below would be reported twice.
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut speculative = Journal::quiet();
+    // Collected rather than reported, for the same reason: a rebuild chunks
+    // these notes again and fails on them again.
+    let mut failed: Vec<(String, String)> = Vec::new();
     for st in &scan.stale {
         stop.check()?;
         let f = notes.join(&st.path);
-        chunks.extend(chunk_file(
-            &f,
-            &st.path,
-            &st.text,
-            Some(&mut Lang { cfg: lang, journal: &mut speculative }),
-            cfg,
-            Target::Lexical,
-            &LEXICAL_BUDGET,
-        ));
+        match chunk_guarded(|| {
+            chunk_file(
+                &f,
+                &st.path,
+                &st.text,
+                Some(&mut Lang { cfg: lang, journal: &mut speculative }),
+                cfg,
+                Target::Lexical,
+                &LEXICAL_BUDGET,
+            )
+        }) {
+            Ok(cs) => chunks.extend(cs),
+            Err(why) => failed.push((st.path.clone(), why)),
+        }
     }
 
     let previous = old.as_ref().and_then(|m| lexical::Analyzer::from_key(&m.key));
@@ -4475,6 +4527,7 @@ fn cmd_index_lexical(
     // hand, so only the notes the scan skipped are opened here.
     if rebuilding {
         chunks.clear();
+        failed.clear();
         let in_hand: std::collections::HashMap<&str, &str> =
             scan.stale.iter().map(|s| (s.path.as_str(), s.text.as_str())).collect();
         // Already known to be unopenable, and already recorded on `Scan`.
@@ -4508,15 +4561,20 @@ fn cmd_index_lexical(
                     }
                 },
             };
-            chunks.extend(chunk_file(
-                f,
-                &path,
-                text,
-                Some(&mut Lang { cfg: lang, journal: j }),
-                cfg,
-                Target::Lexical,
-                &LEXICAL_BUDGET,
-            ));
+            match chunk_guarded(|| {
+                chunk_file(
+                    f,
+                    &path,
+                    text,
+                    Some(&mut Lang { cfg: lang, journal: j }),
+                    cfg,
+                    Target::Lexical,
+                    &LEXICAL_BUDGET,
+                )
+            }) {
+                Ok(cs) => chunks.extend(cs),
+                Err(why) => failed.push((path, why)),
+            }
         }
         j.progress(
             &Progress::new(
@@ -4550,6 +4608,12 @@ fn cmd_index_lexical(
     // because the rebuild opened every note again and would have named a broken
     // one a second time; it no longer opens what the scan already read.
     report_unreadable(&scan, j);
+    forget_unparsable(&failed, &mut scan.hashes, &mut scan.stamps, j);
+    // Its old passages go too.  `lexical::sync` deletes a note only by the path
+    // of a new chunk or a dropped note, and a failed note has neither.  The
+    // semantic side leaves it out the same way.
+    let gone: Vec<String> =
+        scan.dropped.iter().cloned().chain(failed.iter().map(|(p, _)| p.clone())).collect();
 
     if old.is_some() {
         writeln!(
@@ -4627,7 +4691,7 @@ fn cmd_index_lexical(
         ));
     }
 
-    lexical::sync(&dir, &chunks, &scan.dropped, rebuilding, &analyzer)?;
+    lexical::sync(&dir, &chunks, &gone, rebuilding, &analyzer)?;
     save_lex_manifest(
         &dir,
         &LexManifest {
@@ -4746,8 +4810,8 @@ fn cmd_index(
     )?;
     report_unreadable(&scan, j);
     let Scan {
-        hashes,
-        stamps,
+        mut hashes,
+        mut stamps,
         reuse,
         stale,
         dropped,
@@ -4816,6 +4880,7 @@ fn cmd_index(
         }
     }
     let mut carried = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
 
     // From the policy and nowhere else, as on the lexical side — which is why
     // this is derived here rather than passed in: a second channel for it is a
@@ -4855,15 +4920,23 @@ fn cmd_index(
         // are counted from the result — several chunks sharing a heading line —
         // rather than reported by the packer.
         let budget = Budget { measure: &measure, prefix: Some(m.passage) };
-        let cs = chunk_file(
-            f,
-            &path,
-            text,
-            Some(&mut Lang { cfg: &lang, journal: j }),
-            cfg,
-            Target::Semantic,
-            &budget,
-        );
+        let cs = match chunk_guarded(|| {
+            chunk_file(
+                f,
+                &path,
+                text,
+                Some(&mut Lang { cfg: &lang, journal: j }),
+                cfg,
+                Target::Semantic,
+                &budget,
+            )
+        }) {
+            Ok(cs) => cs,
+            Err(why) => {
+                failed.push((path, why));
+                continue;
+            }
+        };
         // A section that had to be divided shows up as consecutive chunks on one
         // heading line, so it is counted from the result rather than reported by
         // the packer — and counted once however many pieces it became.
@@ -4907,6 +4980,7 @@ fn cmd_index(
             .last(),
     );
     j.progress_done();
+    forget_unparsable(&failed, &mut hashes, &mut stamps, j);
 
     if old.is_some() {
         writeln!(
@@ -5229,6 +5303,13 @@ fn batch_order(n: usize, seed: u64) -> Vec<usize> {
 #[cfg(not(test))]
 fn shuffle_seed() -> u64 {
     SEED
+}
+
+// A note whose chunking panics, so a test can reach the path that skips it.
+// No real input panics once a bug is fixed, and the path must outlive the fix.
+#[cfg(test)]
+thread_local! {
+    static PLANTED_PANIC: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -7694,6 +7775,62 @@ mod tests {
 
     /// differed, which under `--rehash` is every note: each rehash rewrote the
     /// whole index to store stamps identical to the ones already there.
+    #[test]
+    fn a_note_the_chunker_fails_on_is_skipped_named_and_tried_again() {
+        let v = scratch("unparsable");
+        let a = note(&v, "alpha");
+        let b = note(&v, "beta");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let lex = |full: bool| {
+            let mut j = Journal::quiet();
+            let r =
+                cmd_index_lexical(&v, full, false, &lang, false, &cfg, &mut j, &Cancel::default())
+                    .unwrap();
+            (r, j.drain())
+        };
+        let recorded = || -> LexManifest {
+            serde_json::from_slice(&fs::read(lex_manifest_path(&state_dir(&v))).unwrap()).unwrap()
+        };
+        let docs = || {
+            let key = recorded().key;
+            lexical::doc_count(&state_dir(&v), &lexical::Analyzer::from_key(&key).unwrap()).unwrap()
+        };
+        let plant = |p: Option<&str>| PLANTED_PANIC.with(|x| *x.borrow_mut() = p.map(Into::into));
+        let named = |rs: &[Remark]| -> Vec<String> {
+            rs.iter()
+                .filter(|r| r.kind == "unparsable-file")
+                .filter_map(|r| r.path.clone())
+                .collect()
+        };
+
+        // A rebuild: the run goes on, names the note once, and records only the
+        // note it indexed.
+        plant(Some(&b));
+        let (_, rs) = lex(true);
+        assert_eq!(named(&rs), vec![b.clone()], "{rs:?}");
+        assert!(recorded().files.contains_key(&a));
+        assert!(!recorded().files.contains_key(&b) && !recorded().stamps.contains_key(&b));
+        assert_eq!(docs(), 1);
+
+        // The next run tries it again, since the manifest does not know it.
+        plant(None);
+        let (r, rs) = lex(false);
+        assert!(named(&rs).is_empty(), "{rs:?}");
+        assert_eq!(r.new, 1, "tried again as a new note");
+        assert_eq!(docs(), 2);
+
+        // An incremental run: the note changed and now fails.  Its old passages
+        // go, or a search would answer from a version the manifest disowns.
+        fs::write(v.join(&b), "* S\nText about beta, edited.\n").unwrap();
+        plant(Some(&b));
+        let (_, rs) = lex(false);
+        plant(None);
+        assert_eq!(named(&rs), vec![b.clone()], "{rs:?}");
+        assert!(!recorded().files.contains_key(&b));
+        assert_eq!(docs(), 1);
+    }
+
     #[test]
     fn a_stamp_that_moved_without_its_note_is_written_back() {
         let v = scratch("restamp");
