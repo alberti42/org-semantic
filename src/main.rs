@@ -2194,6 +2194,11 @@ fn chunk_file(
             );
             paras.clear();
             open = false;
+            // Org reads a column-0 headline even inside a block, so it ends the
+            // block.  `stands_for' indexed the paragraphs just cleared.
+            in_block = None;
+            stands_for = None;
+            block_opened_at = None;
             let depth = h.level.saturating_sub(1);
             stack.truncate(depth);
             tag_stack.truncate(depth);
@@ -2238,6 +2243,7 @@ fn chunk_file(
             );
             paras.clear();
             open = false;
+            stands_for = None;
             cur_lang = policy.declared(&l, rel, n);
             continue;
         }
@@ -6528,6 +6534,19 @@ mod tests {
         let c = chunks_of("#+title: My Note\n* Section :work:urgent:\nbody\n\n** Sub\ndeeper\n");
         assert_eq!(c[0].heading, "My Note > Section");
         assert_eq!(c[1].heading, "My Note > Section > Sub");
+    }
+
+    #[test]
+    fn heading_inside_a_dropped_block_ends_the_block() {
+        // Org reads a column-0 `* ' as a headline even inside a block, which is
+        // why it comma-escapes one there.  The headline clears the paragraphs,
+        // so the block's placeholder index must not survive it.
+        let c = chunks_of(
+            "* One\nintro\n\n#+begin_example\nbody\n\n* Two\nafter\n#+end_example\n\ntail\n",
+        );
+        let last = c.last().unwrap();
+        assert_eq!(last.heading, "Note > Two");
+        assert!(last.text.contains("after") && last.text.contains("tail"));
     }
 
     #[test]
