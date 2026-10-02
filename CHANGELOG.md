@@ -63,9 +63,31 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Binary version **0.6.0**, unchanged: there is nothing to download.
+Binary version **0.6.1**. The fixes below that name the binary need it; the
+elisp works with 0.6.0 as before, so the version floor does not move.
 
 ### Fixed
+
+- **A headline inside a block no longer stops indexing.** A line starting
+  with `* ` inside an example or src block, pasted without the comma that
+  `C-c '` adds, made the binary panic. In Emacs the index then never
+  answered, and the progress line stopped at `chunk: 0/N files`. Org reads
+  such a line as a headline, and the binary now does the same: the headline
+  ends the block. *Binary.*
+- **A note the binary cannot parse is skipped and named.** One such note used
+  to stop the whole run. Now the run indexes every other note, an
+  `unparsable-file` warning names the note, and the next run tries it again.
+  If an index run or a model download fails in this way, the request now
+  answers with an error. Before, it never answered. *Binary.*
+- **Lines inside a block no longer describe the note.** A property drawer,
+  `#+title:`, `#+filetags:`, `#+TODO:` or `# ltex:` line inside a block was
+  read as if it were outside it. An example block that showed a drawer gave
+  the note the example's `:ID:`, and an `ltex` comment in a shell script
+  changed the note's language. Org does not comma-escape a drawer, so this
+  was common in notes about org. *Binary.*
+- **A run of `: ` lines ends at a headline.** If a section ended with such a
+  run and the next section began with one, the second section lost its
+  `[example]` marker in the semantic index. *Binary.*
 
 - **The package works on Emacs 29 again.** The client named every JSON-RPC
   method with a string, and the `jsonrpc.el` in Emacs 29 takes a symbol only:
