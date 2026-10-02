@@ -2054,10 +2054,22 @@ fn chunk_file(
     let mut cur_lang = lang.as_deref().map(|l| l.cfg.undeclared().to_string()).unwrap_or_default();
 
     // Collected first: `#+filetags:` and `#+TODO:` may appear after content, and
-    // they apply to the whole file either way.
+    // they apply to the whole file either way.  Not inside a block, where org
+    // reads them as the block's text.  A headline ends a block, as below.
+    let mut blocked = false;
     for line in text.lines() {
         let t = line.trim();
-        if let Some(rest) = strip_prefix_ci(t, "#+filetags:") {
+        if heading_level(line).is_some() {
+            blocked = false;
+            continue;
+        }
+        if blocked {
+            blocked = strip_prefix_ci(t, "#+end_").is_none();
+            continue;
+        }
+        if strip_prefix_ci(t, "#+begin_").is_some() {
+            blocked = true;
+        } else if let Some(rest) = strip_prefix_ci(t, "#+filetags:") {
             file_tags.extend(parse_tag_list(rest));
         } else {
             // All three are org's own in-buffer declarations and all three add
@@ -2173,7 +2185,9 @@ fn chunk_file(
             }
             continue;
         }
-        if trimmed.eq_ignore_ascii_case(":PROPERTIES:") {
+        // Inside a block a drawer is the block's text.  Org does not
+        // comma-escape it, so an example of a drawer is common in notes.
+        if in_block.is_none() && trimmed.eq_ignore_ascii_case(":PROPERTIES:") {
             in_drawer = true;
             continue;
         }
@@ -2222,12 +2236,15 @@ fn chunk_file(
             continue;
         }
 
-        if let Some(rest) = strip_prefix_ci(trimmed, "#+title:") {
+        // Not inside a block, where these lines are the block's text.
+        if let Some(rest) = strip_prefix_ci(trimmed, "#+title:").filter(|_| in_block.is_none()) {
             title = rest.trim().to_string();
             continue;
         }
         // Takes effect from here on, so a note may switch language part-way.
-        if let Some((policy, l)) = lang.as_deref_mut().zip(ltex_language(line)) {
+        if let Some((policy, l)) =
+            lang.as_deref_mut().filter(|_| in_block.is_none()).zip(ltex_language(line))
+        {
             flush(
                 &mut chunks,
                 &paras,
@@ -6547,6 +6564,60 @@ mod tests {
         let last = c.last().unwrap();
         assert_eq!(last.heading, "Note > Two");
         assert!(last.text.contains("after") && last.text.contains("tail"));
+    }
+
+    #[test]
+    fn lines_inside_a_block_do_not_describe_the_note() {
+        // Org comma-escapes `#+' lines in a block but not a drawer, so a block
+        // showing a drawer is common.  Its title, id and tags are the block's
+        // text, not the note's.
+        let note = "#+title: Real\n* One\n:PROPERTIES:\n:ID: real-id\n:END:\nintro\n\n\
+                    #+begin_example\n#+title: Fake\n#+filetags: :fake:\n\
+                    :PROPERTIES:\n:ID: fake-id\n:END:\nbody\n#+end_example\n\nafter\n";
+        for target in [Target::Semantic, Target::Lexical] {
+            let c = chunk_file(
+                Path::new("/vault/Note.org"),
+                "Note.org",
+                note,
+                None,
+                &Config::default(),
+                target,
+                &UNSPLIT,
+            );
+            assert_eq!(c.len(), 1, "{target:?}: {c:?}");
+            assert_eq!(c[0].heading, "Real > One", "{target:?}");
+            assert_eq!(c[0].id.as_deref(), Some("real-id"), "{target:?}");
+            assert!(c[0].tags.is_empty(), "{target:?}: {:?}", c[0].tags);
+            assert!(c[0].text.contains("after"), "{target:?}: {}", c[0].text);
+        }
+        // The word index keeps the block's text, drawer lines included.
+        let lex = chunk_file(
+            Path::new("/vault/Note.org"),
+            "Note.org",
+            note,
+            None,
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        assert!(lex[0].text.contains(":ID: fake-id"), "{}", lex[0].text);
+    }
+
+    #[test]
+    fn an_ltex_line_inside_a_block_switches_no_language() {
+        let cfg = LangConfig::parse("en-US");
+        let c = chunk_file(
+            Path::new("/v/N.org"),
+            "N.org",
+            "* One\nalpha\n\n#+begin_src sh\n# ltex: language=de-DE\necho\n#+end_src\n\nbeta\n",
+            speaking!(&cfg),
+            &Config::default(),
+            Target::Lexical,
+            &UNSPLIT,
+        );
+        assert_eq!(c.len(), 1, "the section is not divided: {c:?}");
+        assert_eq!(c[0].lang, "en-US");
+        assert!(c[0].text.contains("# ltex: language=de-DE"), "{}", c[0].text);
     }
 
     #[test]
