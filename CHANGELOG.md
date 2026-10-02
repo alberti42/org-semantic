@@ -87,6 +87,9 @@ saying so. The floor makes Emacs tell you to update.
   the note the example's `:ID:`, and an `ltex` comment in a shell script
   changed the note's language. Org does not comma-escape a drawer, so this
   was common in notes about org. *Binary.*
+- **A note edited down to nothing leaves the word index.** If a change left a
+  note with no passages, for example a `:noexport:` tag on its only heading,
+  word search still found its old text. Semantic search did not. *Binary.*
 - **A run of `: ` lines ends at a headline.** If a section ended with such a
   run and the next section began with one, the second section lost its
   `[example]` marker in the semantic index. *Binary.*

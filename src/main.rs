@@ -4609,11 +4609,13 @@ fn cmd_index_lexical(
     // one a second time; it no longer opens what the scan already read.
     report_unreadable(&scan, j);
     forget_unparsable(&failed, &mut scan.hashes, &mut scan.stamps, j);
-    // Its old passages go too.  `lexical::sync` deletes a note only by the path
-    // of a new chunk or a dropped note, and a failed note has neither.  The
-    // semantic side leaves it out the same way.
+    // Every note chunked again loses its old passages, not only the ones that
+    // came back with new chunks.  `lexical::sync` deletes by the path of a new
+    // chunk, so a note edited down to nothing, or one the chunker failed on, kept
+    // its old passages and a search still found them.  The semantic side
+    // assembles its index from the new chunks and so never kept them.
     let gone: Vec<String> =
-        scan.dropped.iter().cloned().chain(failed.iter().map(|(p, _)| p.clone())).collect();
+        scan.dropped.iter().cloned().chain(scan.stale.iter().map(|s| s.path.clone())).collect();
 
     if old.is_some() {
         writeln!(
@@ -7829,6 +7831,45 @@ mod tests {
         assert_eq!(named(&rs), vec![b.clone()], "{rs:?}");
         assert!(!recorded().files.contains_key(&b));
         assert_eq!(docs(), 1);
+    }
+
+    #[test]
+    fn a_note_left_with_no_passages_leaves_the_word_index() {
+        // `sync` deleted a note by the path of a new chunk.  A note edited down
+        // to nothing has no new chunk, so its old passages stayed searchable.
+        // The semantic index drops them.  A note that can no longer be read was
+        // already dropped, and stays in the test so that it stays dropped.
+        let v = scratch("no-passages");
+        note(&v, "alpha");
+        let b = note(&v, "beta");
+        let c = note(&v, "gamma");
+        let cfg = Config::default();
+        let lang = LangConfig::default();
+        let lex = |full: bool| {
+            cmd_index_lexical(
+                &v,
+                full,
+                false,
+                &lang,
+                false,
+                &cfg,
+                &mut Journal::quiet(),
+                &Cancel::default(),
+            )
+            .unwrap()
+        };
+        let docs = || {
+            let dir = state_dir(&v);
+            let key = fs::read_to_string(dir.join("tantivy").join("analyzer.txt")).unwrap();
+            lexical::doc_count(&dir, &lexical::Analyzer::from_key(key.trim()).unwrap()).unwrap()
+        };
+        lex(true);
+        assert_eq!(docs(), 3);
+
+        fs::write(v.join(&b), "#+title: beta\n").unwrap();
+        fs::write(v.join(&c), b"* S\n\xff\xfe not UTF-8\n").unwrap();
+        lex(false);
+        assert_eq!(docs(), 1, "only alpha is left to find");
     }
 
     #[test]
