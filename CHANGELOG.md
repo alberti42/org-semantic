@@ -63,8 +63,10 @@ built. It then publishes a **draft** release for review.
 
 ## [Unreleased]
 
-Binary version **0.6.1**. The fixes below that name the binary need it; the
-elisp works with 0.6.0 as before, so the version floor does not move.
+Binary version **0.6.1**, and the version floor moves to it. A 0.6.0 binary
+still gets the fixes marked *Binary* wrong: it hangs on a headline inside a
+block, and it gives a note the `:ID:` and title of an example block without
+saying so. The floor makes Emacs tell you to update.
 
 ### Fixed
 
