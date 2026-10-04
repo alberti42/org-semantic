@@ -2633,6 +2633,7 @@ wire up yourself.
 | org-supertag     | org      | native elisp                       | elisp only, no embeddings          |
 | org-db           | org      | native elisp                       | Python + =torch= server on a port  |
 | emacs-rag-libsql | org      | native elisp                       | Python + =torch= server on a port  |
+| ssor             | org-roam | elisp in the blog post             | Python + OpenAI, server on a port  |
 | markdown-vdb     | Markdown | none (Claude Code skills)          | Rust CLI, external embedding API   |
 | mdvault          | Markdown | none (MCP for Claude Code)         | Python, MCP server                 |
 
@@ -2663,6 +2664,14 @@ All of these are Markdown-first; org-semantic exists because none of them parse 
 [[https://github.com/jkitchin/org-db-v3][org-db]] and [[https://github.com/jkitchin/emacs-rag-libsql][emacs-rag-libsql]], both by John Kitchin, are the closest in aim to org-semantic --- semantic search over an org tree, driven from Emacs. Both split the work the same way: Emacs parses and navigates, a Python FastAPI server does the embedding and the vector search. org-db goes wide --- CLIP image search, SQLite full-text, indexing linked PDF/DOCX/PPTX, gptel tools for an LLM; emacs-rag-libsql goes deep on ranking, a cross-encoder reranking the vector hits in a second stage. Both fuse vector and keyword into one hybrid result.
 
 The difference is what you have to install and what has to be running. Each needs Python and =uv=, and pulls in =sentence-transformers= and =torch= --- org-db also =transformers=, =pillow=, =pymupdf4llm=, =python-docx=, =python-pptx= --- then a FastAPI process listening on a port for Emacs to reach over HTTP. org-semantic is one static binary: the embedding model runs in-process through a statically linked ONNX Runtime, nothing binds a port, and =serve= is a stdio child the editor starts and owns, not a daemon.
+
+** ssor
+:PROPERTIES:
+:CUSTOM_ID: ssor
+:END:
+[[https://github.com/lgmoneda/ssor][ssor]] (Semantic Search for Org-roam) is the code behind the blog post [[https://lgmoneda.github.io/2023/04/08/semantic-search-for-org-roam.html][Semantic Search for Org-roam]], from April 2023. It is an external tool and not part of org-roam: a Python script embeds the notes through the OpenAI API into a Chroma database, and a Python server on port 8800 answers Emacs over HTTP with a list of org-roam links. The elisp that calls it is in the blog post.
+
+Three things set it apart. It indexes org-roam nodes, so a heading without an =:ID:= is never a result of its own. It embeds the whole vault again on every run, and each run sends every note to OpenAI. And it has no word search. org-semantic reads any tree of =.org= files, embeds only the passages that changed, runs the model in its own process, and keeps a BM25 index beside the embeddings.
 
 ** vulpea, which is a companion and not an alternative
 :PROPERTIES:
