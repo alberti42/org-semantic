@@ -61,6 +61,21 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+The binary does not change. There is nothing to download.
+
+### Added
+
+- **Org tables in the results buffer have aligned columns.** When the
+  package [pretty-tables](https://github.com/alberti42/pretty-tables.el)
+  0.4.0 is installed, on Emacs 31.1 or newer, the results buffer draws
+  each Org table with aligned, wrapped columns. There is nothing to
+  configure. The text of the passage does not change, and the row that
+  point is on shows as its text. Set `org-semantic-results-pretty-tables`
+  to nil to show the tables as their text. Without pretty-tables, nothing
+  changes and the adaptor is not loaded.
+
 ## [0.7.1] — 2026-10-02
 
 Binary version **0.6.1**, and the version floor moves to it. A 0.6.0 binary

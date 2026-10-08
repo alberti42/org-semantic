@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026 Andrea Alberti
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
+;; Version: 0.7.1
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
 ;; SPDX-License-Identifier: MIT
