@@ -40,10 +40,13 @@ jobs:
           version: ${{ matrix.emacs_version }}
 
       # The table adaptor's tests need pretty-tables.  They skip below
-      # Emacs 31.1, so only the 31.1 and snapshot jobs run them.
+      # Emacs 31.1, so only the 31.1 and snapshot jobs run them.  The
+      # checkout is pinned to the release the manual names, so a change on
+      # pretty-tables' main does not turn this job red.
       - uses: actions/checkout@v5
         with:
           repository: alberti42/pretty-tables.el
+          ref: v0.4.0
           path: pretty-tables
 
       - name: Report version
