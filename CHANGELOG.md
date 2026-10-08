@@ -71,10 +71,11 @@ The binary does not change. There is nothing to download.
   package [pretty-tables](https://github.com/alberti42/pretty-tables.el)
   0.4.0 is installed, on Emacs 31.1 or newer, the results buffer draws
   each Org table with aligned, wrapped columns. There is nothing to
-  configure. The text of the passage does not change, and the row that
-  point is on shows as its text. Set `org-semantic-results-pretty-tables`
-  to nil to show the tables as their text. Without pretty-tables, nothing
-  changes and the adaptor is not loaded.
+  configure. The text of the passage does not change. The row that point
+  is on stays drawn, except during an Isearch, where it shows as its
+  text. Set `org-semantic-results-pretty-tables` to nil to show the
+  tables as their text. Without pretty-tables, nothing changes and the
+  adaptor is not loaded.
 
 ## [0.7.1] — 2026-10-02
 

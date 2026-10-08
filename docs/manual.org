@@ -679,8 +679,10 @@ Org tables in a passage are drawn with aligned, wrapped columns when the package
 [[https://github.com/alberti42/pretty-tables.el][pretty-tables]] is installed. It
 needs Emacs 31.1 and pretty-tables 0.4.0, and nothing to configure: the results
 buffer finds it and turns it on. The drawing goes over the text and does not
-change it, and the row point is on is shown as its text. To show the tables as
-their text, set ~org-semantic-results-pretty-tables~ to =nil=.
+change it. The row point is on stays drawn, except during an Isearch, where it
+is shown as its text. Setting ~pretty-tables-reveal~ to =always= shows it as its
+text whenever point is on it. To show the tables as their text, set
+~org-semantic-results-pretty-tables~ to =nil=.
 
 One setting says which vault your notes are in. With a single vault that is the
 whole of it:
