@@ -15,7 +15,10 @@
 ;; Org tables of the passages with aligned, wrapped columns, as
 ;; `pretty-tables-for-org-mode' draws them in a note.  The buffer text
 ;; is not changed: each row is covered by an overlay whose `display' is
-;; the drawn row, and the row point is on is shown as its text.
+;; the drawn row.  The results buffer is read-only, so the row point is
+;; on stays drawn, except during an Isearch, where it is shown as its
+;; text.  Setting `pretty-tables-reveal' to `always' shows it as its
+;; text whenever point is on it.
 ;;
 ;; The results buffer is not in `org-mode', so the tables are found by
 ;; the text and faces of each passage line after its gutter:
@@ -127,8 +130,10 @@ by the text from the end of the gutter to POS."
 ;;;###autoload
 (define-minor-mode org-semantic-pretty-tables-mode
   "Display the Org tables of org-semantic results with aligned columns.
-The buffer text is not changed.  The row point is on is shown as its
-text, except after a scroll command moved point onto it."
+The buffer text is not changed.  The row point is on stays drawn,
+except during an Isearch, where it is shown as its text.  Setting
+`pretty-tables-reveal' to `always' shows it as its text whenever point
+is on it, except after a scroll command moved point onto it."
   :lighter nil
   (if org-semantic-pretty-tables-mode
       (progn

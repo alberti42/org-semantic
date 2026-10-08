@@ -17,6 +17,8 @@
 (require 'org-semantic-pretty-tables)
 
 (defvar pretty-tables-width)
+(defvar pretty-tables-reveal)
+(declare-function pretty-tables--reveal "pretty-tables")
 
 (defun org-semantic-pretty-tables-tests--available-p ()
   "Return non-nil when the adaptor can draw tables here."
@@ -124,6 +126,22 @@ The prefix is as wide as the gutter, and holds no line number."
     (should (org-semantic-pretty-tables-tests--overlays))
     (org-semantic-pretty-tables-mode -1)
     (should-not (org-semantic-pretty-tables-tests--overlays))))
+
+(ert-deftest org-semantic-pretty-tables-row-at-point-stays-drawn ()
+  "The results buffer is read-only, so the row point is on stays drawn.
+With `pretty-tables-reveal' set to `always', it is shown as its text."
+  (skip-unless (org-semantic-pretty-tables-tests--available-p))
+  (org-semantic-pretty-tables-tests--drawn
+      (list (org-semantic-results-tests--hit
+             :text "| a | b |\n|---+---|\n| one | two |"))
+    (let ((ov (car (org-semantic-pretty-tables-tests--overlays))))
+      (should buffer-read-only)
+      (goto-char (overlay-start ov))
+      (pretty-tables--reveal)
+      (should (overlay-get ov 'display))
+      (let ((pretty-tables-reveal 'always))
+        (pretty-tables--reveal)
+        (should-not (overlay-get ov 'display))))))
 
 (ert-deftest org-semantic-pretty-tables-on-in-results ()
   "The results buffer turns the mode on when `pretty-tables' is there."

@@ -158,8 +158,10 @@ installed.  Then `org-semantic-results-mode' turns on
 text.
 
 The buffer text does not change.  Each table row is covered by an
-overlay with a `display' property, and the row point is on is shown
-as its text."
+overlay with a `display' property.  The row point is on stays drawn,
+except during an Isearch, where it is shown as its text.  Setting
+`pretty-tables-reveal' to `always' shows it as its text whenever point
+is on it."
   :type 'boolean)
 
 (defcustom org-semantic-results-display-action
