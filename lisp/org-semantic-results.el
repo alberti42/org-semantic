@@ -32,6 +32,12 @@
 ;; the start of each passage line, and which also carries the provenance
 ;; properties.
 ;;
+;; Tables are the exception to the `display' rule.  When `pretty-tables'
+;; is installed, `org-semantic-pretty-tables-mode' covers each table row
+;; with an overlay that has a `display' property.  The text under the
+;; overlay is still the note's line.  See
+;; `org-semantic-results-pretty-tables'.
+;;
 ;; A hit is addressed by file and line.  Not by its `:ID:', which is the
 ;; same for every hit in a large note, and not by its heading text, which
 ;; can be older than the note.
@@ -57,6 +63,10 @@
 ;; so a results buffer opens in an Emacs that has never visited a note.
 (defvar org-link-bracket-re)
 (defvar org-link-descriptive)
+
+;; Loaded by `org-semantic-results-mode', and only when `pretty-tables'
+;; is installed.
+(declare-function org-semantic-pretty-tables-mode "org-semantic-pretty-tables")
 
 
 ;;;; Settings
@@ -136,6 +146,20 @@ needs org loaded.  Where org is absent, it does nothing.
 A block is always whole in a passage: its `#+begin_' line is inside
 the span, and a blank line inside it does not end a paragraph.  A
 passage therefore never shows one marker without the other."
+  :type 'boolean)
+
+(defcustom org-semantic-results-pretty-tables t
+  "Whether to draw the Org tables of a passage with aligned columns.
+
+It has an effect only when the package `pretty-tables' is
+installed.  Then `org-semantic-results-mode' turns on
+`org-semantic-pretty-tables-mode', which needs Emacs 31.1 and
+`pretty-tables' 0.4.0.  Set it to nil to show the tables as their
+text.
+
+The buffer text does not change.  Each table row is covered by an
+overlay with a `display' property, and the row point is on is shown
+as its text."
   :type 'boolean)
 
 (defcustom org-semantic-results-display-action
@@ -473,7 +497,14 @@ To have it on in every results buffer, put it on this mode's hook:
   ;; A second spec: `TAB' folds the tail of a passage away and back, and
   ;; must not take a link's brackets with it.
   (add-to-invisibility-spec 'org-semantic-results-link)
-  (add-hook 'kill-buffer-hook #'org-semantic-results--abandon nil t))
+  (add-hook 'kill-buffer-hook #'org-semantic-results--abandon nil t)
+  ;; `pretty-tables-for-org-mode' is autoloaded when `pretty-tables' is
+  ;; installed.  The adaptor is loaded only here, so a user without
+  ;; `pretty-tables' never loads it.
+  (when (and org-semantic-results-pretty-tables
+             (fboundp 'pretty-tables-for-org-mode))
+    (require 'org-semantic-pretty-tables)
+    (org-semantic-pretty-tables-mode 1)))
 
 (defun org-semantic-results--abandon ()
   "Stop caring about the search this buffer asked for."

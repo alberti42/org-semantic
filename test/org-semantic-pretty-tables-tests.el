@@ -125,5 +125,21 @@ The prefix is as wide as the gutter, and holds no line number."
     (org-semantic-pretty-tables-mode -1)
     (should-not (org-semantic-pretty-tables-tests--overlays))))
 
+(ert-deftest org-semantic-pretty-tables-on-in-results ()
+  "The results buffer turns the mode on when `pretty-tables' is there."
+  (skip-unless (org-semantic-pretty-tables-tests--available-p))
+  (with-temp-buffer
+    (let ((org-semantic-results-pretty-tables t))
+      (org-semantic-results-mode))
+    (should org-semantic-pretty-tables-mode)))
+
+(ert-deftest org-semantic-pretty-tables-opt-out ()
+  "With `org-semantic-results-pretty-tables' nil, the mode stays off."
+  (skip-unless (org-semantic-pretty-tables-tests--available-p))
+  (with-temp-buffer
+    (let ((org-semantic-results-pretty-tables nil))
+      (org-semantic-results-mode))
+    (should-not org-semantic-pretty-tables-mode)))
+
 (provide 'org-semantic-pretty-tables-tests)
 ;;; org-semantic-pretty-tables-tests.el ends here
