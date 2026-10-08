@@ -675,6 +675,13 @@ block is one paragraph however many blank lines are in it, and its =#+begin_=
 line is inside the span, so a passage never shows one marker without the other.
 That last one took two fixes to be true.
 
+Org tables in a passage are drawn with aligned, wrapped columns when the package
+[[https://github.com/alberti42/pretty-tables.el][pretty-tables]] is installed. It
+needs Emacs 31.1 and pretty-tables 0.4.0, and nothing to configure: the results
+buffer finds it and turns it on. The drawing goes over the text and does not
+change it, and the row point is on is shown as its text. To show the tables as
+their text, set ~org-semantic-results-pretty-tables~ to =nil=.
+
 One setting says which vault your notes are in. With a single vault that is the
 whole of it:
 
@@ -831,6 +838,7 @@ Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 | ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
 | ~org-semantic-results-connector~     | ='and'=        | join a word query's terms with =and= or =or=                 |
 | ~org-semantic-results-fontify~       | =t=            | show a passage with org's own faces --- below                |
+| ~org-semantic-results-pretty-tables~ | =t=            | align the columns of a table, with pretty-tables --- above   |
 | ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
 | ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
 | ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |
