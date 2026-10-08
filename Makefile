@@ -11,8 +11,9 @@ EMACS ?= emacs
 # requires an earlier one picks up the .elc just produced.
 ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
 	lisp/org-semantic-results.el lisp/org-semantic-doctor.el \
+	lisp/org-semantic-pretty-tables.el \
 	test/org-semantic-tests.el test/org-semantic-results-tests.el \
-	test/org-semantic-doctor-tests.el
+	test/org-semantic-doctor-tests.el test/org-semantic-pretty-tables-tests.el
 
 all: build
 
@@ -31,6 +32,7 @@ test-elisp:
 		-l test/org-semantic-tests.el \
 		-l test/org-semantic-results-tests.el \
 		-l test/org-semantic-doctor-tests.el \
+		-l test/org-semantic-pretty-tables-tests.el \
 		-f ert-run-tests-batch-and-exit
 
 lint: lint-rust lint-elisp
