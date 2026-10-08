@@ -15,6 +15,12 @@ ELISP := lisp/org-semantic.el lisp/org-semantic-ui.el \
 	test/org-semantic-tests.el test/org-semantic-results-tests.el \
 	test/org-semantic-doctor-tests.el test/org-semantic-pretty-tables-tests.el
 
+# More directories for the `load-path', for packages this one can use but
+# does not require.  CI sets it to a checkout of pretty-tables, so the
+# table tests run on an Emacs new enough for it instead of skipping.
+EXTRA_LOAD_PATH ?=
+LOAD_PATH := -L lisp -L test $(addprefix -L ,$(EXTRA_LOAD_PATH))
+
 all: build
 
 build:
@@ -28,7 +34,7 @@ test-rust:
 # The tests that need the binary find it at target/release and skip if it is
 # not there, so this is worth running on its own; `make test` builds it first.
 test-elisp:
-	$(EMACS) --batch --no-init-file -L lisp -L test -l ert \
+	$(EMACS) --batch --no-init-file $(LOAD_PATH) -l ert \
 		-l test/org-semantic-tests.el \
 		-l test/org-semantic-results-tests.el \
 		-l test/org-semantic-doctor-tests.el \
@@ -58,12 +64,12 @@ lint-rust:
 # unchanged docstring.  Upstream turning it off by default is upstream
 # agreeing.
 lint-elisp:
-	$(EMACS) --batch --no-init-file -L lisp -L test \
+	$(EMACS) --batch --no-init-file $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile $(ELISP)
 	@rm -f lisp/*.elc test/*.elc
 	@for f in $(ELISP); do \
-		$(EMACS) --batch --no-init-file -L lisp -L test \
+		$(EMACS) --batch --no-init-file $(LOAD_PATH) \
 			--eval "(progn \
 			          (require 'checkdoc) \
 			          (setq checkdoc-verb-check-experimental-flag nil) \
