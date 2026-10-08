@@ -821,28 +821,28 @@ indexes the current vault from anywhere: plain trusts each note's timestamp,
 :END:
 Everything the package exposes, in ~M-x customize-group RET org-semantic~:
 
-| variable                             | default        | what it decides                                             |
-|--------------------------------------+----------------+-------------------------------------------------------------|
-| ~org-semantic-vault-root~            | =nil=          | which vault your notes are in, or a function --- above      |
-| ~org-semantic-executable~            | =org-semantic= | the binary, by name on =exec-path= or as a path             |
-| ~org-semantic-install-directory~     | =~/.emacs.d/org-semantic/= | where a binary of its own is kept --- below     |
-| ~org-semantic-cache-home~            | =nil=          | where the server downloads its models --- below             |
-| ~org-semantic-model~                 | =nil=          | which model, when a vault has several built                 |
-| ~org-semantic-index-mode~            | ="both"=       | which indexes =M-x org-semantic-reindex= builds             |
-| ~org-semantic-auto-reindex-mode~     | =nil=          | reindex a vault when one of its notes is saved --- above    |
-| ~org-semantic-auto-reindex-delay~    | =2.0=          | seconds of quiet after a save before it runs                |
-| ~org-semantic-auto-reindex-quietly~  | =t=            | whether a run that worked says so                           |
-| ~org-semantic-require-fresh-index~   | =nil=          | never answer from an index that is being rebuilt --- below  |
-| ~org-semantic-timeout~               | =30=           | seconds to wait for a search, a status or a close           |
-| ~org-semantic-index-timeout~         | =7200=         | seconds to wait for an index                                |
-| ~org-semantic-results-ranking~       | ="semantic"=   | ="semantic"=, ="lexical"= or ="ask"= each time               |
-| ~org-semantic-results-connector~     | ='and'=        | join a word query's terms with =and= or =or=                 |
-| ~org-semantic-results-fontify~       | =t=            | show a passage with org's own faces --- below                |
-| ~org-semantic-results-pretty-tables~ | =t=            | align the columns of a table, with pretty-tables --- above   |
-| ~org-semantic-results-passage-lines~ | =12=           | how much of a passage to show before folding the rest       |
-| ~org-semantic-results-line-numbers~  | =nil=          | number a passage's lines as the note numbers them           |
-| ~org-semantic-results-reveal-function~ | Dired        | how the directory part of an address is shown --- below     |
-| ~org-semantic-results-display-action~ | reuse a results window | how the buffer asks to be shown --- below         |
+| variable                               | default                    | what it decides                                       |
+|----------------------------------------+----------------------------+-------------------------------------------------------|
+| ~org-semantic-vault-root~              | =nil=                      | which vault your notes are in, or a function          |
+| ~org-semantic-executable~              | =org-semantic=             | the binary, by name on =exec-path= or as a path       |
+| ~org-semantic-install-directory~       | =~/.emacs.d/org-semantic/= | where a binary of its own is kept                     |
+| ~org-semantic-cache-home~              | =nil=                      | where the server downloads its models                 |
+| ~org-semantic-model~                   | =nil=                      | which model, when a vault has several built           |
+| ~org-semantic-index-mode~              | ="both"=                   | which indexes =M-x org-semantic-reindex= builds       |
+| ~org-semantic-auto-reindex-mode~       | =nil=                      | reindex a vault when one of its notes is saved        |
+| ~org-semantic-auto-reindex-delay~      | =2.0=                      | seconds of quiet after a save before it runs          |
+| ~org-semantic-auto-reindex-quietly~    | =t=                        | whether a run that worked says so                     |
+| ~org-semantic-require-fresh-index~     | =nil=                      | never answer from an index that is being rebuilt      |
+| ~org-semantic-timeout~                 | =30=                       | seconds to wait for a search, a status or a close     |
+| ~org-semantic-index-timeout~           | =7200=                     | seconds to wait for an index                          |
+| ~org-semantic-results-ranking~         | ="semantic"=               | ="semantic"=, ="lexical"= or ="ask"= each time        |
+| ~org-semantic-results-connector~       | ='and'=                    | join a word query's terms with =and= or =or=          |
+| ~org-semantic-results-fontify~         | =t=                        | show a passage with org's own faces                   |
+| ~org-semantic-results-pretty-tables~   | =t=                        | align the columns of a table, with pretty-tables      |
+| ~org-semantic-results-passage-lines~   | =12=                       | how much of a passage to show before folding the rest |
+| ~org-semantic-results-line-numbers~    | =nil=                      | number a passage's lines as the note numbers them     |
+| ~org-semantic-results-reveal-function~ | Dired                      | how the directory part of an address is shown         |
+| ~org-semantic-results-display-action~  | reuse a results window     | how the buffer asks to be shown                       |
 
 The timeouts are generous rather than tight, and exist because jsonrpc.el wants a
 number: a warm search is under ten milliseconds, the first one against a vault
