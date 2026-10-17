@@ -333,9 +333,6 @@ holds by the string it was given, so a caller that names a vault of
 its own must spell it the same way."
   (directory-file-name (file-truename (expand-file-name dir))))
 
-(define-obsolete-function-alias 'org-semantic--canonical
-  'org-semantic-canonical-vault "0.3.0")
-
 
 ;;;; Errors
 
