@@ -61,6 +61,43 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [0.8.1] — 2026-10-17
+
+Binary version **0.6.1**, the same as in 0.8.0. The version floor does not
+move.
+
+### Added
+
+- **A passage that font-lock cannot handle says so.** Such a passage was
+  already shown without faces, and nothing said why. Now the header of the
+  results buffer gives the number of such passages, and a line under the
+  head of each one gives its error.
+
+### Changed
+
+- **The results buffer shows each warning in one face,
+  `org-semantic-results-warning`, which inherits `warning`.** It is used by
+  the errors from the server, a passage that the note no longer has, the
+  font-lock lines, and the `indexing` and exclusion-list notes in the
+  header. Those two notes were grey before. The face replaces
+  `org-semantic-results-stale`, so a customization of that face must move
+  to the new name.
+- **The exclusion-list note in the header says "press R to update the
+  index".** It said "R updates the index".
+- **A failure of `org-semantic-auto-reindex-mode` is said again after an
+  hour, while it lasts.** Before, a failure in a vault was said once, until
+  a run worked or the mode was turned off and on. In an Emacs that runs for
+  weeks, a message that was missed was never said again. Now the same
+  message in the same vault is said at most once per hour, and the message
+  says so. A different failure is said at once.
+- **Packaging, for MELPA.** `Package-Requires` is only in `org-semantic.el`,
+  where package.el reads it. Each file has an `Assisted-by:` line.
+
+### Removed
+
+- `org-semantic--canonical`, an obsolete alias of
+  `org-semantic-canonical-vault` since 0.3.0.
+
 ## [0.8.0] — 2026-10-08
 
 Binary version **0.6.1**, the same as in 0.7.1. The version floor does not
@@ -906,7 +943,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.1
 [0.8.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.0
 [0.7.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.7.1
 [0.7.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.7.0
