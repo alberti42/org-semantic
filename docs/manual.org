@@ -655,6 +655,11 @@ addressable and one day writable, so nothing here may replace or move text.
 Org's own =keymap=, =invisible= and =display= properties are therefore left
 behind.
 
+If font-lock fails on a passage, the passage is shown without faces, and the
+buffer says so. The header gives the number of such passages, and a line under
+the head of each one gives its error. The error usually names the function that
+failed, in Org or in a font-lock rule from your configuration.
+
 Links are the exception. With =org-link-descriptive= on --- the default, and what
 =M-x org-toggle-link-display= toggles --- a link shows its description and its
 brackets are hidden, as in a note. That hiding is ours rather than org's: org 9.8
