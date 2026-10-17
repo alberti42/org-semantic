@@ -899,8 +899,8 @@ both of them read the same way."
                                "indexing: this list is one version behind")
                           (and org-semantic-results--drifted
                                (substitute-command-keys
-                                "exclusion list changed: \\[org-semantic-results-reindex] \
-updates the index")))))
+                                "exclusion list changed: press \
+\\[org-semantic-results-reindex] to update the index")))))
         (sep (propertize "  ·  " 'face 'org-semantic-results-location)))
     (mapconcat (lambda (note)
                  (concat sep (propertize note 'face 'org-semantic-results-warning)))
