@@ -1897,10 +1897,87 @@ action is the whole of what asks for it."
   "A passage is worth more than its faces.
 
 So the fontifier is wrapped: anything it signals gives the plain text
-back, rather than losing the search to a rendering flourish."
-  (cl-letf (((symbol-function 'font-lock-ensure)
-             (lambda (&rest _) (error "No fontifying today"))))
-    (should (equal (org-semantic-results--fontified "plain *text*") "plain *text*"))))
+back, rather than losing the search to a rendering flourish.  The
+error goes to FAILED, so the buffer can say so."
+  (skip-unless (require 'org nil t))
+  (let ((said nil))
+    (cl-letf (((symbol-function 'font-lock-ensure)
+               (lambda (&rest _) (error "No fontifying today"))))
+      (should (equal (org-semantic-results--fontified
+                      "plain *text*"
+                      (lambda (err) (setq said (error-message-string err))))
+                     "plain *text*"))
+      (should (equal said "No fontifying today"))
+      ;; With no FAILED, the text still comes back.
+      (should (equal (org-semantic-results--fontified "plain *text*")
+                     "plain *text*")))))
+
+(ert-deftest the-unfontified-line-gives-the-count-only ()
+  "The header gives the count.  Each passage carries its own error."
+  (should-not (org-semantic-results--unfontified-line 0))
+  (should (equal (org-semantic-results--unfontified-line 1)
+                 "Font-lock failed on 1 passage, which is shown without faces.  \
+The error is shown below it."))
+  (should (equal (org-semantic-results--unfontified-line 3)
+                 "Font-lock failed on 3 passages, which are shown without faces.  \
+The error is shown below each one.")))
+
+(ert-deftest a-search-says-on-which-passages-font-lock-failed ()
+  "The header gives the count, and each failed passage its own error.
+The error is under the head line of the passage, not after its text.
+
+There is no latch.  Each drawing finds its own failures, so a search
+where font-lock works on every passage draws neither line.  The line
+under a passage is not a line of the note, so it carries no
+`org-semantic-line'."
+  (skip-unless (require 'org nil t))
+  (let ((org-semantic-results-fontify t)
+        (fail t)
+        (hits (list (org-semantic-results-tests--hit
+                     :text "bad\ntwo\nthree")
+                    (org-semantic-results-tests--hit
+                     :path "notes/b.org" :file "/vault/notes/b.org"
+                     :title "B" :heading "B > Section"
+                     :text "four\nfive\nsix")
+                    (org-semantic-results-tests--hit
+                     :path "notes/c.org" :file "/vault/notes/c.org"
+                     :title "C" :heading "C > Section"
+                     :text "worse\neight\nnine"))))
+    (cl-letf* ((ensure (symbol-function 'font-lock-ensure))
+               ((symbol-function 'font-lock-ensure)
+                (lambda (&rest args)
+                  (cond ((not fail) (apply ensure args))
+                        ((string-search "bad" (buffer-string))
+                         (error "Font-lock broke"))
+                        ((string-search "worse" (buffer-string))
+                         (error "Font-lock broke again"))
+                        (t (apply ensure args))))))
+      (org-semantic-results-tests--drawn hits
+        (goto-char (point-min))
+        (should (search-forward
+                 "Font-lock failed on 2 passages, which are shown without faces."
+                 nil t))
+        ;; Each failed passage has its own error under its head line, and
+        ;; its text is still drawn.
+        (should (search-forward "a.org" nil t))
+        (forward-line 1)
+        (should (looking-at-p
+                 " +font-lock failed, shown without faces: Font-lock broke$"))
+        (should-not (get-text-property (point) 'org-semantic-line))
+        (forward-line 1)
+        (should (looking-at-p " +bad$"))
+        ;; The passage that worked has no such line.
+        (should (search-forward "b.org" nil t))
+        (forward-line 1)
+        (should (looking-at-p " +four$"))
+        (should (search-forward "c.org" nil t))
+        (forward-line 1)
+        (should (looking-at-p
+                 " +font-lock failed, shown without faces: Font-lock broke again$"))
+        (setq fail nil)
+        (org-semantic-results--render (list :hits hits))
+        (goto-char (point-min))
+        (should-not (search-forward "ont-lock failed" nil t))))))
 
 ;;;; The sources themselves
 

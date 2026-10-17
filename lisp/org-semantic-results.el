@@ -330,6 +330,10 @@ by a shell sends us nothing when it lands.")
 (defvar-local org-semantic-results--drifted nil
   "Whether the last reply said the exclusion list has moved.")
 
+(defvar-local org-semantic-results--unfontified 0
+  "How many passages were last drawn without faces, because font-lock failed.
+See `org-semantic-results--unfontified-line'.")
+
 (defvar-local org-semantic-results--latched nil
   "The failure kinds already said in full for the search in flight.
 Cleared by `org-semantic-results--search'.  See
@@ -907,31 +911,38 @@ updates the index"))))))
          (elapsed (and org-semantic-results--started
                        (- (float-time) org-semantic-results--started)))
          (drawn nil)
-         (dropped 0))
+         (dropped 0)
+         (unfontified 0)
+         (notes nil))
     (setq org-semantic-results--indexing
           (org-semantic-true-p (plist-get reply :indexing)))
     (setq org-semantic-results--drifted (org-semantic-results--drift-p reply))
-    (erase-buffer)
-    (org-semantic-results--insert-header hits elapsed t)
+    ;; Every passage is drawn into a string before the header, because the
+    ;; header says on which passages font-lock failed.
     (dolist (file (org-semantic-results--group hits))
       (let ((blocks nil))
-        ;; Drawn into a string first: the note's own line says how many
-        ;; passages it contributes, and that is not known until the claim
-        ;; map has answered.
+        ;; The note's own line says how many passages it contributes, and
+        ;; that is not known until the claim map has answered.
         (dolist (section (cdr file))
           (let ((first t))
             (dolist (hit (cdr section))
-              (let ((block (org-semantic-results--block hit first claimed)))
+              (let ((block (org-semantic-results--block
+                            hit first claimed
+                            (lambda () (setq unfontified (1+ unfontified))))))
                 (if (null block)
                     (setq dropped (1+ dropped))
                   (setq first nil)
                   (push hit drawn)
                   (push block blocks))))))
         (when blocks
-          (setq blocks (nreverse blocks))
-          (org-semantic-results--insert-file
-           (car file) (org-semantic-results--note-name file) (length blocks))
-          (dolist (block blocks) (insert block)))))
+          (push (list file (nreverse blocks)) notes))))
+    (setq org-semantic-results--unfontified unfontified)
+    (erase-buffer)
+    (org-semantic-results--insert-header hits elapsed t)
+    (pcase-dolist (`(,file ,blocks) (nreverse notes))
+      (org-semantic-results--insert-file
+       (car file) (org-semantic-results--note-name file) (length blocks))
+      (dolist (block blocks) (insert block)))
     (setq org-semantic-results--hits (nreverse drawn))
     (when (> dropped 0)
       (insert (propertize
@@ -977,16 +988,31 @@ index reads as an answer."
                      (mapconcat #'identity facts "  ·  "))
              'face 'org-semantic-results-location
              'org-semantic-header t 'read-only t))
-    (if counts
-        (insert (propertize
-                 (format "%d note%s, %d passage%s%s%s\n\n"
-                         notes (if (= notes 1) "" "s")
-                         (length hits) (if (= (length hits) 1) "" "s")
-                         (if elapsed (format " in %.2f s" elapsed) "")
-                         (org-semantic-results--header-notes))
-                 'face 'org-semantic-results-location
-                 'org-semantic-header t 'read-only t))
-      (insert (propertize "\n" 'org-semantic-header t 'read-only t)))))
+    (when counts
+      (insert (propertize
+               (format "%d note%s, %d passage%s%s%s\n"
+                       notes (if (= notes 1) "" "s")
+                       (length hits) (if (= (length hits) 1) "" "s")
+                       (if elapsed (format " in %.2f s" elapsed) "")
+                       (org-semantic-results--header-notes))
+               'face 'org-semantic-results-location
+               'org-semantic-header t 'read-only t))
+      (when-let* ((line (org-semantic-results--unfontified-line
+                         org-semantic-results--unfontified)))
+        (insert (propertize (concat line "\n")
+                            'face 'org-semantic-results-location
+                            'org-semantic-header t 'read-only t))))
+    (insert (propertize "\n" 'org-semantic-header t 'read-only t))))
+
+(defun org-semantic-results--unfontified-line (count)
+  "The line that says font-lock failed on COUNT passages, or nil if on none.
+Each of those passages has its own error under it."
+  (when (> count 0)
+    (if (= count 1)
+        "Font-lock failed on 1 passage, which is shown without faces.  \
+The error is shown below it."
+      (format "Font-lock failed on %d passages, which are shown without faces.  \
+The error is shown below each one." count))))
 
 (defun org-semantic-results--note-name (group)
   "What to call the note GROUP is the hits of.
@@ -1080,8 +1106,9 @@ leave a line whose text nobody can point at."
           (setq from me)))))
   s)
 
-(defun org-semantic-results--fontified (text)
-  "TEXT with org's faces on it, or TEXT itself if that cannot be done."
+(defun org-semantic-results--fontified (text &optional failed)
+  "TEXT with org's faces on it, or TEXT itself if that cannot be done.
+FAILED, if non-nil, is called with the error when font-lock fails."
   (if (or (not org-semantic-results-fontify)
           (string-empty-p text)
           (not (require 'org nil t)))
@@ -1091,7 +1118,7 @@ leave a line whose text nobody can point at."
     ;; (org.el 5181), so asking there gets that buffer's own answer, which
     ;; is always t.
     (let ((descriptive (bound-and-true-p org-link-descriptive)))
-      (condition-case nil
+      (condition-case err
           (with-current-buffer (org-semantic-results--fontifier)
             (let ((inhibit-read-only t))
               (erase-buffer)
@@ -1101,19 +1128,30 @@ leave a line whose text nobody can point at."
                 (if descriptive
                     (org-semantic-results--hide-link-syntax out)
                   out))))
-        ;; A fontifier that fails must not cost the search its results.
-        (error text)))))
+        ;; Font-lock runs the code of the user's Org setup, so any error
+        ;; can come from it.  A fontifier that fails must not cost the
+        ;; search its results.
+        (error
+         (when failed (funcall failed err))
+         text)))))
 
-(defun org-semantic-results--block (hit first claimed)
+(defun org-semantic-results--block (hit first claimed &optional unfontified)
   "Draw HIT as a string, or nil if every line of it was already shown.
 
 FIRST says this is the leading passage of its section, which
 carries the outline path.  The passages after it name their lines
-instead.  CLAIMED is the claim map, and is added to."
+instead.  CLAIMED is the claim map, and is added to.
+
+When font-lock fails on the passage, a line under its head line
+gives the error, and UNFONTIFIED, if non-nil, is called with no
+arguments."
   (let* ((file (org-semantic-hit-file hit))
          (start (org-semantic-hit-start-line hit))
          (end (org-semantic-hit-end-line hit))
-         (text (org-semantic-results--fontified (or (org-semantic-hit-text hit) "")))
+         (failure nil)
+         (text (org-semantic-results--fontified
+                (or (org-semantic-hit-text hit) "")
+                (lambda (err) (setq failure (error-message-string err)))))
          (lines (and (not (string-empty-p text)) (split-string text "\n")))
          (stale (or (null lines)
                     (null start) (null end)
@@ -1133,6 +1171,14 @@ instead.  CLAIMED is the claim map, and is added to."
           (org-semantic-results--insert-block-head hit item first)
           (if stale
               (org-semantic-results--insert-stale item)
+            ;; Under the head line and not after the text, where a long
+            ;; passage puts it out of sight.  A stale passage shows no
+            ;; text, so a failure there is not drawn and not counted.
+            (when failure
+              (org-semantic-results--insert-unfontified
+               item failure
+               (length (number-to-string (+ start (length lines)))))
+              (when unfontified (funcall unfontified)))
             (org-semantic-results--insert-lines item lines start owned))
           (insert "\n"))
         (buffer-string)))))
@@ -1344,6 +1390,20 @@ INDENT is the gutter it lines up with."
            'org-semantic-item item
            'org-semantic-elision t
            'help-echo "TAB: show the rest of this passage"
+           'read-only t)))
+
+(defun org-semantic-results--insert-unfontified (item message width)
+  "Insert, for ITEM, the line that says font-lock failed with MESSAGE.
+WIDTH is the width of the line numbers, so the line starts where the
+note's own text starts."
+  (insert (propertize
+           (format "%sfont-lock failed, shown without faces: %s\n"
+                   (make-string (+ 4 (if org-semantic-results-line-numbers width 0))
+                                ?\s)
+                   message)
+           'face 'org-semantic-results-stale
+           'org-semantic-item item
+           ;; No `org-semantic-line': this is not a line of the note.
            'read-only t)))
 
 (defun org-semantic-results--insert-stale (item)
