@@ -1,0 +1,68 @@
+---
+
+# The checks MELPA's reviewers run, on every push: melpazoid
+# <https://github.com/riscy/melpazoid> byte-compiles the package as
+# package-build would, runs package-lint and checkdoc over it, and looks
+# for the habits MELPA asks packages to avoid.
+#
+# The CI job byte-compiles and runs checkdoc against the Emacs of the
+# runner.  This job runs them against the MELPA recipe and a current
+# checkout of package-lint, which is where a symbol newer than the
+# declared Emacs floor shows up.
+#
+# It fails the build only on errors.
+
+name: melpazoid
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  melpazoid:
+    runs-on: ubuntu-latest
+    name: MELPA checks
+    # Without a limit, a stalled apt-get keeps the job running for
+    # GitHub's default of 6 hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # melpazoid.py runs `emacs --batch' on the runner as well as in its
+      # container.  `emacs-nox' without recommends is far fewer packages
+      # than `emacs', and the man-db trigger, which runs after every
+      # install on the runner image, is turned off: both are where the
+      # install has stalled.
+      - name: Install melpazoid
+        timeout-minutes: 5
+        run: |
+          python -m pip install --upgrade pip
+          echo 'set man-db/auto-update false' | sudo debconf-communicate >/dev/null
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends emacs-nox
+          emacs --version
+          git clone https://github.com/riscy/melpazoid.git ~/melpazoid
+          pip install ~/melpazoid
+
+      - name: Run melpazoid
+        env:
+          LOCAL_REPO: ${{ github.workspace }}
+          # The recipe to submit to MELPA.  The elisp is under lisp/, and
+          # the tests under test/ are not part of the package.
+          RECIPE: '(org-semantic :fetcher github :repo "alberti42/org-semantic" :files ("lisp/*.el"))'
+          # Once the package is on MELPA, melpazoid would otherwise report
+          # that as a problem.
+          EXIST_OK: 'true'
+        run: make -C ~/melpazoid
