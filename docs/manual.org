@@ -537,9 +537,10 @@ note is about 70 ms: the note is re-chunked, and only the passages whose text
 actually moved are embedded again.
 
 It says nothing when it works, which is ~org-semantic-auto-reindex-quietly~; set
-it to nil to see each run reported. Failures are *not* quiet --- said once per
-vault, since an automatic feature that has stopped working looks exactly like one
-that is working.
+it to nil to see each run reported. Failures are *not* quiet, since an automatic
+feature that has stopped working looks exactly like one that is working. The
+same failure in the same vault is said at most once per hour, and the message
+says so; a different failure is said at once.
 
 Two things it deliberately will not do. It will not **build** an index that does
 not exist: that is minutes of embedding and a decision, so a vault with nothing
