@@ -22,8 +22,9 @@ It comes in two parts, and each works without the other. The search itself is a
 single Rust binary, with no database, no Python and no service: run it as a
 one-shot command, or drive it from your own tools. The Emacs package is its
 client. It starts the binary, keeps it resident over a pipe rather than a port,
-and draws the results. The model is downloaded once, and after that nothing
-leaves your machine.
+and draws the results. The models run on your machine, and no information from
+your notes or your searches is ever transmitted anywhere. Each model is
+downloaded once.
 
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
