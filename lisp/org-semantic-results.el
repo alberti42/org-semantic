@@ -258,8 +258,8 @@ when there are digits, and is invisible when there are none.")
 (defface org-semantic-results-duplicate '((t :inherit shadow))
   "Face for a passage line already shown, in full, further up.")
 
-(defface org-semantic-results-stale '((t :inherit warning))
-  "Face for a passage the note no longer has room for.")
+(defface org-semantic-results-warning '((t :inherit warning))
+  "Face for text in the results buffer that warns the user.")
 
 (defface org-semantic-results-elision '((t :inherit shadow :slant italic))
   "Face for the marker standing in for a folded passage tail.")
@@ -900,8 +900,11 @@ both of them read the same way."
                           (and org-semantic-results--drifted
                                (substitute-command-keys
                                 "exclusion list changed: \\[org-semantic-results-reindex] \
-updates the index"))))))
-    (if said (concat "  ·  " (mapconcat #'identity said "  ·  ")) "")))
+updates the index")))))
+        (sep (propertize "  ·  " 'face 'org-semantic-results-location)))
+    (mapconcat (lambda (note)
+                 (concat sep (propertize note 'face 'org-semantic-results-warning)))
+               said "")))
 
 (defun org-semantic-results--render (reply)
   "Draw REPLY over the whole buffer."
@@ -990,17 +993,19 @@ index reads as an answer."
              'org-semantic-header t 'read-only t))
     (when counts
       (insert (propertize
-               (format "%d note%s, %d passage%s%s%s\n"
-                       notes (if (= notes 1) "" "s")
-                       (length hits) (if (= (length hits) 1) "" "s")
-                       (if elapsed (format " in %.2f s" elapsed) "")
-                       (org-semantic-results--header-notes))
-               'face 'org-semantic-results-location
+               (concat (propertize
+                        (format "%d note%s, %d passage%s%s"
+                                notes (if (= notes 1) "" "s")
+                                (length hits) (if (= (length hits) 1) "" "s")
+                                (if elapsed (format " in %.2f s" elapsed) ""))
+                        'face 'org-semantic-results-location)
+                       (org-semantic-results--header-notes)
+                       "\n")
                'org-semantic-header t 'read-only t))
       (when-let* ((line (org-semantic-results--unfontified-line
                          org-semantic-results--unfontified)))
         (insert (propertize (concat line "\n")
-                            'face 'org-semantic-results-location
+                            'face 'org-semantic-results-warning
                             'org-semantic-header t 'read-only t))))
     (insert (propertize "\n" 'org-semantic-header t 'read-only t))))
 
@@ -1401,7 +1406,7 @@ note's own text starts."
                    (make-string (+ 4 (if org-semantic-results-line-numbers width 0))
                                 ?\s)
                    message)
-           'face 'org-semantic-results-stale
+           'face 'org-semantic-results-warning
            'org-semantic-item item
            ;; No `org-semantic-line': this is not a line of the note.
            'read-only t)))
@@ -1415,7 +1420,7 @@ several lines is therefore this, and not a blank line."
   (insert (propertize
            (concat "    (this passage could not be read: the note has changed"
                    " since it was indexed)\n")
-           'face 'org-semantic-results-stale
+           'face 'org-semantic-results-warning
            'org-semantic-item item
            ;; No `org-semantic-line': nothing may offer to go where it has
            ;; just said it cannot read.
@@ -1468,13 +1473,13 @@ because a new search is a new question.")
           (goto-char (point-max))
           (insert (propertize (format "\n%s\n"
                                       (org-semantic-ui-remedy-message remedy))
-                              'face 'org-semantic-results-stale 'read-only t)))
+                              'face 'org-semantic-results-warning 'read-only t)))
       (when latching (push kind org-semantic-results--latched))
       (erase-buffer)
       (org-semantic-results--insert-header nil nil)
       (insert (propertize (format "  %s\n"
                                   (org-semantic-ui-remedy-message remedy))
-                          'face 'org-semantic-results-stale 'read-only t))
+                          'face 'org-semantic-results-warning 'read-only t))
       (goto-char (point-min))
       (org-semantic-results--ask remedy error-object))))
 
