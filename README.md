@@ -1,6 +1,7 @@
 # org-semantic
 
 ![Made for GNU Emacs](https://img.shields.io/badge/Made%20for-GNU%20Emacs-7F5AB6?logo=gnuemacs&logoColor=white)
+[![melpazoid](https://github.com/alberti42/org-semantic/actions/workflows/melpazoid.yml/badge.svg)](https://github.com/alberti42/org-semantic/actions/workflows/melpazoid.yml)
 [![CI](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml/badge.svg)](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/alberti42/org-semantic)](LICENSE)
 
