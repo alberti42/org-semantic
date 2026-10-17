@@ -56,6 +56,37 @@ jobs:
           git clone https://github.com/riscy/melpazoid.git ~/melpazoid
           pip install ~/melpazoid
 
+      # Since melpazoid d7e253d, a run with LOCAL_REPO checks the recipe
+      # and the license only.  It does not build the package and does not
+      # run package-lint or checkdoc, and it still exits with 0
+      # (riscy/melpazoid#53).  This step moves the build call out of the
+      # branch that clones the repository.  When the code no longer
+      # matches, the step fails, so that the job does not skip the
+      # checks without anyone seeing it.
+      - name: Patch melpazoid
+        shell: python
+        run: |
+          import sys
+          from pathlib import Path
+
+          path = Path.home() / 'melpazoid' / 'melpazoid' / 'melpazoid.py'
+          text = path.read_text()
+          old = (
+              '            assert success\n'
+              '            check_containerized_build(recipe, repo)\n'
+          )
+          new = (
+              '            assert success\n'
+              '        check_containerized_build(recipe, repo)\n'
+          )
+          if text.count(old) != 1:
+              sys.exit('melpazoid.py no longer has the code this step fixes '
+                       '(riscy/melpazoid#53).  Check whether a LOCAL_REPO '
+                       'run builds the package now, and remove this step '
+                       'if it does.')
+          path.write_text(text.replace(old, new))
+          print('Patched melpazoid.py: a LOCAL_REPO run builds the package.')
+
       - name: Run melpazoid
         env:
           LOCAL_REPO: ${{ github.workspace }}
