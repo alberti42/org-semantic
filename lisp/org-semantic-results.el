@@ -1272,57 +1272,58 @@ already above them."
                    (propertize text 'face face) props start)))
          (sep (lambda (s) (funcall plain s 'org-semantic-results-location))))
     (insert
-     (concat
-      (funcall plain "  " 'default)
-      (funcall plain score 'org-semantic-results-score)
-      (funcall plain "  " 'default)
-      (when first
-        (concat
-         ;; A note at the vault root has no directory to show, and would
-         ;; otherwise be introduced by a bare separator.
-         (unless (string-empty-p directory)
-           (concat (org-semantic-results--link
-                    directory 'directory props nil
-                    "mouse-2: show this directory")
-                   (funcall sep " / ")))
-         (org-semantic-results--link
-          (file-name-nondirectory path) 'file props 1
-          "mouse-2: open this note")
-         (when sections
-           (concat (funcall sep " > ")
-                   (org-semantic-results--link
-                    sections 'heading props (org-semantic-hit-line hit)
-                    "mouse-2: go to this section")))
-         (funcall sep " > ")))
-      ;; A range, with both ends reachable.  A passage is lines FROM to TO,
-      ;; and either end is a place to go: the top to read it, the bottom to
-      ;; continue past it.
-      ;;
-      ;; Only when the span is real.  `item-line' is the heading's line for
-      ;; a passage the note has outgrown, so comparing the two keeps a
-      ;; stale block from offering a range it cannot honour.  A one-line
-      ;; passage says "line".
-      (if (and from to (eql start from) (> to from))
-          (concat (funcall plain "lines " 'default)
-                  (org-semantic-results--link
-                   (number-to-string from) 'line props from
-                   "mouse-2: go to where this passage starts")
-                  (funcall sep "–")
-                  (org-semantic-results--link
-                   (number-to-string to) 'line props to
-                   "mouse-2: go to where this passage ends"))
-        (concat (funcall plain "line " 'default)
-                (org-semantic-results--link
-                 (number-to-string start) 'line props start
-                 "mouse-2: go to this passage")))
-      ;; One space, as org separates a headline from its tags.  The middot
-      ;; in the header lines holds apart unrelated facts; tags follow what
-      ;; they belong to.
-      (if annotation
-          (concat (funcall plain " " 'default)
-                  (funcall plain annotation 'org-semantic-results-annotation))
-        "")
-      (funcall plain "\n" 'default)))))
+     (funcall plain "  " 'default)
+     (funcall plain score 'org-semantic-results-score)
+     (funcall plain "  " 'default)
+     (if first
+         (concat
+          ;; A note at the vault root has no directory to show, and would
+          ;; otherwise be introduced by a bare separator.
+          (unless (string-empty-p directory)
+            (concat (org-semantic-results--link
+                     directory 'directory props nil
+                     "mouse-2: show this directory")
+                    (funcall sep " / ")))
+          (org-semantic-results--link
+           (file-name-nondirectory path) 'file props 1
+           "mouse-2: open this note")
+          (when sections
+            (concat (funcall sep " > ")
+                    (org-semantic-results--link
+                     sections 'heading props (org-semantic-hit-line hit)
+                     "mouse-2: go to this section")))
+          (funcall sep " > "))
+       ;; `insert' refuses nil, so an empty string stands for no part.
+       "")
+     ;; A range, with both ends reachable.  A passage is lines FROM to TO,
+     ;; and either end is a place to go: the top to read it, the bottom to
+     ;; continue past it.
+     ;;
+     ;; Only when the span is real.  `item-line' is the heading's line for
+     ;; a passage the note has outgrown, so comparing the two keeps a
+     ;; stale block from offering a range it cannot honour.  A one-line
+     ;; passage says "line".
+     (if (and from to (eql start from) (> to from))
+         (concat (funcall plain "lines " 'default)
+                 (org-semantic-results--link
+                  (number-to-string from) 'line props from
+                  "mouse-2: go to where this passage starts")
+                 (funcall sep "–")
+                 (org-semantic-results--link
+                  (number-to-string to) 'line props to
+                  "mouse-2: go to where this passage ends"))
+       (concat (funcall plain "line " 'default)
+               (org-semantic-results--link
+                (number-to-string start) 'line props start
+                "mouse-2: go to this passage")))
+     ;; One space, as org separates a headline from its tags.  The middot
+     ;; in the header lines holds apart unrelated facts; tags follow what
+     ;; they belong to.
+     (if annotation
+         (concat (funcall plain " " 'default)
+                 (funcall plain annotation 'org-semantic-results-annotation))
+       "")
+     (funcall plain "\n" 'default))))
 
 (defun org-semantic-results--insert-lines (item lines start owned)
   "Insert LINES for ITEM as the note's own lines, the first being START.
