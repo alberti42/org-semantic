@@ -1424,8 +1424,8 @@ every save made during that run into the run that follows."
                 (org-semantic-auto-reindex--start os-vault mode)
               (org-semantic--say-seldom
                os-vault
-               (format (concat "org-semantic: %s has no index to keep up to "
-                               "date -- M-x org-semantic-reindex builds one")
+               (format "org-semantic: %s has no index to keep up to date \
+-- M-x org-semantic-reindex builds one"
                        (abbreviate-file-name os-vault)))))))
     ;; A server that will not start, or a binary that is not there: said,
     ;; and never signalled.  This runs from a timer, and an error there

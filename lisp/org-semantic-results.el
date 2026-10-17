@@ -79,7 +79,7 @@
   "How many lines of a passage to show before folding the rest away.
 
 A passage runs to the length of a section, which can be long.  The
-rest is hidden rather than dropped, and `TAB' unfolds it.  Nil
+rest is hidden rather than dropped, and TAB unfolds it.  Nil
 shows every line."
   :type '(choice (const :tag "All of them" nil) natnum))
 
@@ -116,7 +116,7 @@ results buffer, `l' changes it for the search on screen.
 It applies to a word search only.  An embedding has no terms to
 join, so the semantic ranking ignores it and the key refuses.
 
-A query can also write `AND', `OR', `NOT' and parentheses, so this
+A query can also write AND, OR, NOT and parentheses, so this
 is the default and not the only way to say it."
   :type '(choice (const :tag "All terms (AND)" and)
                  (const :tag "Any term (OR)" or)))
@@ -499,7 +499,7 @@ To have it on in every results buffer, put it on this mode's hook:
   ;; own `...' at the end of the last visible line, which repeats what
   ;; `⋯ 3 lines' already says.
   (add-to-invisibility-spec 'org-semantic-results)
-  ;; A second spec: `TAB' folds the tail of a passage away and back, and
+  ;; A second spec: TAB folds the tail of a passage away and back, and
   ;; must not take a link's brackets with it.
   (add-to-invisibility-spec 'org-semantic-results-link)
   (add-hook 'kill-buffer-hook #'org-semantic-results--abandon nil t)
@@ -1691,7 +1691,7 @@ Press \\[org-semantic-results-revert] to search again when that has finished.\n"
 (defun org-semantic-results--item-at-point ()
   "The block point is in, or nil."
   (or (get-text-property (point) 'org-semantic-item)
-      (and (> (point) (point-min))
+      (and (not (bobp))
            (get-text-property (1- (point)) 'org-semantic-item))))
 
 (defun org-semantic-results--items ()
@@ -2020,8 +2020,8 @@ key that changed it would appear to have done something."
 (defun org-semantic-results-set-notes (n)
   "Let at most N notes appear.
 
-The exact value, where `k' and `K' double and halve it.  Raising it
-widens the list.  It is the number the header calls `k'."
+The exact value, where k and K double and halve it.  Raising it
+widens the list.  It is the number the header calls k."
   (interactive
    (list (read-number "Notes at most: " (or org-semantic-results--k 8)))
    org-semantic-results-mode)
