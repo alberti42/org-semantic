@@ -652,7 +652,7 @@ Nothing waits and nothing is sent."
                     (push (apply #'format format args)
                           org-semantic-tests--said)))))
        (clrhash org-semantic-auto-reindex--timers)
-       (clrhash org-semantic-auto-reindex--said)
+       (org-semantic--unsilence)
        ,@body)))
 
 (ert-deftest saving-a-note-arms-one-reindex-however-many-saves ()
@@ -875,7 +875,43 @@ the condition holds until somebody acts on it."
           (org-semantic-auto-reindex--start vault "lexical"))
         (cl-letf (((symbol-function 'org-semantic-index) win))
           (org-semantic-auto-reindex--start vault "lexical"))
-        (should-not (gethash vault org-semantic-auto-reindex--said))))))
+        (should-not (gethash (cons vault (concat "org-semantic: "
+                                                 "the policy has changed"))
+                             org-semantic--said))))))
+
+(ert-deftest the-same-message-is-said-again-after-the-silence ()
+  "A message is silenced for an hour, not for the life of the process.
+
+Emacs can run for weeks as a daemon.  A rule of once per process
+would say that a vault has no index once, and then never again."
+  (let ((now 1000.0)
+        (said nil))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now))
+              ((symbol-function 'message)
+               (lambda (format &rest args)
+                 (push (apply #'format format args) said))))
+      (org-semantic--unsilence)
+      (org-semantic--say-seldom "/v" "broken")
+      (should (equal said
+                     '("broken (the same message is silenced for the next 3600 seconds)")))
+      ;; The same message, one second before the silence ends: nothing.
+      (setq now (+ 1000.0 org-semantic--silence -1))
+      (org-semantic--say-seldom "/v" "broken")
+      (should (= 1 (length said)))
+      ;; A different message, or another vault: said at once.
+      (org-semantic--say-seldom "/v" "broken differently")
+      (org-semantic--say-seldom "/w" "broken")
+      (should (= 3 (length said)))
+      ;; The same message after the silence: said again.
+      (setq now (+ 1000.0 org-semantic--silence))
+      (org-semantic--say-seldom "/v" "broken")
+      (should (= 4 (length said)))
+      ;; Ending the silence of one vault leaves the other silent.
+      (org-semantic--unsilence "/v")
+      (org-semantic--say-seldom "/v" "broken")
+      (org-semantic--say-seldom "/w" "broken")
+      (should (= 5 (length said)))
+      (org-semantic--unsilence))))
 
 (ert-deftest a-server-that-will-not-start-does-not-break-every-save ()
   "The run is on a timer, where an error is a backtrace nobody asked for.

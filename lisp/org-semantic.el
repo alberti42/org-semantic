@@ -1320,29 +1320,51 @@ An automatic reindex should not need attention, and a line in the
 echo area after every save asks for it.
 
 This applies to success only.  A vault with no index to refresh,
-and a run that failed, are said once: an automatic feature that has
-stopped working looks the same as one that is working."
+and a run that failed, are said: an automatic feature that has
+stopped working looks the same as one that is working.  The same
+message is said again after `org-semantic--silence' seconds at
+most; see `org-semantic--say-seldom'."
   :type 'boolean)
 
 (defvar org-semantic-auto-reindex--timers (make-hash-table :test 'equal)
   "The pending reindex of each vault, keyed by the vault.")
 
-(defvar org-semantic-auto-reindex--said (make-hash-table :test 'equal)
-  "What has been said about each vault, so it is not said again per save.")
+(defconst org-semantic--silence 3600
+  "Seconds for which `org-semantic--say-seldom' does not repeat a message.")
 
-(defun org-semantic-auto-reindex--say (os-vault what message)
-  "Say MESSAGE about OS-VAULT once, and remember it as WHAT.
+(defvar org-semantic--said (make-hash-table :test 'equal)
+  "When each message was last said, keyed by (VAULT . MESSAGE).
+See `org-semantic--say-seldom'.")
 
-Latched per vault, because each condition holds until somebody acts
-on it: a vault with no index still has none at the next save.
-Unlatched, `save-some-buffers' over fifty notes says the same
-sentence fifty times.
+(defun org-semantic--say-seldom (vault message)
+  "Say MESSAGE about VAULT in the echo area, unless it was said recently.
 
-WHAT is compared, not the sentence, so a different condition still
-speaks.  A run that works clears it."
-  (unless (eq what (gethash os-vault org-semantic-auto-reindex--said))
-    (puthash os-vault what org-semantic-auto-reindex--said)
-    (message "%s" message)))
+The same MESSAGE about the same VAULT is said again only after
+`org-semantic--silence' seconds.  A different message is said at
+once.  The text says that the message is silenced, so a reader who
+sees it only once knows why.
+
+A condition such as a vault with no index holds until somebody acts
+on it, and `save-some-buffers' over fifty notes would say the same
+sentence fifty times.  A process can run for weeks, so the message
+is said again while the condition holds.
+`org-semantic--unsilence' ends the silence before that."
+  (let ((key (cons vault message))
+        (now (float-time)))
+    (unless (when-let* ((last (gethash key org-semantic--said)))
+              (< (- now last) org-semantic--silence))
+      (puthash key now org-semantic--said)
+      (message "%s (the same message is silenced for the next %d seconds)"
+               message org-semantic--silence))))
+
+(defun org-semantic--unsilence (&optional vault)
+  "End the silence of the messages about VAULT, or about all vaults if nil."
+  (if (null vault)
+      (clrhash org-semantic--said)
+    (let ((keys nil))
+      (maphash (lambda (key _) (when (equal (car key) vault) (push key keys)))
+               org-semantic--said)
+      (dolist (key keys) (remhash key org-semantic--said)))))
 
 (defun org-semantic-auto-reindex--refreshable (vault)
   "Which of VAULT's indexes an automatic run may refresh, or nil.
@@ -1375,15 +1397,15 @@ noticed."
    :mode mode
    :success
    (lambda (result)
-     (remhash os-vault org-semantic-auto-reindex--said)
+     (org-semantic--unsilence os-vault)
      (unless org-semantic-auto-reindex-quietly
        (message "org-semantic: indexed %s%s"
                 (abbreviate-file-name os-vault)
                 (org-semantic--summarise result))))
    :failure
    (lambda (error-object)
-     (org-semantic-auto-reindex--say
-      os-vault 'failed
+     (org-semantic--say-seldom
+      os-vault
       (format "org-semantic: %s"
               (or (plist-get error-object :message) "the index failed"))))))
 
@@ -1403,16 +1425,16 @@ every save made during that run into the run that follows."
           (let ((mode (org-semantic-auto-reindex--refreshable os-vault)))
             (if mode
                 (org-semantic-auto-reindex--start os-vault mode)
-              (org-semantic-auto-reindex--say
-               os-vault 'no-index
+              (org-semantic--say-seldom
+               os-vault
                (format (concat "org-semantic: %s has no index to keep up to "
                                "date -- M-x org-semantic-reindex builds one")
                        (abbreviate-file-name os-vault)))))))
-    ;; A server that will not start, or a binary that is not there: said
-    ;; once, and never signalled.  This runs from a timer, and an error
-    ;; there would also stop later saves from trying.
-    (error (org-semantic-auto-reindex--say
-            os-vault 'broken
+    ;; A server that will not start, or a binary that is not there: said,
+    ;; and never signalled.  This runs from a timer, and an error there
+    ;; would also stop later saves from trying.
+    (error (org-semantic--say-seldom
+            os-vault
             (format "org-semantic: %s" (error-message-string error))))))
 
 (defun org-semantic-auto-reindex--arm (vault)
@@ -1468,7 +1490,7 @@ that does watch it can call `org-semantic-auto-reindex-touch', and
 `org-semantic-reindex' catches up at any time."
   :global t
   :group 'org-semantic
-  (clrhash org-semantic-auto-reindex--said)
+  (org-semantic--unsilence)
   (if org-semantic-auto-reindex-mode
       (add-hook 'after-save-hook #'org-semantic-auto-reindex--on-save)
     (remove-hook 'after-save-hook #'org-semantic-auto-reindex--on-save)
