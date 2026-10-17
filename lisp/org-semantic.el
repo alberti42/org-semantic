@@ -294,16 +294,20 @@ anywhere.  A file that is absent, unreadable or silent answers
 VAULT, which is also the server's default."
   (let ((said (expand-file-name org-semantic-vault-file vault)))
     (or (and (file-readable-p said)
-             (ignore-errors
-               (let ((notes (plist-get (with-temp-buffer
-                                         (insert-file-contents said)
-                                         (json-parse-buffer :object-type 'plist))
-                                       :notes)))
-                 (and (stringp notes)
-                      ;; `expand-file-name' against the vault covers all three
-                      ;; forms the server accepts: absolute, `~/...', and
-                      ;; relative to the vault.
-                      (org-semantic-canonical-vault (expand-file-name notes vault))))))
+             (let ((notes (condition-case nil
+                              (plist-get (with-temp-buffer
+                                           (insert-file-contents said)
+                                           (json-parse-buffer :object-type 'plist))
+                                         :notes)
+                            ;; The file can go away after the test above.
+                            (file-error nil)
+                            ;; The server reports a file that is not JSON.
+                            (json-error nil))))
+               (and (stringp notes)
+                    ;; `expand-file-name' against the vault covers all three
+                    ;; forms the server accepts: absolute, `~/...', and
+                    ;; relative to the vault.
+                    (org-semantic-canonical-vault (expand-file-name notes vault)))))
         vault)))
 
 (defun org-semantic-vault-or-error (&optional buffer)
@@ -691,8 +695,12 @@ different release."
   "Whether FOUND is a binary version older than this package can use.
 
 Nil for a version at or above the minimum, and nil for nil.  A
-binary that will not say what it is has not said it is too old."
-  (and found (ignore-errors (version< found org-semantic-minimum-binary-version))))
+binary that will not say what it is has not said it is too old.
+FOUND is a version only when it is numbers separated by dots, which
+is what the binary prints."
+  (and found
+       (string-match-p "\\`[0-9]+\\(?:\\.[0-9]+\\)*\\'" found)
+       (version< found org-semantic-minimum-binary-version)))
 
 (defun org-semantic--check-version (found where)
   "Warn when FOUND is too old for this package.  WHERE says what was asked.
