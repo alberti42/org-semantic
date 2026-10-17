@@ -50,10 +50,10 @@
 
 ;;; Code:
 
-(declare-function pretty-tables-enable "pretty-tables")
-(declare-function pretty-tables-disable "pretty-tables")
-(declare-function pretty-tables-for-org-table "pretty-tables-for-org")
-(declare-function pretty-tables-for-org-draw-separator "pretty-tables-for-org")
+(declare-function pretty-tables-enable "ext:pretty-tables")
+(declare-function pretty-tables-disable "ext:pretty-tables")
+(declare-function pretty-tables-for-org-table "ext:pretty-tables-for-org")
+(declare-function pretty-tables-for-org-draw-separator "ext:pretty-tables-for-org")
 
 (defun org-semantic-pretty-tables--text-start (bol)
   "Return where the text of the note starts on the line at BOL.
