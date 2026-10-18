@@ -301,7 +301,7 @@ reason --- =org-semantic-<version>-src.tar.gz=, with its hash in the same
 it, and build it:
 
 #+begin_src sh
-V=0.8.1
+V=0.8.2
 BASE=https://github.com/alberti42/org-semantic/releases/download/v$V
 curl -LO $BASE/org-semantic-$V-src.tar.gz
 curl -LO $BASE/SHA256SUMS
@@ -907,7 +907,7 @@ configuring either:
 
 #+begin_src sh
 mkdir -p ~/.config/emacs/org-semantic
-tar xzf org-semantic-0.8.1-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
+tar xzf org-semantic-0.8.2-bin-aarch64-macos.tar.gz -C ~/.config/emacs/org-semantic
 #+end_src
 
 Release assets are =org-semantic-<version>-bin-<platform>= for the binaries and

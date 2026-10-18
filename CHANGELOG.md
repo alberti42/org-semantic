@@ -61,6 +61,19 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [0.8.2] — 2026-10-18
+
+Binary version **0.6.1**, the same as in 0.8.1. The version floor does not
+move.
+
+### Changed
+
+- **The package description describes the whole package.** MELPA and
+  `M-x describe-package` show the Commentary of `org-semantic.el`. It
+  described only the file that talks to the binary, and it said that the
+  package had no results buffer. It now says what the package does, how it
+  works, and how to start.
+
 ## [0.8.1] — 2026-10-17
 
 Binary version **0.6.1**, the same as in 0.8.0. The version floor does not
@@ -943,7 +956,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.2
 [0.8.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.1
 [0.8.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.0
 [0.7.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.7.1
