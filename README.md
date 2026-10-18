@@ -1,6 +1,8 @@
 # org-semantic
 
 ![Made for GNU Emacs](https://img.shields.io/badge/Made%20for-GNU%20Emacs-7F5AB6?logo=gnuemacs&logoColor=white)
+[![MELPA](https://melpa.org/packages/org-semantic-badge.svg)](https://melpa.org/#/org-semantic)
+[![MELPA Stable](https://stable.melpa.org/packages/org-semantic-badge.svg)](https://stable.melpa.org/#/org-semantic)
 [![melpazoid](https://github.com/alberti42/org-semantic/actions/workflows/melpazoid.yml/badge.svg)](https://github.com/alberti42/org-semantic/actions/workflows/melpazoid.yml)
 [![CI](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml/badge.svg)](https://github.com/alberti42/org-semantic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/alberti42/org-semantic)](LICENSE)
@@ -101,13 +103,14 @@ vault rather than an index of it. It is off until you press `f`, or until the
 
 ### Setting it up
 
-The package is in [`lisp/`](lisp/). There are no default global bindings and
+The package is on [MELPA](https://melpa.org/#/org-semantic): `M-x
+package-install RET org-semantic`. There are no default global bindings and
 there will not be — `C-c` and a plain letter is yours rather than a package's —
 so a recommendation is as far as this goes:
 
 ```elisp
-(use-package org-semantic-results
-  :load-path "/path/to/org-semantic/lisp"
+(use-package org-semantic
+  :ensure t
   :custom (org-semantic-vault-root "~/notes")
   :bind (("C-c n s" . org-semantic-find)
          ("C-c n S" . org-semantic-find-in-directory)

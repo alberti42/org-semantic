@@ -262,6 +262,9 @@ clone.
 :PROPERTIES:
 :CUSTOM_ID: install
 :END:
+The Emacs package is on [[https://melpa.org/#/org-semantic][MELPA]]: =M-x package-install RET org-semantic=. It
+needs the binary, which the rest of this section is about.
+
 #+begin_src sh
 cargo install --git https://github.com/alberti42/org-semantic
 #+end_src
@@ -470,13 +473,12 @@ Each model keeps its own semantic index, so several can be built side by side;
 #+attr_html: :alt The org-semantic results buffer, showing an English question answered by Italian notes and English ones ranked together
 [[file:images/results-buffer.png]]
 
-The package lives in =lisp/=. Put it on your ~load-path~ and tell it where the
-binary is, if it is not already on your =PATH=:
+The package is on [[https://melpa.org/#/org-semantic][MELPA]]: =M-x package-install RET org-semantic=. The
+binary needs no setting: the first search offers to download it into
+~org-semantic-install-directory~, where the package finds it.
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/org-semantic/lisp")
-(require 'org-semantic-results)
-(setq org-semantic-executable "/path/to/org-semantic")
+(setq org-semantic-vault-root "~/notes")
 
 ;; Optional, and explained below: reindex a vault as its notes are saved, so
 ;; that a note written now is searchable a couple of seconds later rather than
@@ -490,9 +492,9 @@ is reserved for you rather than for a package, so a recommendation is as far as
 this can go.
 
 #+begin_src emacs-lisp
-(use-package org-semantic-results
-  :load-path "/path/to/org-semantic/lisp"
-  :custom (org-semantic-executable "/path/to/org-semantic")
+(use-package org-semantic
+  :ensure t
+  :custom (org-semantic-vault-root "~/notes")
   :bind (("C-c n s" . org-semantic-find)
          ("C-c n S" . org-semantic-find-in-directory)
          ("C-c n ." . org-semantic-find-at-point)
