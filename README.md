@@ -28,6 +28,9 @@ and draws the results. The models run on your machine, and no information from
 your notes or your searches is ever transmitted anywhere. Each model is
 downloaded once.
 
+Disclosure: Written with AI assistance (Claude). Every change is reviewed and
+tested by the author, and design decisions are the author's.
+
 **[Full documentation](https://alberti42.github.io/org-semantic/)**
 
 ## What it does
