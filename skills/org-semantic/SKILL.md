@@ -65,8 +65,11 @@ Each hit is an object:
 
 That is every key: nothing else is sent, and none of them is ever absent —
 `z`, `id`, `section`, `todo`, `priority` and `lang` are `null` when they do not
-apply. `path` is vault-relative and `file` is it joined to the vault you named,
-so `file` is absolute only if your vault argument was.
+apply. `path` is relative to the notes directory and `file` is it joined to
+that directory. The notes directory is the vault you named, unless
+`.org-semantic-vault.json` in the vault names another one. So open `file`, and
+do not join `path` to the vault yourself. `file` is absolute only if your vault
+argument was.
 
 - **`z` is the figure to trust for semantic hits** — how many standard
   deviations above the corpus's own background a hit sits. Raw `score` is mostly
