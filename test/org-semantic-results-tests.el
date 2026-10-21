@@ -586,6 +586,22 @@ in the results buffer could not reach what was typed to get there."
       (should-not (nth 1 at-point))
       (should (equal (nth 1 refine) "old")))))
 
+(ert-deftest an-empty-answer-searches-for-the-thing-at-point ()
+  "RET at the prompt searches for the default, not for nothing.
+
+`read-from-minibuffer' returns \"\" for empty input and not its
+DEFAULT, so the stub returns \"\" as the real function does.  Issue 1:
+the prompt showed the default and RET searched for the empty string."
+  (let (asked)
+    (cl-letf (((symbol-function 'read-from-minibuffer) (lambda (&rest _) ""))
+              ((symbol-function 'org-semantic-find)
+               (lambda (query &optional _arg mode) (setq asked (cons query mode))))
+              ((symbol-function 'use-region-p) #'ignore)
+              ((symbol-function 'thing-at-point) (lambda (&rest _) "atpoint")))
+      (let ((org-semantic-results-ranking "lexical"))
+        (call-interactively #'org-semantic-find-at-point)))
+    (should (equal asked '("atpoint" . "lexical")))))
+
 (ert-deftest the-buffer-asks-to-be-shown-and-does-not-insist ()
   "The action is passed to `display-buffer', not written into the user's alist.
 
