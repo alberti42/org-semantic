@@ -121,8 +121,11 @@ looking at this cap rather than at the whole of what matched.
 The vault must be indexed. Check with:
 
 ```sh
-org-semantic models <vault>     # shows which indexes exist
+org-semantic doctor <vault>     # "Built" lists the indexes that exist
 ```
+
+`models <vault>` lists the semantic models and does not show the lexical
+index, so do not use it for this check.
 
 If nothing is built, **ask the user before indexing** — a semantic index takes
 minutes and downloads a model. A lexical index takes a second:
