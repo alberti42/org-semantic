@@ -61,6 +61,16 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+### Fixed
+
+- **RET at the `org-semantic-find-at-point` prompt searches for the
+  default.** The prompt showed the thing at point as the default, but RET
+  searched for the empty string and found nothing. `read-from-minibuffer`
+  returns the empty string for empty input, not its default. Reported in
+  [#1](https://github.com/alberti42/org-semantic/issues/1).
+
 ## [0.8.2] — 2026-10-18
 
 Binary version **0.6.1**, the same as in 0.8.1. The version floor does not
