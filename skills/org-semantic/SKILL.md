@@ -51,6 +51,10 @@ org-semantic search <vault> 'tag:Literature dir:"03 Reviews" quantum error corre
 
 ## Reading the result
 
+The output is one object, `{"hits": [...]}`. An empty list means nothing
+matched. The passages of one section are next to each other, and the sections
+are in the order of their best passage. So the list is not sorted by `score`: a
+weaker passage of the first section comes before a stronger one of the second.
 Each hit is an object:
 
 ```json
