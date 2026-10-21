@@ -4,7 +4,7 @@
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 0.8.2
+;; Version: 0.8.3
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
 ;; SPDX-License-Identifier: MIT

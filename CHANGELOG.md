@@ -61,7 +61,10 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
-## [Unreleased]
+## [0.8.3] — 2026-10-21
+
+Binary version **0.6.1**, the same as in 0.8.2. The version floor does not
+move.
 
 ### Fixed
 
@@ -966,7 +969,8 @@ is read-only by design for now.
 - The Emacs package does not install or update the binary yet. It checks the
   version in both directions and warns; there is nothing to fetch with.
 
-[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/alberti42/org-semantic/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.3
 [0.8.2]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.2
 [0.8.1]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.1
 [0.8.0]: https://github.com/alberti42/org-semantic/releases/tag/v0.8.0
