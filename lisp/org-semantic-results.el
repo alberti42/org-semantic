@@ -703,7 +703,8 @@ ranking never costs the query.
 
 INITIAL is text to edit; DEFAULT is offered instead, for
 `org-semantic-find-at-point', where the thing at point is a
-suggestion rather than something the user typed."
+suggestion rather than something the user typed.  An empty answer
+returns DEFAULT."
   (let ((switch nil)
         (map (make-sparse-keymap)))
     (set-keymap-parent map minibuffer-local-map)
@@ -720,11 +721,15 @@ suggestion rather than something the user typed."
                          (capitalize mode)
                          (if default (format " (default %s)" default) ""))
                  initial map nil 'org-semantic-search-history default)))
-      (if switch
-          ;; What was typed becomes the text to go on editing: the ranking
-          ;; changed, the query did not.
-          (org-semantic-results--read-query switch text default)
-        (cons text mode)))))
+      (cond (switch
+             ;; What was typed becomes the text to go on editing: the
+             ;; ranking changed, the query did not.
+             (org-semantic-results--read-query switch text default))
+            ;; `read-from-minibuffer' returns "" for empty input, not
+            ;; DEFAULT.  `read-string' would return DEFAULT, but it takes
+            ;; no keymap.
+            ((and default (equal text "")) (cons default mode))
+            (t (cons text mode))))))
 
 (defvar org-semantic-search-history nil
   "Queries searched for, most recent first.
