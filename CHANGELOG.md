@@ -66,6 +66,15 @@ built. It then publishes a **draft** release for review.
 Binary version **0.6.2**. The version floor rises to 0.6.2, so Emacs asks
 every user to update the binary. The fix changes only Windows.
 
+### Changed
+
+- **The warning about a binary that is too old says how to update it.** It
+  said only "update the binary". It now says to run
+  `M-x org-semantic-binary-install`, then `M-x org-semantic-restart`, because
+  the running server keeps the old binary until it restarts. When
+  `org-semantic-executable` is an absolute path, it says to replace that file
+  instead.
+
 ### Fixed
 
 - **On Windows, a jump to a hit no longer asks whether the note changed on
