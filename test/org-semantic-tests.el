@@ -363,6 +363,21 @@ is said."
         (org-semantic-minimum-binary-version "0.1.0"))
     (should-not (org-semantic--too-old-p "0.1.0"))))
 
+(ert-deftest a-program-that-is-not-org-semantic-is-named ()
+  "A wrong `org-semantic-executable' fails at start.
+The error names the file, so the user knows what to check.  The
+error from jsonrpc.el said only \"Server died\"."
+  (let ((true (executable-find "true")))
+    (skip-unless true)
+    (let* ((org-semantic-executable true)
+           (org-semantic--connection nil)
+           (err (should-error (org-semantic-connection))))
+      (should (string-match-p
+               (concat (regexp-quote true)
+                       " did not start as an org-semantic server (Server died)")
+               (error-message-string err)))
+      (should-not org-semantic--connection))))
+
 (ert-deftest a-binary-too-old-says-how-to-update-it ()
   "The warning names the commands that update the binary.
 An absolute `org-semantic-executable' wins over the install

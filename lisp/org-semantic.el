@@ -836,10 +836,22 @@ directory."
             ;; started, and it is the same file.
             (setq org-semantic--server-version
                   (plist-get (plist-get info :serverInfo) :version)))
-        ((jsonrpc-error error quit)
+        (quit
          (jsonrpc-shutdown connection 'cleanup)
-         (signal (car err) (cdr err)))))
+         (signal (car err) (cdr err)))
+        ((jsonrpc-error error)
+         (jsonrpc-shutdown connection 'cleanup)
+         (error "%s did not start as an org-semantic server (%s)"
+                binary (org-semantic--start-failure err)))))
     connection))
+
+(defun org-semantic--start-failure (err)
+  "The reason in ERR, an error from the handshake, as a short string.
+A `jsonrpc-error' carries the reason as `jsonrpc-error-message', for
+example \"Server died\" or \"Timed out\"."
+  (or (and (eq (car err) 'jsonrpc-error)
+           (alist-get 'jsonrpc-error-message (cdr err)))
+      (error-message-string err)))
 
 (defun org-semantic-connection ()
   "Return a running server, starting one if there is none."
