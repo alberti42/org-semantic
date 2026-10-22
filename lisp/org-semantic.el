@@ -4,7 +4,7 @@
 
 ;; Author: Andrea Alberti <a.alberti82@gmail.com>
 ;; Assisted-by: Claude:claude-opus-4-8
-;; Version: 0.8.3
+;; Version: 0.8.4
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: outlines, matching, convenience
 ;; URL: https://github.com/alberti42/org-semantic
@@ -74,14 +74,14 @@
 (require 'jsonrpc)
 (require 'url-handlers)
 
-(defconst org-semantic-version "0.8.3"
+(defconst org-semantic-version "0.8.4"
   "The release this package is from.
 
 It moves whenever anything here ships, including a change to one
 file.  It is not what the binary reports; the two are compared
 through `org-semantic-minimum-binary-version'.")
 
-(defconst org-semantic-minimum-binary-version "0.6.1"
+(defconst org-semantic-minimum-binary-version "0.6.2"
   "The oldest binary this package knows how to talk to.
 
 Raise it when the elisp needs something the server did not have: a
