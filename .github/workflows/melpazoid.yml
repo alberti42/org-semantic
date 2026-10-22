@@ -16,7 +16,7 @@ name: melpazoid
 
 on:  # yamllint disable-line rule:truthy
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
   workflow_dispatch:
 
