@@ -61,6 +61,18 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+### Fixed
+
+- **On Windows, a jump to a hit no longer asks whether the note changed on
+  disk.** When `.org-semantic-vault.json` names the notes, the binary sent
+  each path with the `\\?\` prefix, for example `\\?\C:\notes\work.org`.
+  Emacs reads that as a network path, so it opened the note in a second
+  buffer and could not read its modification time. The binary now sends
+  `C:\notes\work.org`. Reported in
+  [#2](https://github.com/alberti42/org-semantic/issues/2).
+
 ## [0.8.3] — 2026-10-21
 
 Binary version **0.6.1**, the same as in 0.8.2. The version floor does not
