@@ -2840,6 +2840,34 @@ struct Filters {
     text: String,
 }
 
+/// The path with symlinks and `..` resolved, in the form other programs read.
+///
+/// On Windows `fs::canonicalize` returns a verbatim path, `\\?\C:\notes`.
+/// Emacs does not read that prefix. It sees a network path, so a jump to a hit
+/// opens a second buffer and asks whether the file changed on disk. Every
+/// path that leaves this program comes through here.
+fn canonical(p: &Path) -> io::Result<PathBuf> {
+    let c = p.canonicalize()?;
+    if cfg!(windows) {
+        if let Some(plain) = c.to_str().and_then(without_verbatim) {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(c)
+}
+
+/// `\\?\C:\x` as `C:\x`, and `\\?\UNC\host\share` as `\\host\share`.
+/// Any other verbatim path gives `None`, because it has no plain form.
+fn without_verbatim(s: &str) -> Option<String> {
+    let rest = s.strip_prefix(r"\\?\")?;
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    let b = rest.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    drive.then(|| rest.to_string())
+}
+
 /// `~` and `~/…` as the shell would, and everything else untouched.
 ///
 /// Only the bare `~` form: `~other/…` is another user's home, which needs the
@@ -2873,7 +2901,7 @@ impl Filters {
     /// it to return no hits would say "nothing matched your search" when the truth
     /// is "that directory is not in this collection".
     fn relative_to(&mut self, vault: &Path) -> Result<()> {
-        let root = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+        let root = canonical(vault).unwrap_or_else(|_| vault.to_path_buf());
         for d in self.dirs.iter_mut().chain(self.not_dirs.iter_mut()) {
             let expanded = expand_tilde(d);
             let p = Path::new(&expanded);
@@ -2882,7 +2910,7 @@ impl Filters {
                 *d = d.trim_start_matches("./").to_string();
                 continue;
             }
-            let abs = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let abs = canonical(p).unwrap_or_else(|_| p.to_path_buf());
             let rel = abs.strip_prefix(&root).map_err(|_| {
                 anyhow!(
                     "dir:{d} is not inside {} — an absolute dir: must name a directory of the vault",
@@ -3948,7 +3976,7 @@ fn notes_root(vault: &Path) -> Result<PathBuf> {
     // `…/state/../notes` is what every message and every `models` line would
     // otherwise print.  Canonicalising also makes `dir:` comparisons and the
     // client's own containment check agree with what is stored.
-    let notes = joined.canonicalize().unwrap_or(joined);
+    let notes = canonical(&joined).unwrap_or(joined);
     if !notes.is_dir() {
         return Err(anyhow!(
             "{} names {} as the notes, and it is not a directory",
@@ -3964,7 +3992,7 @@ fn notes_root(vault: &Path) -> Result<PathBuf> {
     let onward = vault_file(&notes);
     // Compared canonically, or `"notes": "."` reads as a vault naming somebody
     // else and is refused as a chain it is not.
-    let elsewhere = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf()) != notes;
+    let elsewhere = canonical(vault).unwrap_or_else(|_| vault.to_path_buf()) != notes;
     if elsewhere {
         if let Ok(bytes) = fs::read(&onward) {
             let file: VaultFile = serde_json::from_slice(&bytes)
@@ -7443,7 +7471,7 @@ mod tests {
 
         // Relative to the vault, and normalised: `state/../notes` is not what a
         // message should print, nor what a client should be handed.
-        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+        assert_eq!(notes_root(&state).unwrap(), canonical(&notes).unwrap());
 
         let cfg = Config::default();
         let lang = LangConfig::default();
@@ -7602,7 +7630,7 @@ mod tests {
 
         // Where it belongs now, and it works.
         fs::write(vault_file(&state), r#"{"notes":"../old-vault-place-notes"}"#).unwrap();
-        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+        assert_eq!(notes_root(&state).unwrap(), canonical(&notes).unwrap());
 
         // And the old place is named, with where to put it.
         fs::create_dir_all(state_dir(&state)).unwrap();
@@ -7662,7 +7690,7 @@ mod tests {
         // would close that door.
         fs::write(vault_file(&notes), r#"{"version":1}"#).unwrap();
         fs::write(&said, r#"{"notes":"../notes"}"#).unwrap();
-        assert_eq!(notes_root(&state).unwrap(), notes.canonicalize().unwrap());
+        assert_eq!(notes_root(&state).unwrap(), canonical(&notes).unwrap());
     }
 
     /// A vault with no notes at all is said, and notes left beside the index too.
@@ -10401,7 +10429,7 @@ mod tests {
     fn an_absolute_dir_names_the_same_place_as_a_relative_one() {
         let v = scratch("dir-abs");
         fs::create_dir_all(v.join("08 Conferences/2024")).unwrap();
-        let root = v.canonicalize().unwrap();
+        let root = canonical(&v).unwrap();
 
         let rel = |q: &str| {
             let mut f = parse_query(q);
@@ -10427,6 +10455,18 @@ mod tests {
         let err = rel("dir:/etc x").unwrap_err().to_string();
         assert!(err.contains("not inside"), "{err}");
         assert!(err.contains("dir:/etc"), "and names what was asked for: {err}");
+    }
+
+    /// Issue #2: Emacs reads `\\?\C:\x` as a network path, so every jump to a
+    /// hit asked whether the note had changed on disk.
+    #[test]
+    fn a_windows_path_leaves_without_its_verbatim_prefix() {
+        let plain = |s: &str| without_verbatim(s);
+        assert_eq!(plain(r"\\?\C:\Users\me\notes").as_deref(), Some(r"C:\Users\me\notes"));
+        assert_eq!(plain(r"\\?\UNC\host\share\notes").as_deref(), Some(r"\\host\share\notes"));
+        assert_eq!(plain(r"C:\Users\me\notes"), None, "a plain path is not verbatim");
+        assert_eq!(plain(r"\\?\Volume{1234}\notes"), None, "no plain form exists");
+        assert_eq!(plain("/Users/me/notes"), None);
     }
 
     #[test]
