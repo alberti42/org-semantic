@@ -736,13 +736,23 @@ is what the binary prints."
   "Warn when FOUND is too old for this package.  WHERE says what was asked.
 
 Only the lower bound is checked.  A newer binary is not reported;
-see `org-semantic-minimum-binary-version'."
+see `org-semantic-minimum-binary-version'.
+
+The warning says which commands update the binary.  An absolute
+`org-semantic-executable' is used before the install directory, so
+for that binary the warning does not suggest
+`org-semantic-binary-install'."
   (when (org-semantic--too-old-p found)
     (display-warning
      'org-semantic
-     (format "%s is org-semantic %s, but this package needs %s or newer; \
-update the binary"
-             where found org-semantic-minimum-binary-version))))
+     (format "%s is org-semantic %s, but this package needs %s or newer.  %s"
+             where found org-semantic-minimum-binary-version
+             (if (file-name-absolute-p org-semantic-executable)
+                 (format "Replace %s with a newer build, \
+then run `M-x org-semantic-restart'."
+                         org-semantic-executable)
+               "Run `M-x org-semantic-binary-install', \
+then `M-x org-semantic-restart'.")))))
 
 (defun org-semantic--handle-notification (_conn method params)
   "Handle METHOD with PARAMS, a notification from the server.

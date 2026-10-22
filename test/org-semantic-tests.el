@@ -363,6 +363,28 @@ is said."
         (org-semantic-minimum-binary-version "0.1.0"))
     (should-not (org-semantic--too-old-p "0.1.0"))))
 
+(ert-deftest a-binary-too-old-says-how-to-update-it ()
+  "The warning names the commands that update the binary.
+An absolute `org-semantic-executable' wins over the install
+directory, so for it the install command would change nothing."
+  (let ((org-semantic-minimum-binary-version "0.2.0")
+        said)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &rest _) (setq said message))))
+      (let ((org-semantic-executable "org-semantic"))
+        (org-semantic--check-version "0.1.0" "the running server")
+        (should (string-match-p "org-semantic-binary-install" said))
+        (should (string-match-p "org-semantic-restart" said)))
+      (setq said nil)
+      (let ((org-semantic-executable "/opt/build/org-semantic"))
+        (org-semantic--check-version "0.1.0" "the running server")
+        (should (string-match-p "Replace /opt/build/org-semantic" said))
+        (should-not (string-match-p "org-semantic-binary-install" said))
+        (should (string-match-p "org-semantic-restart" said)))
+      (setq said nil)
+      (org-semantic--check-version "0.2.0" "the running server")
+      (should-not said))))
+
 
 ;;;; Where the server downloads its models
 
