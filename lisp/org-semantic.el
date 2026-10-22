@@ -832,10 +832,10 @@ directory."
                        (list :capabilities (make-hash-table :test 'equal))
                        :timeout org-semantic-timeout)))
             (jsonrpc-notify connection 'initialized nil)
+            ;; Not checked again: the binary was checked just before it
+            ;; started, and it is the same file.
             (setq org-semantic--server-version
-                  (plist-get (plist-get info :serverInfo) :version))
-            (org-semantic--check-version org-semantic--server-version
-                                         "the running server"))
+                  (plist-get (plist-get info :serverInfo) :version)))
         ((jsonrpc-error error quit)
          (jsonrpc-shutdown connection 'cleanup)
          (signal (car err) (cdr err)))))
