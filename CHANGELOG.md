@@ -61,6 +61,16 @@ The workflow refuses the tag unless it matches `org-semantic-version`, the
 changelog has a section for it, and the floor is not above the binary being
 built. It then publishes a **draft** release for review.
 
+## [Unreleased]
+
+### Changed
+
+- **A program that does not start as an org-semantic server is named.**
+  When `org-semantic-executable` names another program, starting the server
+  failed with only "Server died" or "Timed out". The error now names the
+  file that Emacs ran, for example `/usr/bin/true did not start as an
+  org-semantic server (Server died)`.
+
 ## [0.8.4] — 2026-10-22
 
 Binary version **0.6.2**. The version floor rises to 0.6.2, so Emacs asks
